@@ -1,0 +1,65 @@
+# JobPilot — Phase 0 stack.
+# Postgres+pgvector and Redis are started now so the environment is ready for Phase 1+,
+# even though the Phase 0 health check only exercises backend + frontend.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-jobpilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobpilot_dev_pw}
+      POSTGRES_DB: ${POSTGRES_DB:-jobpilot}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jobpilot} -d ${POSTGRES_DB:-jobpilot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    env_file:
+      - path: .env
+        required: false # copy .env.example -> .env for real secrets; defaults cover dev
+    environment:
+      # Override host-oriented .env values for in-network service names.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jobpilot}:${POSTGRES_PASSWORD:-jobpilot_dev_pw}@db:5432/${POSTGRES_DB:-jobpilot}
+      REDIS_URL: redis://redis:6379/0
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Inlined into the client bundle at build time; the browser hits localhost.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  redisdata:
