@@ -1,0 +1,20 @@
+# Build context is the repo root for the backend and mcp images. Keep it lean.
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/node_modules/
+**/.next/
+frontend/
+.git/
+.github/
+.storage/
+pgdata/
+redisdata/
+miniodata/
+**/.env
+*.md
+directions/

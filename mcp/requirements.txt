@@ -1,0 +1,3 @@
+# MCP service deps. The shared data layer comes from ../packages/core.
+mcp==1.28.1
+uvicorn[standard]==0.34.0

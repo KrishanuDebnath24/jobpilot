@@ -1,8 +1,5 @@
 # Claude Code Build Prompt — "JobPilot" (Agentic Job-Hunting Platform)
 
-> Paste everything below into Claude Code. It is written as a direct instruction set. The **Phase Gates** are load-bearing: do not skip them. Stop and show me working output at the end of each phase before continuing.
-
----
 
 ## 0. Role & Working Agreement
 

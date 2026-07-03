@@ -1,12 +1,14 @@
-"""Phase 0 gate: the health check must pass."""
+"""Liveness check — no external dependencies."""
 
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from app.main import app
 
-def test_health_ok(client: TestClient) -> None:
-    resp = client.get("/health")
+
+def test_health_ok() -> None:
+    resp = TestClient(app).get("/health")
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"

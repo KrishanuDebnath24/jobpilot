@@ -36,3 +36,49 @@ Running log of non-obvious engineering choices. One line + rationale each.
   shipped to the client runtime. npm's only offered fix is Next 16 (breaking major,
   pulls React 19), which is out of scope for a scaffold and slots naturally into the
   Phase 8 hardening pass.
+
+## Phase 1 — Data layer, MCP boundary, resume ingestion & erasure
+
+- **Shared code lives in an installable package `packages/core` (`jobpilot_core`).**
+  Both the backend and the MCP services depend on it (SQLAlchemy models, async DB
+  session, repositories, security, storage, resume parsing, MCP auth). Each service
+  Dockerfile builds from the repo root and `pip install ./packages/core`.
+- **Runtime-injected `user_id` is the security boundary.** The backend mints a
+  short-lived HS256 **MCP context token** per outbound call (subject = authenticated
+  user_id, signed with `MCP_SHARED_SECRET`, default = `JWT_SECRET`). A pure-ASGI
+  middleware on each MCP service validates it and binds the user_id in a contextvar;
+  tools read it via `require_user_id()`. **Any `user_id` passed as a tool argument is
+  ignored** (`get_jobs`/`delete_user_data` accept one purely to prove it's dropped).
+  Unauthenticated calls are refused. Verified over real HTTP incl. the spoofed-id case.
+- **MCP transport: streamable HTTP with `stateless_http=True`.** Stateless keeps each
+  tool call within the request's ASGI task, so the auth contextvar propagates reliably
+  (verified). Servers run as real Compose services; the backend calls them over HTTP.
+- **Async SQLAlchemy 2.0 (asyncpg) + async Alembic.** Matches FastAPI/FastMCP. Tests
+  reset the cached engine per test because pytest-asyncio gives each test a fresh loop
+  and asyncpg connections must not outlive their loop.
+- **`user_id` added to `qualifications`, `analyses`, `suggestions`, `messages`** beyond
+  the master §9 sketch, so every user-owned table scopes uniformly and cascades from
+  `users` on delete. All FKs toward `user_id` are `ON DELETE CASCADE`.
+- **Erasure = hard delete + explicit storage cleanup.** `delete_user_data` deletes the
+  user's stored files by prefix (best-effort, outside the tx), then deletes the `users`
+  row so every table cascades, then verifies zero rows remain in-transaction. Verified:
+  2 MinIO files → `files_deleted:2` → 0, all tables 0.
+- **Resume storage: MinIO (S3) behind a `StorageClient`; local-FS fallback** for bare
+  dev/tests (`STORAGE_BACKEND=local`). `file_ref` is the object key so erasure deletes
+  precisely by prefix.
+- **Resume parsing is deterministic (no LLM this phase).** pdfplumber/pypdf (PDF),
+  python-docx (DOCX), then a rules-based pass into the typed shape. Raw text + structured
+  JSON are both stored. The Phase-2 LLM structuring pass (Haiku 4.5,
+  `claude-haiku-4-5`) slots behind the same interface.
+- **Embeddings deferred.** `vector(1024)` columns exist but stay NULL; population lands
+  with semantic `search_jobs` in Phase 3 (which currently falls back to keyword match).
+  Dimension is fixed at 1024 now to avoid a later migration.
+- **Consent required to persist a resume.** `POST /resumes` refuses without an explicit
+  consent flag (422); `consent_at` + `retention_expires_at` are recorded on the row.
+- **FastAPI upgraded 0.115.6 → 0.139.0.** The MCP SDK (`mcp` 1.28.1) requires modern
+  starlette (1.3.1); FastAPI 0.139 accepts `starlette>=0.46`, resolving the conflict.
+- **DB-backed auth replaces the Phase-0 in-memory user.** The test user is created by
+  `scripts.seed_user` (a seed script, not a migration). `/ready` checks DB+Redis;
+  `/health` stays pure liveness.
+- **Local dev vs Compose hostnames.** `.env` uses compose service names (`db`, `redis`,
+  `minio`); running processes on the host needs `localhost` URLs (override via env).

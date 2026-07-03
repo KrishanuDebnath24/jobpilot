@@ -35,3 +35,9 @@ Thumbs.db
 # --- Docker / data volumes ---
 pgdata/
 redisdata/
+miniodata/
+
+# --- Local storage backend + personal data (never commit resumes) ---
+.storage/
+*.resume
+
