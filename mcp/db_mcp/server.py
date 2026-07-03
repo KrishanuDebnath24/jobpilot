@@ -9,6 +9,7 @@ passes as a tool argument is accepted and then **ignored** — see ``get_jobs`` 
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 
 from jobpilot_core import repositories
@@ -97,6 +98,36 @@ async def update_suggestion_status(suggestion_id: str, status: str) -> dict:
     async with session_scope() as session:
         s = await repositories.update_suggestion_status(session, uid, uuid.UUID(suggestion_id), status)
         return {"suggestion": {"id": str(s.id), "status": s.status} if s else None}
+
+
+@mcp.tool()
+async def create_pipeline_run(stage: str) -> dict:
+    uid = require_user_id()
+    async with session_scope() as session:
+        run = await repositories.create_pipeline_run(session, uid, stage)
+        return {"id": str(run.id), "stage": run.stage, "status": run.status}
+
+
+@mcp.tool()
+async def finish_pipeline_run(
+    run_id: str, status: str, counts: dict | None = None, error: str | None = None
+) -> dict:
+    """Close out a run: set status/finished_at, persist the counts JSON, and an
+    optional short error summary."""
+    uid = require_user_id()
+    output_ref = json.dumps(counts) if counts is not None else None
+    async with session_scope() as session:
+        run = await repositories.finish_pipeline_run(
+            session, uid, uuid.UUID(run_id), status, output_ref=output_ref, error=error
+        )
+        return {"run": repositories.pipeline_run_to_dict(run) if run else None}
+
+
+@mcp.tool()
+async def get_pipeline_runs(stage: str | None = None, limit: int = 20) -> dict:
+    uid = require_user_id()
+    async with session_scope() as session:
+        return {"runs": await repositories.get_pipeline_runs(session, uid, stage=stage, limit=limit)}
 
 
 @mcp.tool()

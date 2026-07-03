@@ -157,6 +157,24 @@ async def list_jobs(current_user=Depends(get_current_user)) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Scout (background job via Celery; run tracking through db-mcp)
+# --------------------------------------------------------------------------- #
+@app.post("/scout/run", tags=["scout"], status_code=status.HTTP_202_ACCEPTED)
+async def trigger_scout(current_user=Depends(get_current_user)) -> dict:
+    """Queue a Scout run for the current user. Returns immediately with a task id;
+    the fan-out executes in the Celery worker and records a pipeline_runs row."""
+    from .tasks import scout_run
+
+    task = scout_run.delay(str(current_user.id))
+    return {"task_id": task.id, "status": "queued"}
+
+
+@app.get("/scout/runs", tags=["scout"])
+async def list_scout_runs(current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.db_mcp(current_user.id, "get_pipeline_runs", {"stage": "scout"})
+
+
+# --------------------------------------------------------------------------- #
 # GDPR erasure (through db-mcp)
 # --------------------------------------------------------------------------- #
 @app.delete("/me/data", tags=["gdpr"])

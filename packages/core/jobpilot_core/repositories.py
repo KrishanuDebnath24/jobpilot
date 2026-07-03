@@ -5,9 +5,9 @@ user_id embedded in caller-supplied payloads.
 
 from __future__ import annotations
 
-import hashlib
+import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -78,24 +78,38 @@ async def create_user(session: AsyncSession, email: str, password_hash: str) -> 
 def _dedupe_hash(user_id: uuid.UUID, data: JobIn) -> str:
     if data.dedupe_hash:
         return data.dedupe_hash
-    basis = "|".join([str(user_id), data.title or "", data.company or "", data.url or ""])
-    return hashlib.sha256(basis.encode("utf-8")).hexdigest()
+    # Scout supplies its own hash (company+title+location); this fallback matches
+    # that basis for any direct upsert that omits one.
+    from .scout import compute_dedupe_hash
+
+    return compute_dedupe_hash(data.company, data.title, data.location, data.url)
 
 
 async def upsert_jobs(
     session: AsyncSession, user_id: uuid.UUID, jobs: list[JobIn]
 ) -> list[models.Job]:
+    """Idempotent upsert keyed by ``(user_id, dedupe_hash)``. Collapses duplicates
+    both against existing rows AND within this batch (two connectors returning the
+    same job in one run land as a single row)."""
     saved: list[models.Job] = []
+    batch: dict[str, models.Job] = {}  # dedupe_hash -> row created/updated in this call
     for data in jobs:
         dedupe = _dedupe_hash(user_id, data)
-        existing = (
-            await session.execute(
-                select(models.Job).where(
-                    models.Job.user_id == user_id, models.Job.dedupe_hash == dedupe
+        if dedupe in batch:
+            target = batch[dedupe]  # intra-batch duplicate -> reuse
+        else:
+            existing = (
+                await session.execute(
+                    select(models.Job).where(
+                        models.Job.user_id == user_id, models.Job.dedupe_hash == dedupe
+                    )
                 )
-            )
-        ).scalar_one_or_none()
-        target = existing or models.Job(user_id=user_id, dedupe_hash=dedupe)
+            ).scalar_one_or_none()
+            target = existing or models.Job(user_id=user_id, dedupe_hash=dedupe)
+            if existing is None:
+                session.add(target)
+            batch[dedupe] = target
+            saved.append(target)  # one entry per unique dedupe_hash (new or updated)
         target.title = data.title
         target.company = data.company
         target.location = data.location
@@ -107,9 +121,6 @@ async def upsert_jobs(
         target.raw_json = data.raw_json
         target.normalized_json = data.normalized_json
         target.status = data.status
-        if existing is None:
-            session.add(target)
-        saved.append(target)
     await session.flush()
     return saved
 
@@ -206,6 +217,68 @@ async def list_resume_file_refs(session: AsyncSession, user_id: uuid.UUID) -> li
 
 
 # --------------------------------------------------------------------------- #
+# Search config (config-mcp)
+# --------------------------------------------------------------------------- #
+_SEARCH_CONFIG_FIELDS = (
+    "roles",
+    "locations",
+    "keywords",
+    "sites",
+    "sources",
+    "target_employers",
+    "schedule",
+)
+
+
+def search_config_to_dict(cfg: models.SearchConfig | None) -> dict:
+    if cfg is None:
+        return {
+            "roles": [], "locations": [], "keywords": [], "sites": [],
+            "sources": [], "target_employers": [], "schedule": None,
+        }
+    return {
+        "id": str(cfg.id),
+        "roles": list(cfg.roles or []),
+        "locations": list(cfg.locations or []),
+        "keywords": list(cfg.keywords or []),
+        "sites": list(cfg.sites or []),
+        "sources": list(cfg.sources or []),
+        "target_employers": list(cfg.target_employers or []),
+        "schedule": cfg.schedule,
+        "created_at": _iso(cfg.created_at),
+    }
+
+
+async def get_search_config(
+    session: AsyncSession, user_id: uuid.UUID
+) -> models.SearchConfig | None:
+    return (
+        await session.execute(
+            select(models.SearchConfig)
+            .where(models.SearchConfig.user_id == user_id)
+            .order_by(models.SearchConfig.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def upsert_search_config(
+    session: AsyncSession, user_id: uuid.UUID, fields: dict
+) -> models.SearchConfig:
+    """Create-or-update the user's single search config. Only keys present in
+    ``fields`` are written (partial update); everything else is left untouched."""
+    cfg = await get_search_config(session, user_id)
+    if cfg is None:
+        cfg = models.SearchConfig(user_id=user_id)
+        session.add(cfg)
+    for key in _SEARCH_CONFIG_FIELDS:
+        if key in fields and fields[key] is not None:
+            setattr(cfg, key, fields[key])
+    await session.flush()
+    return cfg
+
+
+# --------------------------------------------------------------------------- #
 # Qualifications / analyses / suggestions
 # --------------------------------------------------------------------------- #
 async def get_qualifications(session: AsyncSession, user_id: uuid.UUID) -> list[dict]:
@@ -265,6 +338,74 @@ async def update_suggestion_status(
         suggestion.status = status
         await session.flush()
     return suggestion
+
+
+# --------------------------------------------------------------------------- #
+# Pipeline runs (Scout background-job tracking)
+# --------------------------------------------------------------------------- #
+def pipeline_run_to_dict(run: models.PipelineRun) -> dict:
+    counts = None
+    if run.output_ref:
+        try:
+            counts = json.loads(run.output_ref)
+        except (ValueError, TypeError):
+            counts = None
+    return {
+        "id": str(run.id),
+        "stage": run.stage,
+        "status": run.status,
+        "started_at": _iso(run.started_at),
+        "finished_at": _iso(run.finished_at),
+        "counts": counts,
+        "error": run.error,
+        "created_at": _iso(run.created_at),
+    }
+
+
+async def create_pipeline_run(
+    session: AsyncSession, user_id: uuid.UUID, stage: str
+) -> models.PipelineRun:
+    run = models.PipelineRun(
+        user_id=user_id, stage=stage, status="running",
+        started_at=datetime.now(timezone.utc),
+    )
+    session.add(run)
+    await session.flush()
+    return run
+
+
+async def finish_pipeline_run(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    run_id: uuid.UUID,
+    status: str,
+    output_ref: str | None = None,
+    error: str | None = None,
+) -> models.PipelineRun | None:
+    run = (
+        await session.execute(
+            select(models.PipelineRun).where(
+                models.PipelineRun.user_id == user_id, models.PipelineRun.id == run_id
+            )
+        )
+    ).scalar_one_or_none()
+    if run is not None:
+        run.status = status
+        run.finished_at = datetime.now(timezone.utc)
+        run.output_ref = output_ref
+        run.error = error
+        await session.flush()
+    return run
+
+
+async def get_pipeline_runs(
+    session: AsyncSession, user_id: uuid.UUID, stage: str | None = None, limit: int = 20
+) -> list[dict]:
+    stmt = select(models.PipelineRun).where(models.PipelineRun.user_id == user_id)
+    if stage:
+        stmt = stmt.where(models.PipelineRun.stage == stage)
+    stmt = stmt.order_by(models.PipelineRun.created_at.desc()).limit(limit)
+    return [pipeline_run_to_dict(r) for r in (await session.execute(stmt)).scalars().all()]
 
 
 # --------------------------------------------------------------------------- #

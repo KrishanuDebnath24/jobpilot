@@ -82,3 +82,62 @@ Running log of non-obvious engineering choices. One line + rationale each.
   `/health` stays pure liveness.
 - **Local dev vs Compose hostnames.** `.env` uses compose service names (`db`, `redis`,
   `minio`); running processes on the host needs `localhost` URLs (override via env).
+
+## Phase 2 — Scout, source connectors, search config & dedupe
+
+- **Scout's model is config-driven, defaults to Haiku 4.5** (`claude-haiku-4-5-20251001`,
+  `settings.scout_extractor_model`). The only LLM work is *extraction* (crawled HTML →
+  fields); tiers can be promoted later without code changes. All calls route through one
+  wrapper (`jobpilot_core.llm`) that logs `input/output tokens` + an estimated cost.
+- **Spend controls.** A **Console spend cap (~$10/mo) must be set by the account owner** —
+  it can't be set from code. Code-level guards back it up: `llm_max_output_tokens` (per-call
+  output cap), `crawler_max_pages` + `crawler_max_text_chars` (bound extraction calls and
+  their input size), and `adzuna_max_locations` (bound the free-tier quota). Whole-run token
+  usage is logged and recorded on the `pipeline_runs` row.
+- **LLM only on the crawl path; deterministic everywhere else.** Adzuna and Greenhouse return
+  structured JSON, normalized by plain field-mapping code (`jobpilot_core.scout`). Sending
+  clean JSON to a model is the phase's cost trap — avoided. Haiku is used *only* to extract
+  fields from unstructured board HTML.
+- **Adzuna has no Republic-of-Ireland coverage.** The live API rejects `ie`
+  (`UNSUPPORTED_COUNTRY`; supported: at, au, be, br, ca, ch, de, es, fr, gb, in, it, mx, nl,
+  nz, pl, sg, us, za). Adzuna *does* cover **Northern Ireland** under `gb` (Belfast/Derry), so
+  `adzuna_country` defaults to `gb`; RoI (Dublin) coverage comes from the Greenhouse + crawler
+  connectors. `adzuna_country` stays config-driven so `ie` activates automatically if Adzuna
+  ever adds it. The connector is a thin async client (not the community MCP server) to keep
+  full control of the output shape.
+- **One raw shape + one normalize/dedupe tail.** Every connector returns
+  `jobpilot_core.scout.RawJob`; `normalize_raw` maps any of them into the `jobs` shape. Adding
+  a source is a new connector, not a new pipeline.
+- **Dedupe key = normalized `company + title + coarse-location`; URL deliberately excluded.**
+  A job carried by *both* Adzuna and an ATS has different URLs, so hashing the URL would
+  prevent the required cross-source collapse. Location is coarsened to its first comma token
+  (`Dublin, Ireland` and `Dublin` → `dublin`) so the same job dedupes across feeds that spell
+  location differently. URL is a fallback basis only when company+title are both absent (some
+  crawled listings). `upsert_jobs` collapses duplicates both against existing rows and within
+  a single batch, making re-runs idempotent (a correctness property — Phase 4 re-triggers
+  Scout).
+- **Crawler: one Irish board (irishjobs.ie), robots-respecting, browser UA.** The board serves
+  server-rendered HTML but **disconnects non-browser user-agents at the network layer**, so
+  the crawler sends a mainstream browser UA. Politeness is still enforced where it's
+  declarable/enforceable: we honor `robots.txt` (the site's machine-readable crawl policy — its
+  search path is allowed), a per-domain minimum delay, and a hard page cap. Page text → Haiku
+  with a **forced tool call + strict schema** (extract-only): the page is untrusted, so the
+  model must answer via the tool and is instructed to treat text as data and never follow
+  instructions in it — the live prompt-injection surface is contained.
+- **config-mcp and sources-mcp are new first-class MCP services.** config-mcp owns search
+  configs (direct DB, user-scoped exactly like db-mcp). sources-mcp is the connector hub; it
+  holds no DB state but still **requires a valid signed context** so anonymous callers can't
+  burn our Adzuna quota / Anthropic budget, and it **fail-fasts at boot** without a real
+  Anthropic key (the phase's fail-fast config requirement, enforced where LLM calls happen).
+- **Scout persists only through db-mcp; runs as a Celery task.** The Celery worker (Redis
+  broker/result) calls config-mcp → sources-mcp → db-mcp over HTTP with minted context tokens,
+  exactly like the backend. `POST /scout/run` enqueues; `GET /scout/runs` lists tracked runs.
+  A `pipeline_runs` row records stage/status/timings and counts (fetched/new/deduped + per-
+  connector tallies, errors, and LLM usage). **One failing connector is recorded, not fatal.**
+- **redis pin 8.0.1 → 6.4.0.** Celery's `kombu[redis]` extra caps `redis<6.5`; we only use the
+  async client for a readiness ping (API stable across 5.x/6.x).
+- **Secret hygiene.** `ANTHROPIC_API_KEY` + Adzuna creds live only in the gitignored `.env`
+  and are consumed by sources-mcp (and the backend/worker envs); the **frontend never receives
+  them** (its container gets only `NEXT_PUBLIC_API_URL`). Adzuna authenticates via query params,
+  so its (read-only, free-tier) key can appear in HTTP client logs — keep client log level at
+  WARNING in production to avoid logging it.

@@ -116,6 +116,50 @@ services:
       timeout: 5s
       retries: 5
 
+  # config-mcp — user search config (no storage, no LLM).
+  config-mcp:
+    image: jobpilot-mcp:local
+    build:
+      context: .
+      dockerfile: mcp/Dockerfile
+    command: ["uvicorn", "config_mcp.server:app", "--host", "0.0.0.0", "--port", "8003"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jobpilot}:${POSTGRES_PASSWORD:-jobpilot_dev_pw}@db:5432/${POSTGRES_DB:-jobpilot}
+    ports:
+      - "8003:8003"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('localhost',8003),2)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # sources-mcp — connector hub. Makes LLM calls (crawl), so it needs ANTHROPIC_API_KEY
+  # and the Adzuna creds (from .env); fail-fasts at boot without a real key. No DB.
+  sources-mcp:
+    image: jobpilot-mcp:local
+    build:
+      context: .
+      dockerfile: mcp/Dockerfile
+    command: ["uvicorn", "sources_mcp.server:app", "--host", "0.0.0.0", "--port", "8004"]
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "8004:8004"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('localhost',8004),2)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   backend:
     build:
       context: .
@@ -129,6 +173,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       DB_MCP_URL: http://db-mcp:8001/mcp
       RESUME_MCP_URL: http://resume-mcp:8002/mcp
+      CONFIG_MCP_URL: http://config-mcp:8003/mcp
+      SOURCES_MCP_URL: http://sources-mcp:8004/mcp
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
     ports:
       - "8000:8000"
@@ -142,6 +188,43 @@ services:
       db-mcp:
         condition: service_started
       resume-mcp:
+        condition: service_started
+      config-mcp:
+        condition: service_started
+      sources-mcp:
+        condition: service_started
+
+  # Celery worker — runs Scout in the background. Calls the MCP services over HTTP
+  # (same as the backend); persists jobs only through db-mcp.
+  worker:
+    image: jobpilot-backend:local
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["sh", "-c", "cd /app/backend && celery -A app.celery_app.celery worker --loglevel=info"]
+    env_file:
+      - path: .env
+        required: false
+    # Runs Celery, not the HTTP server, so the backend image's HTTP healthcheck
+    # doesn't apply here.
+    healthcheck:
+      disable: true
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jobpilot}:${POSTGRES_PASSWORD:-jobpilot_dev_pw}@db:5432/${POSTGRES_DB:-jobpilot}
+      REDIS_URL: redis://redis:6379/0
+      DB_MCP_URL: http://db-mcp:8001/mcp
+      CONFIG_MCP_URL: http://config-mcp:8003/mcp
+      SOURCES_MCP_URL: http://sources-mcp:8004/mcp
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      db-mcp:
+        condition: service_started
+      config-mcp:
+        condition: service_started
+      sources-mcp:
         condition: service_started
 
   frontend:

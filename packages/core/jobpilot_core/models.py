@@ -83,6 +83,9 @@ class SearchConfig(Base):
     locations: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
     sites: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
     keywords: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
+    # Phase 2: which connectors are enabled + ATS employers to poll.
+    sources: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
+    target_employers: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
     schedule: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = _created()
 

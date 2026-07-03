@@ -4,24 +4,32 @@ An agentic job-hunting cockpit. Upload a resume, describe target roles in chat, 
 pipeline of cooperating agents scouts, qualifies, analyzes, and improves your
 applications — all driven from a dashboard + streaming chat.
 
-> **Status: Phase 1 (Data layer, MCP boundary, resume ingestion & erasure).**
-> Full data model + migrations, two MCP services over HTTP (`db-mcp`, `resume-mcp`)
-> with runtime-injected `user_id` scoping, deterministic resume parsing (PDF/DOCX) to
-> MinIO with consent, and GDPR hard-delete erasure. **No LLM calls this phase.**
-> See the build plan and `directions/` work orders; running notes in `DECISIONS.md`.
+> **Status: Phase 2 (Scout — source connectors, search config & dedupe).**
+> Adds `config-mcp` (search config) and `sources-mcp` (connector hub: Adzuna API,
+> Greenhouse ATS, and one polite Haiku-extraction crawler), a deterministic
+> normalize + dedupe tail persisted through `db-mcp`, and Scout as a tracked Celery
+> background job (`pipeline_runs`). **First phase that makes LLM calls** — Haiku 4.5,
+> extraction only, on the crawl path. Builds on Phase 1 (data layer, MCP boundary,
+> resume ingestion & GDPR erasure). See `directions/` work orders + `DECISIONS.md`.
 
 ## Repository layout
 
 ```
 packages/core/    Shared package `jobpilot_core` — SQLAlchemy models, async DB,
-                  repositories, security, storage, resume parsing, MCP auth
+                  repositories, security, storage, resume parsing, MCP auth,
+                  LLM wrapper (llm.py), Scout raw-shape + normalize/dedupe (scout.py)
                   + Alembic migrations (packages/core/migrations)
-backend/          FastAPI API (auth, /ready, resume upload, jobs, erasure)
-mcp/db_mcp/       db-mcp   — scoped CRUD + delete_user_data (streamable HTTP)
+backend/          FastAPI API (auth, /ready, resume, jobs, erasure, /scout/*),
+                  Scout orchestration (scout_runner.py) + Celery task (tasks.py)
+mcp/db_mcp/       db-mcp   — scoped CRUD, pipeline-run tracking, delete_user_data
 mcp/resume_mcp/   resume-mcp — parse_resume + get_structured_resume
+mcp/config_mcp/   config-mcp — get/update_search_config (user-scoped)
+mcp/sources_mcp/  sources-mcp — connector hub: search_adzuna, fetch_greenhouse,
+                  run_crawl (Haiku extraction), list_sources
 orchestrator/     LangGraph pipeline (Phase 4+; placeholder)
 frontend/         Next.js (App Router) + TypeScript + Tailwind
-docker-compose.yml   db(pgvector) · redis · minio · migrate · db-mcp · resume-mcp · backend · frontend
+docker-compose.yml   db(pgvector) · redis · minio · migrate · db-mcp · resume-mcp ·
+                     config-mcp · sources-mcp · backend · worker(celery) · frontend
 ```
 
 **Security boundary:** agents and the app touch job/resume *data* only through the MCP
@@ -39,9 +47,22 @@ Order: infra → `migrate` (applies schema + seeds the test user) → MCP servic
 backend → frontend.
 
 - Backend:  http://localhost:8000  (`/health`, `/ready`, docs at `/docs`)
-- db-mcp:   http://localhost:8001/mcp   · resume-mcp: http://localhost:8002/mcp
+- db-mcp: `:8001/mcp` · resume-mcp: `:8002/mcp` · config-mcp: `:8003/mcp` · sources-mcp: `:8004/mcp`
 - MinIO console: http://localhost:9001  (minioadmin / minioadmin)
 - Frontend: http://localhost:3000
+
+> **Phase 2 needs credentials** (backend/`sources-mcp` env only, never the frontend or git):
+> `ANTHROPIC_API_KEY` (set a low Console spend cap first) and `ADZUNA_APP_ID`/`ADZUNA_APP_KEY`
+> from developer.adzuna.com. `sources-mcp` refuses to start without a real Anthropic key.
+> Adzuna covers Northern Ireland via `gb` (not the Republic of Ireland — see `DECISIONS.md`).
+
+Trigger a Scout run once logged in (see smoke tests for the token dance):
+
+```bash
+curl -X POST http://localhost:8000/scout/run  -H "Authorization: Bearer $TOKEN"   # -> {task_id,...}
+curl      http://localhost:8000/scout/runs -H "Authorization: Bearer $TOKEN"   # tracked runs + counts
+curl      http://localhost:8000/jobs       -H "Authorization: Bearer $TOKEN"   # normalized, deduped
+```
 
 ## Local dev (processes on the host against dockerized infra)
 

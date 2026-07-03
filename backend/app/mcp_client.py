@@ -17,6 +17,25 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 
+def _flatten_exc(exc: BaseException) -> str:
+    """Collapse an anyio ExceptionGroup (as raised by the MCP client task group)
+    into a single readable message, preferring the underlying tool error."""
+    msgs: list[str] = []
+
+    def walk(e: BaseException) -> None:
+        if isinstance(e, BaseExceptionGroup):
+            for sub in e.exceptions:
+                walk(sub)
+        else:
+            msgs.append(str(e).strip() or type(e).__name__)
+
+    walk(exc)
+    for m in msgs:
+        if "MCP tool error" in m:
+            return m
+    return "; ".join(dict.fromkeys(m for m in msgs if m)) or "MCP call failed"
+
+
 def _extract(result: Any) -> Any:
     if getattr(result, "isError", False):
         text = result.content[0].text if result.content else "MCP tool error"
@@ -42,11 +61,14 @@ async def call_tool(
     settings = get_settings()
     token = mint_mcp_context_token(user_id, settings)
     headers = {"Authorization": f"Bearer {token}"}
-    async with streamablehttp_client(service_url, headers=headers) as (read, write, _):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            result = await session.call_tool(tool, arguments or {})
-            return _extract(result)
+    try:
+        async with streamablehttp_client(service_url, headers=headers) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(tool, arguments or {})
+                return _extract(result)
+    except BaseExceptionGroup as eg:
+        raise RuntimeError(_flatten_exc(eg)) from eg
 
 
 async def db_mcp(user_id: uuid.UUID, tool: str, arguments: dict | None = None) -> Any:
@@ -55,3 +77,11 @@ async def db_mcp(user_id: uuid.UUID, tool: str, arguments: dict | None = None) -
 
 async def resume_mcp(user_id: uuid.UUID, tool: str, arguments: dict | None = None) -> Any:
     return await call_tool(get_settings().resume_mcp_url, user_id, tool, arguments)
+
+
+async def config_mcp(user_id: uuid.UUID, tool: str, arguments: dict | None = None) -> Any:
+    return await call_tool(get_settings().config_mcp_url, user_id, tool, arguments)
+
+
+async def sources_mcp(user_id: uuid.UUID, tool: str, arguments: dict | None = None) -> Any:
+    return await call_tool(get_settings().sources_mcp_url, user_id, tool, arguments)

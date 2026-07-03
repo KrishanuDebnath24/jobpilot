@@ -24,6 +24,20 @@ os.environ.setdefault(
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 MCP_DIR = REPO / "mcp"
+# Let in-process unit tests import the connector packages (e.g. the crawler's
+# robots helper). `import mcp` still resolves to the installed SDK, not this dir.
+if str(MCP_DIR) not in sys.path:
+    sys.path.insert(0, str(MCP_DIR))
+
+# Phase 2 services run on their own ports; point the backend MCP-client URLs at them
+# (set before any get_settings() call so run_scout resolves the test endpoints).
+DB_MCP_PORT2 = 8111
+CONFIG_MCP_PORT = 8113
+SOURCES_MCP_PORT = 8114
+CONFIG_ONLY_PORT = 8115  # standalone config-mcp for the no-keys config CRUD test
+os.environ.setdefault("DB_MCP_URL", f"http://127.0.0.1:{DB_MCP_PORT2}/mcp")
+os.environ.setdefault("CONFIG_MCP_URL", f"http://127.0.0.1:{CONFIG_MCP_PORT}/mcp")
+os.environ.setdefault("SOURCES_MCP_URL", f"http://127.0.0.1:{SOURCES_MCP_PORT}/mcp")
 
 
 @pytest.fixture(autouse=True)
@@ -117,3 +131,84 @@ def mcp_services(tmp_path_factory):
                 p.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 p.kill()
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2 fixtures
+# --------------------------------------------------------------------------- #
+def _apply_schema() -> None:
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config(str(REPO / "alembic.ini"))
+    cfg.set_main_option("script_location", str(REPO / "packages" / "core" / "migrations"))
+    command.upgrade(cfg, "head")
+
+
+def _spawn(module: str, port: int, env: dict):
+    return subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", f"{module}:app", "--port", str(port),
+         "--log-level", "warning"],
+        cwd=str(MCP_DIR), env=env,
+    )
+
+
+def _stop(procs):
+    for p in procs:
+        p.terminate()
+    for p in procs:
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+
+
+@pytest.fixture(scope="session")
+def config_service():
+    """config-mcp alone (no Anthropic/Adzuna keys needed) — runs in CI."""
+    if not _db_reachable():
+        pytest.skip("database not reachable")
+    _apply_schema()
+    proc = _spawn("config_mcp.server", CONFIG_ONLY_PORT, {**os.environ})
+    try:
+        _wait_port(CONFIG_ONLY_PORT)
+        time.sleep(0.8)
+        yield f"http://127.0.0.1:{CONFIG_ONLY_PORT}/mcp"
+    finally:
+        _stop([proc])
+
+
+@pytest.fixture(scope="session")
+def sources_stack(tmp_path_factory):
+    """db-mcp + config-mcp + sources-mcp for the live-connector tests. Skips unless a
+    real Anthropic key + Adzuna creds are present (sources-mcp fail-fasts otherwise),
+    so CI without secrets skips cleanly."""
+    if not _db_reachable():
+        pytest.skip("database not reachable")
+    from jobpilot_core.settings import get_settings
+
+    s = get_settings()
+    if not (s.anthropic_api_key.startswith("sk-ant-") and s.adzuna_app_id and s.adzuna_app_key):
+        pytest.skip("ANTHROPIC_API_KEY / Adzuna credentials not configured")
+    _apply_schema()
+    env = {
+        **os.environ,
+        "STORAGE_BACKEND": "local",
+        "STORAGE_LOCAL_DIR": str(tmp_path_factory.mktemp("storage2")),
+    }
+    procs = [
+        _spawn("db_mcp.server", DB_MCP_PORT2, env),
+        _spawn("config_mcp.server", CONFIG_MCP_PORT, env),
+        _spawn("sources_mcp.server", SOURCES_MCP_PORT, env),
+    ]
+    try:
+        for port in (DB_MCP_PORT2, CONFIG_MCP_PORT, SOURCES_MCP_PORT):
+            _wait_port(port)
+        time.sleep(1.2)
+        yield {
+            "db": f"http://127.0.0.1:{DB_MCP_PORT2}/mcp",
+            "config": f"http://127.0.0.1:{CONFIG_MCP_PORT}/mcp",
+            "sources": f"http://127.0.0.1:{SOURCES_MCP_PORT}/mcp",
+        }
+    finally:
+        _stop(procs)
