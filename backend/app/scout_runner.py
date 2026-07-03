@@ -78,6 +78,17 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
                 raw_jobs, by_connector, errors, usage,
             )
 
+    # Aggregators give Republic-of-Ireland coverage (Adzuna can't). Free ones are on
+    # by default; JSearch is metered and only runs when explicitly in `sources`.
+    roi_location = (locations or ["Dublin, Ireland"])[0]
+    for name in ("jooble", "careerjet", "jsearch"):
+        if name in sources:
+            await _run_connector(
+                user_id, name, f"search_{name}",
+                {"roles": roles, "keywords": keywords, "location": roi_location},
+                raw_jobs, by_connector, errors, usage,
+            )
+
     if "crawl" in sources:
         await _run_connector(
             user_id, "crawl", "run_crawl",

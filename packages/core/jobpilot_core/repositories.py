@@ -89,14 +89,18 @@ async def upsert_jobs(
     session: AsyncSession, user_id: uuid.UUID, jobs: list[JobIn]
 ) -> list[models.Job]:
     """Idempotent upsert keyed by ``(user_id, dedupe_hash)``. Collapses duplicates
-    both against existing rows AND within this batch (two connectors returning the
-    same job in one run land as a single row)."""
+    both against existing rows AND within this batch. On a collision, source
+    precedence decides which record's fields survive: a *direct* source (ats > crawl)
+    beats an *aggregator* (api), so a shared job keeps its canonical apply link and
+    richer fields regardless of connector run order."""
+    from .scout import source_rank
+
     saved: list[models.Job] = []
     batch: dict[str, models.Job] = {}  # dedupe_hash -> row created/updated in this call
     for data in jobs:
         dedupe = _dedupe_hash(user_id, data)
         if dedupe in batch:
-            target = batch[dedupe]  # intra-batch duplicate -> reuse
+            target, is_new = batch[dedupe], False  # intra-batch duplicate -> reuse
         else:
             existing = (
                 await session.execute(
@@ -106,21 +110,25 @@ async def upsert_jobs(
                 )
             ).scalar_one_or_none()
             target = existing or models.Job(user_id=user_id, dedupe_hash=dedupe)
-            if existing is None:
+            is_new = existing is None
+            if is_new:
                 session.add(target)
             batch[dedupe] = target
             saved.append(target)  # one entry per unique dedupe_hash (new or updated)
-        target.title = data.title
-        target.company = data.company
-        target.location = data.location
-        target.description = data.description
-        target.url = data.url
-        target.source = data.source
-        target.source_type = data.source_type
-        target.connector = data.connector
-        target.raw_json = data.raw_json
-        target.normalized_json = data.normalized_json
-        target.status = data.status
+        # Overwrite only when the incoming record is at least as "direct" as what's
+        # there; a lower-precedence aggregator copy never clobbers a direct record.
+        if is_new or source_rank(data.source_type) >= source_rank(target.source_type):
+            target.title = data.title
+            target.company = data.company
+            target.location = data.location
+            target.description = data.description
+            target.url = data.url
+            target.source = data.source
+            target.source_type = data.source_type
+            target.connector = data.connector
+            target.raw_json = data.raw_json
+            target.normalized_json = data.normalized_json
+            target.status = data.status
     await session.flush()
     return saved
 

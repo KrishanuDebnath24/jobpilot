@@ -21,12 +21,15 @@ Implemented (Phase 2):
 - **`config_mcp/`** — user search config: `get_search_config`, `update_search_config`
   (`roles`, `locations`, `keywords`, `sources`, `target_employers`, `schedule`). Direct
   DB, user-scoped exactly like `db-mcp`.
-- **`sources_mcp/`** — the connector hub: `list_sources`, `search_adzuna` (API),
-  `fetch_greenhouse` (ATS), `run_crawl` (one polite Irish-board crawler with constrained
-  **Haiku** extraction — the only LLM path). Holds no DB state but still requires a valid
-  signed context (protects the Adzuna quota / Anthropic budget) and **fail-fasts at boot
-  without a real `ANTHROPIC_API_KEY`**. Each connector returns the one raw job shape
-  (`jobpilot_core.scout.RawJob`); Scout normalizes + dedupes and persists via `db-mcp`.
+- **`sources_mcp/`** — the connector hub: `list_sources`, `search_adzuna` (API, NI via `gb`),
+  `fetch_greenhouse` (ATS), `search_jooble` / `search_careerjet` / `search_jsearch` (RoI
+  aggregators — Jooble/Careerjet free & on by default, JSearch metered & off by default), and
+  `run_crawl` (one polite Irish-board crawler with constrained **Haiku** extraction — the only
+  LLM path). Holds no DB state but still requires a valid signed context (protects the
+  Adzuna/RapidAPI quota / Anthropic budget) and **fail-fasts at boot without a real
+  `ANTHROPIC_API_KEY`**. Each connector returns the one raw job shape
+  (`jobpilot_core.scout.RawJob`); Scout normalizes + dedupes (with `ats > crawl > aggregator`
+  precedence) and persists via `db-mcp`.
 
 Planned later: `pipeline-mcp` (Phase 4+).
 

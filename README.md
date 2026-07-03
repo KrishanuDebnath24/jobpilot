@@ -55,6 +55,12 @@ backend → frontend.
 > `ANTHROPIC_API_KEY` (set a low Console spend cap first) and `ADZUNA_APP_ID`/`ADZUNA_APP_KEY`
 > from developer.adzuna.com. `sources-mcp` refuses to start without a real Anthropic key.
 > Adzuna covers Northern Ireland via `gb` (not the Republic of Ireland — see `DECISIONS.md`).
+>
+> **RoI coverage (addendum)** comes from aggregator connectors — free & on by default:
+> `JOOBLE_API_KEY` (jooble.org/api/about) and `CAREERJET_API_KEY` (careerjet.com/partners).
+> `RAPIDAPI_KEY` enables the metered JSearch connector (Indeed/LinkedIn reach) — **off by
+> default**; subscribe to JSearch on RapidAPI and add `jsearch` to your `sources[]` to use it.
+> Any connector without its key degrades gracefully (recorded on the run, never fatal).
 
 Trigger a Scout run once logged in (see smoke tests for the token dance):
 

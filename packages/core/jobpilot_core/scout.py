@@ -19,6 +19,17 @@ from .schemas import JobIn
 
 _SOURCE_TYPES = {"api", "ats", "crawl", "seed"}
 
+# Source precedence for dedupe collapse: a job carried by both a *direct* source and
+# an *aggregator* keeps the direct record (canonical apply link, richer fields).
+# Order: ats (Greenhouse/company) > crawl (board) > aggregator (Adzuna/Jooble/
+# Careerjet/JSearch, all source_type='api'). Aggregators fill coverage gaps; they
+# never overwrite direct data.
+_SOURCE_RANK = {"ats": 3, "crawl": 2, "api": 1, "seed": 0}
+
+
+def source_rank(source_type: str | None) -> int:
+    return _SOURCE_RANK.get(source_type or "", 1)
+
 
 class RawJob(BaseModel):
     """The common raw shape returned by every connector (adzuna / greenhouse / crawl)."""

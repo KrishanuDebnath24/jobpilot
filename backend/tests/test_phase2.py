@@ -15,7 +15,12 @@ import uuid
 
 from jobpilot_core import repositories
 from jobpilot_core.db import session_scope
-from jobpilot_core.scout import canonicalize_url, compute_dedupe_hash, normalize_raw
+from jobpilot_core.scout import (
+    canonicalize_url,
+    compute_dedupe_hash,
+    normalize_raw,
+    source_rank,
+)
 from jobpilot_core.security import hash_password, mint_mcp_context_token
 from jobpilot_core.settings import get_settings
 from mcp import ClientSession
@@ -89,6 +94,39 @@ def test_cross_source_dedupe_hash_collapses_same_job():
 def test_dedupe_hash_is_deterministic():
     args = ("Stripe", "Backend Engineer", "Dublin, Ireland", "https://x/1")
     assert compute_dedupe_hash(*args) == compute_dedupe_hash(*args)
+
+
+def test_source_precedence_ordering():
+    # Direct sources outrank aggregators: ats > crawl > aggregator(api).
+    assert source_rank("ats") > source_rank("crawl") > source_rank("api")
+
+
+async def test_source_precedence_direct_beats_aggregator(mcp_services):
+    """A job in an aggregator AND a direct source collapses to one row keeping the
+    direct record, regardless of run order (uses db-mcp; no external keys)."""
+    db = mcp_services["db"]
+
+    def job(connector, source_type, url):
+        return normalize_raw({"connector": connector, "source": connector,
+                              "source_type": source_type, "company": "Stripe",
+                              "title": "Backend Engineer", "location": "Dublin",
+                              "url": url}).model_dump()
+
+    uid = await _mk_user()
+    try:
+        # aggregator first, then the direct (ats) copy -> upgrade to direct
+        await _call(db, uid, "upsert_jobs", {"jobs": [job("jooble", "api", "https://jooble/x")]})
+        await _call(db, uid, "upsert_jobs",
+                    {"jobs": [job("greenhouse:stripe", "ats", "https://boards.greenhouse.io/stripe/y")]})
+        rows = (await _call(db, uid, "get_jobs", {"limit": 100}))["jobs"]
+        assert len(rows) == 1 and rows[0]["source_type"] == "ats"
+        assert "greenhouse.io" in rows[0]["url"]
+        # a later aggregator copy must NOT clobber the direct record
+        await _call(db, uid, "upsert_jobs", {"jobs": [job("careerjet", "api", "https://careerjet/z")]})
+        rows = (await _call(db, uid, "get_jobs", {"limit": 100}))["jobs"]
+        assert len(rows) == 1 and rows[0]["source_type"] == "ats" and "greenhouse.io" in rows[0]["url"]
+    finally:
+        await _cleanup(uid)
 
 
 # --------------------------------------------------------------------------- #

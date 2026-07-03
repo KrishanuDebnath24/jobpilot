@@ -21,7 +21,9 @@ DEFAULT_SEARCH_CONFIG = {
     # (Northern Ireland) is where Adzuna's `gb` coverage lands island-of-Ireland jobs.
     "locations": ["Dublin", "Belfast"],
     "keywords": ["python"],
-    "sources": ["adzuna", "greenhouse", "crawl"],
+    # Adzuna (NI), Greenhouse (ATS/RoI), crawler (RoI), + free aggregators for RoI
+    # breadth. JSearch is metered, so it stays OFF until a user opts in.
+    "sources": ["adzuna", "greenhouse", "crawl", "jooble", "careerjet"],
     "target_employers": ["intercom", "stripe"],
     "schedule": None,
 }

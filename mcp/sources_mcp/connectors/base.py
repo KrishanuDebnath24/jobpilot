@@ -41,4 +41,19 @@ SOURCES: list[dict] = [
         "source_type": "crawl",
         "description": "Polite single-board crawler (robots + rate limit) with constrained Haiku extraction.",
     },
+    {
+        "name": "jooble",
+        "source_type": "api",
+        "description": "Jooble aggregator — free-string RoI location coverage (default on).",
+    },
+    {
+        "name": "careerjet",
+        "source_type": "api",
+        "description": "Careerjet aggregator — Ireland site via en_IE locale (default on).",
+    },
+    {
+        "name": "jsearch",
+        "source_type": "api",
+        "description": "JSearch/Google-for-Jobs (Indeed/LinkedIn reach) — metered, default OFF.",
+    },
 ]

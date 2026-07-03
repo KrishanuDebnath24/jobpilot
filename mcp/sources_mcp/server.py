@@ -15,7 +15,7 @@ from jobpilot_core.mcp_auth import UserContextMiddleware, require_user_id
 from jobpilot_core.settings import get_settings
 from mcp.server.fastmcp import FastMCP
 
-from .connectors import adzuna, crawl, greenhouse
+from .connectors import adzuna, careerjet, crawl, greenhouse, jooble, jsearch
 from .connectors.base import SOURCES
 
 settings = get_settings()
@@ -61,6 +61,45 @@ async def fetch_greenhouse(
     )
     connector = f"greenhouse:{company.strip().lower()}"
     return {"connector": connector, "count": len(jobs), "jobs": [j.model_dump() for j in jobs]}
+
+
+@mcp.tool()
+async def search_jooble(
+    roles: list[str] | None = None,
+    keywords: list[str] | None = None,
+    location: str = "Dublin, Ireland",
+) -> dict:
+    """Jooble aggregator (free-string RoI location) -> common raw shape."""
+    require_user_id()
+    jobs = await jooble.search_jooble(settings, roles=roles, keywords=keywords, location=location)
+    return {"connector": "jooble", "count": len(jobs), "jobs": [j.model_dump() for j in jobs]}
+
+
+@mcp.tool()
+async def search_careerjet(
+    roles: list[str] | None = None,
+    keywords: list[str] | None = None,
+    location: str = "Dublin",
+) -> dict:
+    """Careerjet aggregator (Ireland site, en_IE locale) -> common raw shape."""
+    require_user_id()
+    jobs = await careerjet.search_careerjet(settings, roles=roles, keywords=keywords, location=location)
+    return {"connector": "careerjet", "count": len(jobs), "jobs": [j.model_dump() for j in jobs]}
+
+
+@mcp.tool()
+async def search_jsearch(
+    roles: list[str] | None = None,
+    keywords: list[str] | None = None,
+    location: str = "Dublin, Ireland",
+    num_pages: int | None = None,
+) -> dict:
+    """JSearch/Google-for-Jobs (metered; country=ie) -> common raw shape."""
+    require_user_id()
+    jobs = await jsearch.search_jsearch(
+        settings, roles=roles, keywords=keywords, location=location, num_pages=num_pages
+    )
+    return {"connector": "jsearch", "count": len(jobs), "jobs": [j.model_dump() for j in jobs]}
 
 
 @mcp.tool()

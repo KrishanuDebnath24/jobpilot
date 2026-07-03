@@ -65,6 +65,20 @@ class Settings(BaseSettings):
     adzuna_results_per_page: int = 50  # Adzuna max page size
     adzuna_max_locations: int = 3  # bound free-tier quota: one call per location, capped
 
+    # --- Aggregator connectors for Republic-of-Ireland coverage (Adzuna can't serve
+    #     RoI). Backend/sources-mcp env only. Jooble + Careerjet are free (on by
+    #     default); JSearch is RapidAPI-metered (off by default, page-capped). ---
+    jooble_api_key: str = ""
+    careerjet_api_key: str = ""  # Careerjet affiliate id (affid)
+    careerjet_locale: str = "en_IE"  # the Ireland site
+    careerjet_user_ip: str = "127.0.0.1"  # representative server IP for attribution
+    rapidapi_key: str = ""  # JSearch (RapidAPI)
+    jsearch_host: str = "jsearch.p.rapidapi.com"
+    jsearch_country: str = "ie"
+    jsearch_max_pages: int = 1  # hard cost cap on the metered source
+    jsearch_date_posted: str = "all"
+    aggregator_results_per_page: int = 50  # cap per aggregator call
+
     # --- Crawler connector politeness + spend guards ---
     # The board rejects unknown UAs at the network layer (disconnects non-browsers),
     # so we send a mainstream browser UA. Politeness is still enforced the ways that
@@ -110,6 +124,24 @@ class Settings(BaseSettings):
                 "key (starts with 'sk-ant-') in the environment before starting a "
                 "service that makes LLM calls (Phase 2+)."
             )
+        return key
+
+    def require_jooble_key(self) -> str:
+        key = (self.jooble_api_key or "").strip()
+        if not key:
+            raise RuntimeError("JOOBLE_API_KEY is not configured (get one free at jooble.org/api/about)")
+        return key
+
+    def require_careerjet_affid(self) -> str:
+        key = (self.careerjet_api_key or "").strip()
+        if not key:
+            raise RuntimeError("CAREERJET_API_KEY (affiliate id) is not configured (careerjet.com/partners)")
+        return key
+
+    def require_rapidapi_key(self) -> str:
+        key = (self.rapidapi_key or "").strip()
+        if not key:
+            raise RuntimeError("RAPIDAPI_KEY is not configured (subscribe to JSearch on RapidAPI)")
         return key
 
 

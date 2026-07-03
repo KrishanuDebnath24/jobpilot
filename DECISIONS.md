@@ -141,3 +141,39 @@ Running log of non-obvious engineering choices. One line + rationale each.
   them** (its container gets only `NEXT_PUBLIC_API_URL`). Adzuna authenticates via query params,
   so its (read-only, free-tier) key can appear in HTTP client logs — keep client log level at
   WARNING in production to avoid logging it.
+
+## Phase 2 Addendum — Aggregator connectors (Jooble · Careerjet · JSearch)
+
+- **Purpose: real Republic-of-Ireland coverage.** Adzuna can't serve RoI, so three aggregator
+  connectors were added to the *existing* `sources-mcp`. They reuse everything — the connector
+  interface, the deterministic normalize step, the `dedupe_hash` collapse, and the `db-mcp`
+  write path. Adzuna (NI-via-`gb`), Greenhouse (ATS), and the irishjobs.ie crawler are unchanged.
+  All three are deterministic field-mapping (structured JSON → raw shape); **no LLM** (the crawl
+  path stays the only LLM path).
+- **Tagging.** `source_type='api'` for all three; identity lives in `connector`
+  (`jooble` | `careerjet` | `jsearch`). Jooble takes a free-string location (`"Dublin, Ireland"`);
+  Careerjet uses `locale_code=en_IE`; JSearch uses `country=ie`.
+- **Careerjet is a hand-rolled thin httpx client** over the documented public JSON endpoint
+  (not the third-party `careerjet-api` package) to keep output-shape control. It's an affiliate
+  API, so we send `affid` (`CAREERJET_API_KEY`) + `user_ip` (`careerjet_user_ip`, default
+  `127.0.0.1`) + `user_agent` (the crawler UA) + `url` (`frontend_origin`), and log the affiliate
+  params on each call for attribution transparency.
+- **JSearch is the cost surface — default OFF, page-capped, logged.** It's RapidAPI-metered
+  (Google-for-Jobs → Indeed/LinkedIn/Glassdoor reach). It only runs when a user puts `jsearch`
+  in `sources[]`, is bounded by `jsearch_max_pages` (default 1), and logs every call against the
+  RapidAPI quota. Verified: off → Scout makes zero RapidAPI calls; on → the connector is attempted.
+  (RapidAPI requires a per-API subscription: a valid key that isn't subscribed to JSearch returns
+  a clean `403 "not subscribed"`, handled as graceful degradation.)
+- **Dedup precedence: `ats > crawl > aggregator`.** `upsert_jobs` now compares source rank on a
+  `dedupe_hash` collision and only (over)writes when the incoming record is at least as direct as
+  the stored one. So a job carried by both a direct source (Greenhouse/crawler) and an aggregator
+  collapses to one row that **keeps the direct record** (canonical apply link, richer fields),
+  regardless of connector run order. Aggregators fill coverage gaps; they never overwrite direct
+  data. Re-runs stay idempotent.
+- **Enablement defaults.** Free aggregators (Jooble, Careerjet) are **on by default** in the
+  seeded config; JSearch is **off**. `config-mcp` `sources[]` is the single toggle; the enum now
+  advertises the three new names via `list_sources()`.
+- **Per-connector fail-fast with clear errors.** Missing keys raise a clear message at call time
+  (`require_jooble_key` / `require_careerjet_affid` / `require_rapidapi_key`) — caught by the
+  fan-out's error isolation (one failing/unconfigured source is recorded on the `pipeline_runs`
+  row, never fatal). This keeps optional sources optional without failing service boot.
