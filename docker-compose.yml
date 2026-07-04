@@ -213,6 +213,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jobpilot}:${POSTGRES_PASSWORD:-jobpilot_dev_pw}@db:5432/${POSTGRES_DB:-jobpilot}
       REDIS_URL: redis://redis:6379/0
       DB_MCP_URL: http://db-mcp:8001/mcp
+      RESUME_MCP_URL: http://resume-mcp:8002/mcp
       CONFIG_MCP_URL: http://config-mcp:8003/mcp
       SOURCES_MCP_URL: http://sources-mcp:8004/mcp
     depends_on:
@@ -221,6 +222,8 @@ services:
       migrate:
         condition: service_completed_successfully
       db-mcp:
+        condition: service_started
+      resume-mcp:
         condition: service_started
       config-mcp:
         condition: service_started

@@ -4,23 +4,24 @@ An agentic job-hunting cockpit. Upload a resume, describe target roles in chat, 
 pipeline of cooperating agents scouts, qualifies, analyzes, and improves your
 applications — all driven from a dashboard + streaming chat.
 
-> **Status: Phase 2 (Scout — source connectors, search config & dedupe).**
-> Adds `config-mcp` (search config) and `sources-mcp` (connector hub: Adzuna API,
-> Greenhouse ATS, and one polite Haiku-extraction crawler), a deterministic
-> normalize + dedupe tail persisted through `db-mcp`, and Scout as a tracked Celery
-> background job (`pipeline_runs`). **First phase that makes LLM calls** — Haiku 4.5,
-> extraction only, on the crawl path. Builds on Phase 1 (data layer, MCP boundary,
-> resume ingestion & GDPR erasure). See `directions/` work orders + `DECISIONS.md`.
+> **Status: Phase 3 (Qualifier — hybrid ATS scoring + Dashboard v1).**
+> Adds a hybrid Qualifier — a pure deterministic gate + weighted scoring, then gated
+> **Haiku** refinement (temp 0, structured, injection-hardened) only for gate-passers —
+> a tracked Celery `qualify` stage, and a real Next.js **dashboard** (scores, decisions,
+> fact-citing reasons, filters/sort). Builds on Phase 2 (Scout + connectors: Adzuna,
+> Greenhouse, Jooble, Careerjet, JSearch, crawler) and Phase 1 (data layer, MCP
+> boundary, resume ingestion & GDPR erasure). See `directions/` work orders + `DECISIONS.md`.
 
 ## Repository layout
 
 ```
 packages/core/    Shared package `jobpilot_core` — SQLAlchemy models, async DB,
                   repositories, security, storage, resume parsing, MCP auth,
-                  LLM wrapper (llm.py), Scout raw-shape + normalize/dedupe (scout.py)
-                  + Alembic migrations (packages/core/migrations)
-backend/          FastAPI API (auth, /ready, resume, jobs, erasure, /scout/*),
-                  Scout orchestration (scout_runner.py) + Celery task (tasks.py)
+                  LLM wrapper (llm.py), Scout normalize/dedupe (scout.py),
+                  Qualifier scorer (qualifier.py) + Alembic migrations
+backend/          FastAPI API (auth, /ready, resume, jobs, erasure, /scout/*,
+                  /qualify/*, /dashboard/*), Scout + Qualify orchestration
+                  (scout_runner.py, qualify_runner.py) + Celery tasks (tasks.py)
 mcp/db_mcp/       db-mcp   — scoped CRUD, pipeline-run tracking, delete_user_data
 mcp/resume_mcp/   resume-mcp — parse_resume + get_structured_resume
 mcp/config_mcp/   config-mcp — get/update_search_config (user-scoped)
@@ -65,10 +66,14 @@ backend → frontend.
 Trigger a Scout run once logged in (see smoke tests for the token dance):
 
 ```bash
-curl -X POST http://localhost:8000/scout/run  -H "Authorization: Bearer $TOKEN"   # -> {task_id,...}
-curl      http://localhost:8000/scout/runs -H "Authorization: Bearer $TOKEN"   # tracked runs + counts
-curl      http://localhost:8000/jobs       -H "Authorization: Bearer $TOKEN"   # normalized, deduped
+curl -X POST http://localhost:8000/scout/run    -H "Authorization: Bearer $TOKEN"  # -> {task_id,...}
+curl -X POST http://localhost:8000/qualify/run  -H "Authorization: Bearer $TOKEN"  # hybrid ATS scoring
+curl      http://localhost:8000/dashboard/jobs -H "Authorization: Bearer $TOKEN"  # jobs + qualifications
 ```
+
+Upload a resume first (`POST /resumes` with `consent=true`) — it seeds a conservative qualifier
+config. Then open the **dashboard** at http://localhost:3000 (sign in with the seeded user) to see
+qualified/disqualified jobs with scores, fact-citing reasons, filters, and sort.
 
 ## Local dev (processes on the host against dockerized infra)
 

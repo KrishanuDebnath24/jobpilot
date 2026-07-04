@@ -140,6 +140,16 @@ async def upload_resume(
             "consent": consent,
         },
     )
+    # Seed a conservative default qualifier config from the resume skills (only if the
+    # user has none yet) so a sensible default is present right after upload.
+    if result.get("stored"):
+        skills = (result.get("structured") or {}).get("skills") or []
+        try:
+            await mcp_client.config_mcp(
+                current_user.id, "ensure_qualifier_config", {"resume_skills": skills}
+            )
+        except Exception:  # noqa: BLE001 - config seeding is best-effort, never blocks upload
+            pass
     return result
 
 
@@ -172,6 +182,33 @@ async def trigger_scout(current_user=Depends(get_current_user)) -> dict:
 @app.get("/scout/runs", tags=["scout"])
 async def list_scout_runs(current_user=Depends(get_current_user)) -> dict:
     return await mcp_client.db_mcp(current_user.id, "get_pipeline_runs", {"stage": "scout"})
+
+
+# --------------------------------------------------------------------------- #
+# Qualifier (background stage; run tracking through db-mcp)
+# --------------------------------------------------------------------------- #
+@app.post("/qualify/run", tags=["qualify"], status_code=status.HTTP_202_ACCEPTED)
+async def trigger_qualify(
+    requalify_all: bool = False, current_user=Depends(get_current_user)
+) -> dict:
+    """Queue a Qualifier run for the current user (hybrid scoring over their pool)."""
+    from .tasks import qualify_run
+
+    task = qualify_run.delay(str(current_user.id), requalify_all)
+    return {"task_id": task.id, "status": "queued"}
+
+
+@app.get("/qualify/runs", tags=["qualify"])
+async def list_qualify_runs(current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.db_mcp(current_user.id, "get_pipeline_runs", {"stage": "qualify"})
+
+
+# --------------------------------------------------------------------------- #
+# Dashboard (jobs joined with qualifications, through db-mcp)
+# --------------------------------------------------------------------------- #
+@app.get("/dashboard/jobs", tags=["dashboard"])
+async def dashboard_jobs(current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.db_mcp(current_user.id, "get_qualified_jobs", {"limit": 1000})
 
 
 # --------------------------------------------------------------------------- #

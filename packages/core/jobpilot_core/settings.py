@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     scout_extractor_model: str = "claude-haiku-4-5-20251001"
     # Hard per-call output cap — a code-level spend guard alongside the Console cap.
     llm_max_output_tokens: int = 1024
+    # Cap jobs scored per Qualifier run (bounds LLM spend on the gated refine pass).
+    qualify_max_jobs: int = 200
 
     # --- Adzuna connector (free developer tier). Backend/sources-mcp env only. ---
     adzuna_app_id: str = ""

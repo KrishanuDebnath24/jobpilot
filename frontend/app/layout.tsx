@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "JobPilot",
-  description: "Agentic job-hunting cockpit — Phase 0 scaffold.",
+  title: "JobPilot — Dashboard",
+  description: "Agentic job-hunting cockpit — Qualifier dashboard.",
 };
 
 export default function RootLayout({

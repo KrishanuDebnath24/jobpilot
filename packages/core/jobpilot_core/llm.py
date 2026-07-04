@@ -116,13 +116,18 @@ async def extract_json(
     settings: Settings,
     model: str | None = None,
     max_tokens: int | None = None,
+    temperature: float | None = None,
 ) -> LLMResult:
     """Force a single tool call with ``input_schema`` and return its validated
     arguments as ``data``. Extract-only: the model must respond via the tool, so
-    untrusted page text cannot steer generation or tool selection.
+    untrusted text cannot steer generation or tool selection. ``temperature=0`` gives
+    reproducible scoring.
     """
     client = get_client(settings)
     mdl = _model(settings, model)
+    kwargs: dict = {}
+    if temperature is not None:
+        kwargs["temperature"] = temperature
     resp = await client.messages.create(
         model=mdl,
         max_tokens=min(max_tokens or settings.llm_max_output_tokens, settings.llm_max_output_tokens),
@@ -130,6 +135,7 @@ async def extract_json(
         messages=[{"role": "user", "content": user_text}],
         tools=[{"name": tool_name, "description": tool_description, "input_schema": input_schema}],
         tool_choice={"type": "tool", "name": tool_name},
+        **kwargs,
     )
     usage = _log(mdl, resp.usage)
     data: Any = None

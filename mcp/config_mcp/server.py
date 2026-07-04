@@ -55,4 +55,54 @@ async def update_search_config(
         return {"config": repositories.search_config_to_dict(cfg)}
 
 
+# --------------------------------------------------------------------------- #
+# Qualifier config (Phase 3)
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+async def get_qualifier_config() -> dict:
+    """Return the caller's qualifier config (a sensible default shape if none exists)."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        cfg = await repositories.get_qualifier_config(session, uid)
+        return {"config": repositories.qualifier_config_to_dict(cfg)}
+
+
+@mcp.tool()
+async def update_qualifier_config(
+    weights_json: dict | None = None,
+    threshold: float | None = None,
+    must_have: list[str] | None = None,
+    nice_to_have: list[str] | None = None,
+) -> dict:
+    """Create-or-update the caller's qualifier config (partial update). ``weights_json``
+    = {skills,experience,title_keyword,location}; ``must_have`` missing → hard-disqualify."""
+    uid = require_user_id()
+    fields = {
+        "weights_json": weights_json,
+        "threshold": threshold,
+        "must_have": must_have,
+        "nice_to_have": nice_to_have,
+    }
+    async with session_scope() as session:
+        cfg = await repositories.upsert_qualifier_config(session, uid, fields)
+        return {"config": repositories.qualifier_config_to_dict(cfg)}
+
+
+@mcp.tool()
+async def ensure_qualifier_config(resume_skills: list[str] | None = None) -> dict:
+    """Seed a conservative default (skills → nice-to-haves, no must-haves, moderate
+    threshold) ONLY if the caller has no qualifier config yet. Idempotent."""
+    from jobpilot_core.qualifier import default_qualifier_config
+
+    uid = require_user_id()
+    async with session_scope() as session:
+        existing = await repositories.get_qualifier_config(session, uid)
+        if existing is not None:
+            return {"config": repositories.qualifier_config_to_dict(existing), "seeded": False}
+        cfg = await repositories.upsert_qualifier_config(
+            session, uid, default_qualifier_config(resume_skills or [])
+        )
+        return {"config": repositories.qualifier_config_to_dict(cfg), "seeded": True}
+
+
 app = UserContextMiddleware(mcp.streamable_http_app(), settings)

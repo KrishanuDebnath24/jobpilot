@@ -79,6 +79,33 @@ async def get_qualifications() -> dict:
 
 
 @mcp.tool()
+async def upsert_qualification(
+    job_id: str,
+    score: float | None = None,
+    decision: str | None = None,
+    reasons_json: dict | None = None,
+    matched_skills: list[str] | None = None,
+    missing_skills: list[str] | None = None,
+) -> dict:
+    """Persist a qualification (one per user+job; re-qualify overwrites)."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        q = await repositories.upsert_qualification(
+            session, uid, uuid.UUID(job_id), score, decision, reasons_json,
+            matched_skills or [], missing_skills or [],
+        )
+        return {"qualification": {"id": str(q.id), "job_id": str(q.job_id), "decision": q.decision}}
+
+
+@mcp.tool()
+async def get_qualified_jobs(limit: int = 1000) -> dict:
+    """Jobs left-joined with their qualification (for the dashboard)."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        return {"jobs": await repositories.get_qualified_jobs(session, uid, limit=limit)}
+
+
+@mcp.tool()
 async def get_analyses() -> dict:
     uid = require_user_id()
     async with session_scope() as session:

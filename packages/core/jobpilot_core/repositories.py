@@ -287,8 +287,122 @@ async def upsert_search_config(
 
 
 # --------------------------------------------------------------------------- #
+# Qualifier config (config-mcp)
+# --------------------------------------------------------------------------- #
+_QUALIFIER_FIELDS = ("weights_json", "threshold", "must_have", "nice_to_have")
+
+
+def qualifier_config_to_dict(cfg: models.QualifierConfig | None) -> dict:
+    from .qualifier import DEFAULT_THRESHOLD, DEFAULT_WEIGHTS
+
+    if cfg is None:
+        return {
+            "id": None, "weights_json": dict(DEFAULT_WEIGHTS), "threshold": DEFAULT_THRESHOLD,
+            "must_have": [], "nice_to_have": [],
+        }
+    return {
+        "id": str(cfg.id),
+        "weights_json": cfg.weights_json or {},
+        "threshold": cfg.threshold,
+        "must_have": list(cfg.must_have or []),
+        "nice_to_have": list(cfg.nice_to_have or []),
+        "created_at": _iso(cfg.created_at),
+    }
+
+
+async def get_qualifier_config(
+    session: AsyncSession, user_id: uuid.UUID
+) -> models.QualifierConfig | None:
+    return (
+        await session.execute(
+            select(models.QualifierConfig)
+            .where(models.QualifierConfig.user_id == user_id)
+            .order_by(models.QualifierConfig.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def upsert_qualifier_config(
+    session: AsyncSession, user_id: uuid.UUID, fields: dict
+) -> models.QualifierConfig:
+    cfg = await get_qualifier_config(session, user_id)
+    if cfg is None:
+        cfg = models.QualifierConfig(user_id=user_id)
+        session.add(cfg)
+    for key in _QUALIFIER_FIELDS:
+        if key in fields and fields[key] is not None:
+            setattr(cfg, key, fields[key])
+    await session.flush()
+    return cfg
+
+
+# --------------------------------------------------------------------------- #
 # Qualifications / analyses / suggestions
 # --------------------------------------------------------------------------- #
+async def upsert_qualification(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    job_id: uuid.UUID,
+    score: float | None,
+    decision: str | None,
+    reasons_json: dict | None,
+    matched_skills: list[str],
+    missing_skills: list[str],
+) -> models.Qualification:
+    """One qualification per (user, job); re-qualify overwrites (idempotent)."""
+    existing = (
+        await session.execute(
+            select(models.Qualification).where(
+                models.Qualification.user_id == user_id,
+                models.Qualification.job_id == job_id,
+            )
+        )
+    ).scalar_one_or_none()
+    q = existing or models.Qualification(user_id=user_id, job_id=job_id)
+    q.score = score
+    q.decision = decision
+    q.reasons_json = reasons_json
+    q.matched_skills = matched_skills
+    q.missing_skills = missing_skills
+    if existing is None:
+        session.add(q)
+    await session.flush()
+    return q
+
+
+async def get_qualified_jobs(session: AsyncSession, user_id: uuid.UUID, limit: int = 1000) -> list[dict]:
+    """Jobs joined with their qualification (LEFT JOIN) for the dashboard."""
+    stmt = (
+        select(models.Job, models.Qualification)
+        .outerjoin(
+            models.Qualification,
+            (models.Qualification.job_id == models.Job.id)
+            & (models.Qualification.user_id == user_id),
+        )
+        .where(models.Job.user_id == user_id)
+        .order_by(models.Job.created_at.desc())
+        .limit(limit)
+    )
+    rows = (await session.execute(stmt)).all()
+    out: list[dict] = []
+    for job, q in rows:
+        d = job_to_dict(job)
+        d["qualification"] = (
+            {
+                "score": q.score,
+                "decision": q.decision,
+                "matched_skills": list(q.matched_skills or []),
+                "missing_skills": list(q.missing_skills or []),
+                "reasons_json": q.reasons_json,
+            }
+            if q is not None
+            else None
+        )
+        out.append(d)
+    return out
+
+
 async def get_qualifications(session: AsyncSession, user_id: uuid.UUID) -> list[dict]:
     res = await session.execute(
         select(models.Qualification).where(models.Qualification.user_id == user_id)
