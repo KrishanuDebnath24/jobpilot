@@ -156,14 +156,23 @@ Running log of non-obvious engineering choices. One line + rationale each.
 - **Careerjet is a hand-rolled thin httpx client** over the documented public JSON endpoint
   (not the third-party `careerjet-api` package) to keep output-shape control. It's an affiliate
   API, so we send `affid` (`CAREERJET_API_KEY`) + `user_ip` (`careerjet_user_ip`, default
-  `127.0.0.1`) + `user_agent` (the crawler UA) + `url` (`frontend_origin`), and log the affiliate
-  params on each call for attribution transparency.
-- **JSearch is the cost surface — default OFF, page-capped, logged.** It's RapidAPI-metered
-  (Google-for-Jobs → Indeed/LinkedIn/Glassdoor reach). It only runs when a user puts `jsearch`
-  in `sources[]`, is bounded by `jsearch_max_pages` (default 1), and logs every call against the
-  RapidAPI quota. Verified: off → Scout makes zero RapidAPI calls; on → the connector is attempted.
-  (RapidAPI requires a per-API subscription: a valid key that isn't subscribed to JSearch returns
-  a clean `403 "not subscribed"`, handled as graceful degradation.)
+  `127.0.0.1`) + `user_agent` (the crawler UA) + `url` (`frontend_origin`) **and a `Referer`
+  header** (`frontend_origin`) — Careerjet 403s ("undeclared referrer") without it. Affiliate
+  params are logged per call for attribution transparency. Verified live: `en_IE` returns real
+  Dublin/RoI jobs.
+- **JSearch — provider-agnostic, default OFF, page-capped, logged.** Google-for-Jobs reach
+  (Indeed/LinkedIn/Glassdoor). The connector prefers **OpenWeb Ninja** (`api.openwebninja.com`,
+  `X-API-Key` — the canonical JSearch source) when `JSEARCH_API_KEY` is set, else falls back to
+  **RapidAPI** (`RAPIDAPI_KEY`); it handles both response envelopes (`data` list vs
+  `{jobs, cursor}`). Only runs when `jsearch` is in `sources[]`, bounded by `jsearch_max_pages`
+  (default 1), every call logged. Verified: off → zero calls; on → attempted.
+- **JSearch/Google-for-Jobs has no Republic-of-Ireland coverage today.** Verified against the
+  live API: `gb`/`de`/`us` return jobs, but `ie` returns 0 on every phrasing and both endpoints.
+  So JSearch does **not** contribute RoI results — RoI coverage comes from Jooble + Careerjet +
+  the crawler. JSearch is kept functional (other markets + future coverage) but stays off by
+  default. (RapidAPI additionally requires a per-API subscription; an unsubscribed key returns a
+  clean `403 "not subscribed"`, handled as graceful degradation — which is what prompted the
+  switch to OpenWeb Ninja.)
 - **Dedup precedence: `ats > crawl > aggregator`.** `upsert_jobs` now compares source rank on a
   `dedupe_hash` collision and only (over)writes when the incoming record is at least as direct as
   the stored one. So a job carried by both a direct source (Greenhouse/crawler) and an aggregator

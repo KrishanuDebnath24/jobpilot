@@ -72,7 +72,11 @@ class Settings(BaseSettings):
     careerjet_api_key: str = ""  # Careerjet affiliate id (affid)
     careerjet_locale: str = "en_IE"  # the Ireland site
     careerjet_user_ip: str = "127.0.0.1"  # representative server IP for attribution
-    rapidapi_key: str = ""  # JSearch (RapidAPI)
+    # JSearch (Google-for-Jobs) has two provider options; the connector prefers
+    # OpenWeb Ninja (its canonical source) when JSEARCH_API_KEY is set, else RapidAPI.
+    jsearch_api_key: str = ""  # OpenWeb Ninja (X-API-Key header)
+    jsearch_base_url: str = "https://api.openwebninja.com/jsearch/search-v2"
+    rapidapi_key: str = ""  # JSearch via RapidAPI (fallback)
     jsearch_host: str = "jsearch.p.rapidapi.com"
     jsearch_country: str = "ie"
     jsearch_max_pages: int = 1  # hard cost cap on the metered source
@@ -138,11 +142,24 @@ class Settings(BaseSettings):
             raise RuntimeError("CAREERJET_API_KEY (affiliate id) is not configured (careerjet.com/partners)")
         return key
 
-    def require_rapidapi_key(self) -> str:
-        key = (self.rapidapi_key or "").strip()
-        if not key:
-            raise RuntimeError("RAPIDAPI_KEY is not configured (subscribe to JSearch on RapidAPI)")
-        return key
+    def jsearch_provider(self) -> tuple[str, str, dict]:
+        """Pick the JSearch provider and return (name, url, headers). Prefers
+        OpenWeb Ninja (canonical JSearch source) when its key is set, else RapidAPI.
+        Raises a clear error if neither is configured."""
+        own = (self.jsearch_api_key or "").strip()
+        if own:
+            return ("openwebninja", self.jsearch_base_url, {"X-API-Key": own})
+        rapid = (self.rapidapi_key or "").strip()
+        if rapid:
+            return (
+                "rapidapi",
+                "https://jsearch.p.rapidapi.com/search",
+                {"X-RapidAPI-Key": rapid, "X-RapidAPI-Host": self.jsearch_host},
+            )
+        raise RuntimeError(
+            "No JSearch key configured (set JSEARCH_API_KEY for OpenWeb Ninja, "
+            "or RAPIDAPI_KEY with a JSearch subscription)"
+        )
 
 
 @lru_cache

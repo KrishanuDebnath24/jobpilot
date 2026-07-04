@@ -61,12 +61,15 @@ async def search_careerjet(
         "user_agent": settings.crawler_user_agent,
         "url": settings.frontend_origin,
     }
+    # Careerjet also requires a Referer header (attribution: "from which page").
+    headers = {"Referer": settings.frontend_origin, "User-Agent": settings.crawler_user_agent}
     logger.info(
-        "careerjet.call locale=%s affid=%s… user_ip=%s location=%r",
-        settings.careerjet_locale, affid[:4], settings.careerjet_user_ip, location,
+        "careerjet.call locale=%s affid=%s… user_ip=%s referer=%s location=%r",
+        settings.careerjet_locale, affid[:4], settings.careerjet_user_ip,
+        settings.frontend_origin, location,
     )
     async with httpx.AsyncClient(timeout=settings.crawler_timeout_seconds) as client:
-        resp = await client.get(CAREERJET_BASE, params=params)
+        resp = await client.get(CAREERJET_BASE, params=params, headers=headers)
     if resp.status_code != 200:
         raise CareerjetError(f"careerjet HTTP {resp.status_code}: {resp.text[:160]}")
     data = resp.json()

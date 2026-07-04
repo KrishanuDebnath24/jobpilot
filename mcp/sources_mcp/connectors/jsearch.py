@@ -1,9 +1,16 @@
-"""JSearch connector (RapidAPI) — Google-for-Jobs reach (aggregates Indeed,
-LinkedIn, Glassdoor, …), the compliant path to sources we can't hit directly.
+"""JSearch connector — Google-for-Jobs reach (aggregates Indeed, LinkedIn,
+Glassdoor, …), the compliant path to sources we can't hit directly.
+
+Provider-agnostic: prefers OpenWeb Ninja (the canonical JSearch source, X-API-Key)
+and falls back to RapidAPI — both return the same job field shape, and the wrapper
+here handles both response envelopes (``data`` as a list vs ``{jobs, cursor}``).
 
 This is the one metered source: default-OFF in the search config, a hard
-``jsearch_max_pages`` cap, and every call logged against the RapidAPI quota.
-Structured JSON in, deterministic field-mapping out — no LLM.
+``jsearch_max_pages`` cap, and every call logged against quota. No LLM.
+
+NOTE: Google-for-Jobs currently returns **no Republic-of-Ireland results** via this
+API (verified: gb/de/us return jobs, ie returns 0). RoI coverage comes from Jooble/
+Careerjet/crawler; JSearch is kept for other markets + future coverage.
 """
 
 from __future__ import annotations
@@ -15,7 +22,6 @@ from jobpilot_core.scout import RawJob
 from jobpilot_core.settings import Settings
 
 logger = logging.getLogger("jobpilot.sources")
-JSEARCH_BASE = "https://jsearch.p.rapidapi.com/search"
 
 
 class JSearchError(RuntimeError):
@@ -51,13 +57,12 @@ async def search_jsearch(
     location: str = "Dublin, Ireland",
     num_pages: int | None = None,
 ) -> list[RawJob]:
-    """Query JSearch for RoI jobs (``country=ie``). Bounded by ``jsearch_max_pages``;
-    each call is logged (it consumes RapidAPI quota)."""
-    key = settings.require_rapidapi_key()
+    """Query JSearch (``country=ie``). Bounded by ``jsearch_max_pages``; each call is
+    logged (it consumes provider quota)."""
+    provider, url, headers = settings.jsearch_provider()
     kw = " ".join([*(roles or []), *(keywords or [])]).strip() or "software engineer"
     query = f"{kw} in {location}"
     pages = min(num_pages or settings.jsearch_max_pages, settings.jsearch_max_pages)
-    headers = {"X-RapidAPI-Key": key, "X-RapidAPI-Host": settings.jsearch_host}
     params = {
         "query": query,
         "country": settings.jsearch_country,
@@ -66,11 +71,14 @@ async def search_jsearch(
         "date_posted": settings.jsearch_date_posted,
     }
     logger.info(
-        "jsearch.call query=%r country=%s num_pages=%d (RapidAPI quota)",
-        query, settings.jsearch_country, pages,
+        "jsearch.call provider=%s query=%r country=%s num_pages=%d (quota)",
+        provider, query, settings.jsearch_country, pages,
     )
     async with httpx.AsyncClient(timeout=settings.crawler_timeout_seconds) as client:
-        resp = await client.get(JSEARCH_BASE, params=params, headers=headers)
+        resp = await client.get(url, params=params, headers=headers)
     if resp.status_code != 200:
-        raise JSearchError(f"jsearch HTTP {resp.status_code}: {resp.text[:160]}")
-    return [_to_raw(j) for j in resp.json().get("data", [])]
+        raise JSearchError(f"jsearch({provider}) HTTP {resp.status_code}: {resp.text[:160]}")
+    data = resp.json().get("data")
+    # RapidAPI returns data as a list; OpenWeb Ninja returns {"jobs": [...], "cursor": ...}
+    jobs = data.get("jobs", []) if isinstance(data, dict) else (data or [])
+    return [_to_raw(j) for j in jobs]
