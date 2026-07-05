@@ -12,12 +12,24 @@ from __future__ import annotations
 import logging
 import uuid
 
+from jobpilot_core import events
 from jobpilot_core.qualifier import combine, refine_with_llm, score_deterministic
 from jobpilot_core.settings import get_settings
 
 from . import mcp_client
 
 logger = logging.getLogger("jobpilot.qualify")
+
+# Emit a qualify.progress event at most this often (jobs) — keeps the live UI
+# moving without flooding the bus on a big pool.
+_PROGRESS_EVERY = 10
+
+
+async def _emit(user_id: uuid.UUID, event: dict) -> None:
+    try:
+        await events.publish_event(get_settings().redis_url, user_id, event)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("qualify.emit failed: %s", exc)
 
 
 def _version_of(job: dict) -> tuple | None:
@@ -28,8 +40,11 @@ def _version_of(job: dict) -> tuple | None:
     return (rj.get("resume_version"), rj.get("config_version"))
 
 
-async def run_qualify(user_id: uuid.UUID, requalify_all: bool = False) -> dict:
+async def run_qualify(
+    user_id: uuid.UUID, requalify_all: bool = False, pipeline_id: uuid.UUID | str | None = None
+) -> dict:
     settings = get_settings()
+    pid = str(pipeline_id) if pipeline_id else None
     resume_wrap = (await mcp_client.resume_mcp(user_id, "get_structured_resume", {}))["resume"]
     if not resume_wrap or not resume_wrap.get("structured"):
         raise RuntimeError("no resume on file — upload a resume before qualifying")
@@ -47,8 +62,11 @@ async def run_qualify(user_id: uuid.UUID, requalify_all: bool = False) -> dict:
     errors: dict[str, str] = {}
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost_usd": 0.0}
     current = (resume_version, config_version)
+    total = len(jobs)
+    await _emit(user_id, events.make_event(
+        "qualify", events.STARTED, pipeline_id=pid, counts={"total": total}))
 
-    for job in jobs:
+    for processed, job in enumerate(jobs, start=1):
         try:
             if not requalify_all and _version_of(job) == current:
                 counts["skipped"] += 1
@@ -88,6 +106,11 @@ async def run_qualify(user_id: uuid.UUID, requalify_all: bool = False) -> dict:
         except Exception as exc:  # noqa: BLE001 - one bad job must not kill the run
             errors[str(job.get("id", "?"))] = f"{type(exc).__name__}: {exc}"
             logger.warning("qualify.job id=%s FAILED: %s", job.get("id"), exc)
+        if processed % _PROGRESS_EVERY == 0 or processed == total:
+            await _emit(user_id, events.make_event(
+                "qualify", events.PROGRESS, pipeline_id=pid,
+                counts={"processed": processed, "total": total,
+                        "qualified": counts["qualified"], "disqualified": counts["disqualified"]}))
 
     summary = {
         **counts,
@@ -100,19 +123,30 @@ async def run_qualify(user_id: uuid.UUID, requalify_all: bool = False) -> dict:
     return summary
 
 
-async def run_qualify_tracked(user_id: uuid.UUID, requalify_all: bool = False) -> dict:
-    """Run Qualify, recording a ``pipeline_runs`` row (stage='qualify') with counts."""
-    run = await mcp_client.db_mcp(user_id, "create_pipeline_run", {"stage": "qualify"})
+async def run_qualify_tracked(
+    user_id: uuid.UUID, requalify_all: bool = False, pipeline_id: uuid.UUID | str | None = None
+) -> dict:
+    """Run Qualify, recording a ``pipeline_runs`` row (stage='qualify') correlated
+    under ``pipeline_id``, and emitting ``qualify.started/progress/completed/failed``."""
+    pid = str(pipeline_id) if pipeline_id else str(uuid.uuid4())
+    run = await mcp_client.db_mcp(
+        user_id, "create_pipeline_run", {"stage": "qualify", "pipeline_id": pid}
+    )
     run_id = run["id"]
     try:
-        summary = await run_qualify(user_id, requalify_all=requalify_all)
+        summary = await run_qualify(user_id, requalify_all=requalify_all, pipeline_id=pid)
     except Exception as exc:  # noqa: BLE001
         await mcp_client.db_mcp(user_id, "finish_pipeline_run", {
             "run_id": run_id, "status": "failed", "error": f"{type(exc).__name__}: {exc}"})
+        await _emit(user_id, events.make_event(
+            "qualify", events.FAILED, pipeline_id=pid, error=f"{type(exc).__name__}: {exc}"))
         raise
     errors = summary.get("errors") or {}
     err_str = f"{len(errors)} job error(s)" if errors else None
     await mcp_client.db_mcp(user_id, "finish_pipeline_run", {
         "run_id": run_id, "status": "completed", "counts": summary, "error": err_str})
     summary["run_id"] = run_id
+    summary["pipeline_id"] = pid
+    await _emit(user_id, events.make_event(
+        "qualify", events.COMPLETED, pipeline_id=pid, counts=summary))
     return summary

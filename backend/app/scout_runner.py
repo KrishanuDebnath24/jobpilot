@@ -12,11 +12,22 @@ from __future__ import annotations
 import logging
 import uuid
 
+from jobpilot_core import events
 from jobpilot_core.scout import normalize_raw
+from jobpilot_core.settings import get_settings
 
 from . import mcp_client
 
 logger = logging.getLogger("jobpilot.scout")
+
+
+async def _emit(user_id: uuid.UUID, event: dict) -> None:
+    """Publish a pipeline event (fire-and-forget; a failed publish never fails the
+    run — the persisted pipeline_runs row is the source of truth)."""
+    try:
+        await events.publish_event(get_settings().redis_url, user_id, event)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("scout.emit failed: %s", exc)
 
 # High enough to cover a full scout batch for the counts below (Phase-2 volumes).
 _COUNT_LIMIT = 5000
@@ -117,21 +128,33 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
     return summary
 
 
-async def run_scout_tracked(user_id: uuid.UUID, config: dict | None = None) -> dict:
+async def run_scout_tracked(
+    user_id: uuid.UUID, config: dict | None = None, pipeline_id: uuid.UUID | str | None = None
+) -> dict:
     """Run Scout, recording a ``pipeline_runs`` row (via db-mcp) with the run's
-    counts. A connector failing is captured in the summary; only a catastrophic
-    failure marks the whole run 'failed'."""
-    run = await mcp_client.db_mcp(user_id, "create_pipeline_run", {"stage": "scout"})
+    counts, correlated under ``pipeline_id``. Emits ``scout.started`` / ``.completed``
+    / ``.failed`` on the event bus. A connector failing is captured in the summary;
+    only a catastrophic failure (no data at all) marks the whole run 'failed'."""
+    pid = str(pipeline_id) if pipeline_id else str(uuid.uuid4())
+    run = await mcp_client.db_mcp(
+        user_id, "create_pipeline_run", {"stage": "scout", "pipeline_id": pid}
+    )
     run_id = run["id"]
+    await _emit(user_id, events.make_event("scout", events.STARTED, pipeline_id=pid))
     try:
         summary = await run_scout(user_id, config)
     except Exception as exc:  # noqa: BLE001 - record the failure, then re-raise
         await mcp_client.db_mcp(user_id, "finish_pipeline_run", {
             "run_id": run_id, "status": "failed", "error": f"{type(exc).__name__}: {exc}"})
+        await _emit(user_id, events.make_event(
+            "scout", events.FAILED, pipeline_id=pid, error=f"{type(exc).__name__}: {exc}"))
         raise
     errors = summary.get("errors") or {}
     err_str = f"{len(errors)} connector error(s): {', '.join(errors)}" if errors else None
     await mcp_client.db_mcp(user_id, "finish_pipeline_run", {
         "run_id": run_id, "status": "completed", "counts": summary, "error": err_str})
     summary["run_id"] = run_id
+    summary["pipeline_id"] = pid
+    await _emit(user_id, events.make_event(
+        "scout", events.COMPLETED, pipeline_id=pid, counts=summary))
     return summary

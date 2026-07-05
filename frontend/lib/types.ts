@@ -53,6 +53,7 @@ export type RunCounts = Record<string, unknown> & {
 
 export type PipelineRun = {
   id: string;
+  pipeline_id?: string | null;
   stage: string;
   status: string;
   started_at: string | null;
@@ -60,4 +61,25 @@ export type PipelineRun = {
   counts: RunCounts | null;
   error: string | null;
   created_at: string | null;
+};
+
+// Phase 4: one autonomous execution (umbrella + its stage runs).
+export type PipelineExecution = {
+  pipeline_id: string;
+  status: string; // running | completed | failed | unknown
+  error: string | null;
+  created_at: string | null;
+  finished_at: string | null;
+  stages: { scout?: PipelineRun; qualify?: PipelineRun };
+} | null;
+
+// A live event relayed over SSE from the Redis bus.
+export type PipelineEvent = {
+  type: string; // "scout.completed", "qualify.progress", "pipeline.started", …
+  stage: string; // scout | qualify | pipeline
+  kind: string; // started | progress | completed | failed
+  pipeline_id: string | null;
+  counts: RunCounts | null;
+  ts: string;
+  error?: string;
 };

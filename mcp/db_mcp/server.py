@@ -128,11 +128,25 @@ async def update_suggestion_status(suggestion_id: str, status: str) -> dict:
 
 
 @mcp.tool()
-async def create_pipeline_run(stage: str) -> dict:
+async def create_pipeline_run(stage: str, pipeline_id: str | None = None) -> dict:
+    """Open a stage run. ``pipeline_id`` correlates it with the umbrella execution
+    it belongs to (Phase 4); None for a legacy/standalone stage run."""
+    uid = require_user_id()
+    pid = uuid.UUID(pipeline_id) if pipeline_id else None
+    async with session_scope() as session:
+        run = await repositories.create_pipeline_run(session, uid, stage, pipeline_id=pid)
+        return {"id": str(run.id), "stage": run.stage, "status": run.status,
+                "pipeline_id": pipeline_id}
+
+
+@mcp.tool()
+async def get_stage_status(pipeline_id: str, stage: str) -> dict:
+    """The persisted status of one stage of one pipeline — the *source of truth* the
+    orchestrator reconciles against so a dropped pub/sub event can't hang a run."""
     uid = require_user_id()
     async with session_scope() as session:
-        run = await repositories.create_pipeline_run(session, uid, stage)
-        return {"id": str(run.id), "stage": run.stage, "status": run.status}
+        row = await repositories.get_stage_status(session, uid, uuid.UUID(pipeline_id), stage)
+        return {"run": row}
 
 
 @mcp.tool()

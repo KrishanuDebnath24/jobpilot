@@ -4,13 +4,15 @@ An agentic job-hunting cockpit. Upload a resume, describe target roles in chat, 
 pipeline of cooperating agents scouts, qualifies, analyzes, and improves your
 applications — all driven from a dashboard + streaming chat.
 
-> **Status: Phase 3 (Qualifier — hybrid ATS scoring + Dashboard v1).**
-> Adds a hybrid Qualifier — a pure deterministic gate + weighted scoring, then gated
-> **Haiku** refinement (temp 0, structured, injection-hardened) only for gate-passers —
-> a tracked Celery `qualify` stage, and a real Next.js **dashboard** (scores, decisions,
-> fact-citing reasons, filters/sort). Builds on Phase 2 (Scout + connectors: Adzuna,
-> Greenhouse, Jooble, Careerjet, JSearch, crawler) and Phase 1 (data layer, MCP
-> boundary, resume ingestion & GDPR erasure). See `directions/` work orders + `DECISIONS.md`.
+> **Status: Phase 4 (Orchestrator — autonomous Scout→Qualify + live status).**
+> A **LangGraph** control plane sequences the existing Celery stages with no human between
+> them: one trigger runs Scout→Qualify, checkpointed to Postgres (`thread_id = pipeline_id`)
+> so a crash mid-run **resumes** instead of restarting. Progression is event-driven (Redis
+> pub/sub) but **reconciled** against persisted `pipeline_runs` status; a **one-active-pipeline
+> per user** guard is enforced at the DB; **Celery beat** fires pipelines on a schedule; and the
+> dashboard shows **live** stage progress over SSE. Builds on Phase 3 (Qualifier + Dashboard),
+> Phase 2 (Scout + connectors) and Phase 1 (data layer, MCP boundary, GDPR). Phase 4 adds
+> **zero new LLM cost** (the orchestrator is a state machine). See `directions/` + `DECISIONS.md`.
 
 ## Repository layout
 
@@ -20,17 +22,22 @@ packages/core/    Shared package `jobpilot_core` — SQLAlchemy models, async DB
                   LLM wrapper (llm.py), Scout normalize/dedupe (scout.py),
                   Qualifier scorer (qualifier.py) + Alembic migrations
 backend/          FastAPI API (auth, /ready, resume, jobs, erasure, /scout/*,
-                  /qualify/*, /dashboard/*), Scout + Qualify orchestration
-                  (scout_runner.py, qualify_runner.py) + Celery tasks (tasks.py)
-mcp/db_mcp/       db-mcp   — scoped CRUD, pipeline-run tracking, delete_user_data
+                  /qualify/*, /dashboard/*, /pipeline/* incl. SSE stream), Scout +
+                  Qualify runners, LangGraph orchestrator (orchestrator.py), Redis
+                  event bus, beat scheduler + Celery tasks (tasks.py, asyncrun.py)
+mcp/db_mcp/       db-mcp   — scoped CRUD, pipeline-run tracking, get_stage_status
 mcp/resume_mcp/   resume-mcp — parse_resume + get_structured_resume
-mcp/config_mcp/   config-mcp — get/update_search_config (user-scoped)
+mcp/config_mcp/   config-mcp — get/update search + qualifier config (user-scoped)
 mcp/sources_mcp/  sources-mcp — connector hub: search_adzuna, fetch_greenhouse,
-                  run_crawl (Haiku extraction), list_sources
-orchestrator/     LangGraph pipeline (Phase 4+; placeholder)
-frontend/         Next.js (App Router) + TypeScript + Tailwind
+                  run_crawl (Haiku extraction), aggregators, list_sources
+mcp/pipeline_mcp/ pipeline-mcp — control surface: run_full_pipeline, get_pipeline_status,
+                  trigger_stage, list_runs, get_run (+ one-active-pipeline guard)
+packages/core/    …plus events.py (pub/sub bus) + qualifier.py (Phase 3)
+frontend/         Next.js (App Router) + TypeScript + Tailwind (live pipeline view)
 docker-compose.yml   db(pgvector) · redis · minio · migrate · db-mcp · resume-mcp ·
-                     config-mcp · sources-mcp · backend · worker(celery) · frontend
+                     config-mcp · sources-mcp · pipeline-mcp · backend ·
+                     worker(data plane) · orchestrator-worker(control plane) ·
+                     beat(scheduler) · frontend
 ```
 
 **Security boundary:** agents and the app touch job/resume *data* only through the MCP
@@ -48,7 +55,7 @@ Order: infra → `migrate` (applies schema + seeds the test user) → MCP servic
 backend → frontend.
 
 - Backend:  http://localhost:8000  (`/health`, `/ready`, docs at `/docs`)
-- db-mcp: `:8001/mcp` · resume-mcp: `:8002/mcp` · config-mcp: `:8003/mcp` · sources-mcp: `:8004/mcp`
+- db-mcp: `:8001/mcp` · resume-mcp: `:8002/mcp` · config-mcp: `:8003/mcp` · sources-mcp: `:8004/mcp` · pipeline-mcp: `:8005/mcp`
 - MinIO console: http://localhost:9001  (minioadmin / minioadmin)
 - Frontend: http://localhost:3000
 
@@ -63,17 +70,21 @@ backend → frontend.
 > default**; subscribe to JSearch on RapidAPI and add `jsearch` to your `sources[]` to use it.
 > Any connector without its key degrades gracefully (recorded on the run, never fatal).
 
-Trigger a Scout run once logged in (see smoke tests for the token dance):
+Upload a resume first (`POST /resumes` with `consent=true`) — it seeds a conservative qualifier
+config. Then run the **autonomous pipeline** (Scout→Qualify with no manual step between):
 
 ```bash
-curl -X POST http://localhost:8000/scout/run    -H "Authorization: Bearer $TOKEN"  # -> {task_id,...}
-curl -X POST http://localhost:8000/qualify/run  -H "Authorization: Bearer $TOKEN"  # hybrid ATS scoring
-curl      http://localhost:8000/dashboard/jobs -H "Authorization: Bearer $TOKEN"  # jobs + qualifications
+curl -X POST http://localhost:8000/pipeline/run    -H "Authorization: Bearer $TOKEN"  # -> {pipeline_id,...}
+curl      http://localhost:8000/pipeline/status  -H "Authorization: Bearer $TOKEN"  # live stage + counts
+curl      http://localhost:8000/dashboard/jobs   -H "Authorization: Bearer $TOKEN"  # jobs + qualifications
+# individual stages still available: POST /scout/run · POST /qualify/run · POST /pipeline/stage/{scout|qualify}
 ```
 
-Upload a resume first (`POST /resumes` with `consent=true`) — it seeds a conservative qualifier
-config. Then open the **dashboard** at http://localhost:3000 (sign in with the seeded user) to see
-qualified/disqualified jobs with scores, fact-citing reasons, filters, and sort.
+A second `/pipeline/run` while one is active is **rejected** (one active pipeline per user). Set
+`search_configs.schedule` (e.g. `hourly`, `daily`, `15m`) to have **beat** fire pipelines
+automatically. Open the **dashboard** at http://localhost:3000 (sign in with the seeded user) to
+watch Scout→Qualify progress **live** (SSE) and browse qualified/disqualified jobs with scores,
+fact-citing reasons, filters, and sort.
 
 ## Local dev (processes on the host against dockerized infra)
 

@@ -7,11 +7,12 @@ run through the MCP services over HTTP (no direct ORM on those paths).
 from __future__ import annotations
 
 import base64
+import json
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from jobpilot_core import repositories
+from fastapi.responses import JSONResponse, StreamingResponse
+from jobpilot_core import events, repositories
 from jobpilot_core.resume_parse import ALLOWED_MIME
 from jobpilot_core.security import create_access_token, verify_password
 from jobpilot_core.settings import Settings, get_settings
@@ -201,6 +202,68 @@ async def trigger_qualify(
 @app.get("/qualify/runs", tags=["qualify"])
 async def list_qualify_runs(current_user=Depends(get_current_user)) -> dict:
     return await mcp_client.db_mcp(current_user.id, "get_pipeline_runs", {"stage": "qualify"})
+
+
+# --------------------------------------------------------------------------- #
+# Pipeline orchestrator (autonomous Scout→Qualify, through pipeline-mcp)
+# --------------------------------------------------------------------------- #
+@app.post("/pipeline/run", tags=["pipeline"], status_code=status.HTTP_202_ACCEPTED)
+async def run_pipeline(current_user=Depends(get_current_user)) -> dict:
+    """Kick off an autonomous Scout→Qualify pipeline. One active run per user; a
+    second concurrent trigger is rejected with the active pipeline id."""
+    return await mcp_client.pipeline_mcp(current_user.id, "run_full_pipeline", {})
+
+
+@app.get("/pipeline/status", tags=["pipeline"])
+async def pipeline_status(current_user=Depends(get_current_user)) -> dict:
+    """Live snapshot: current stage + per-stage status/counts for the active/last run."""
+    return await mcp_client.pipeline_mcp(current_user.id, "get_pipeline_status", {})
+
+
+@app.post("/pipeline/stage/{stage}", tags=["pipeline"], status_code=status.HTTP_202_ACCEPTED)
+async def run_stage(stage: str, current_user=Depends(get_current_user)) -> dict:
+    """Run a single stage standalone (rejected while a full pipeline is active)."""
+    return await mcp_client.pipeline_mcp(current_user.id, "trigger_stage", {"stage": stage})
+
+
+@app.get("/pipeline/runs", tags=["pipeline"])
+async def pipeline_runs(limit: int = 20, current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.pipeline_mcp(current_user.id, "list_runs", {"limit": limit})
+
+
+@app.get("/pipeline/runs/{pipeline_id}", tags=["pipeline"])
+async def pipeline_run_detail(pipeline_id: str, current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.pipeline_mcp(current_user.id, "get_run", {"pipeline_id": pipeline_id})
+
+
+@app.get("/pipeline/stream", tags=["pipeline"])
+async def pipeline_stream(
+    request: Request,
+    current_user=Depends(get_current_user),
+    settings: Settings = Depends(get_settings),
+) -> StreamingResponse:
+    """Server-Sent Events: relay THIS user's pipeline events from Redis to the
+    browser. Per-user channel only — one user's status can never leak onto another's
+    stream. The client re-fetches /pipeline/status on (re)connect, then streams."""
+    user_id = current_user.id
+
+    async def gen():
+        async with events.subscribe(settings.redis_url, user_id) as ps:
+            yield ": connected\n\n"
+            async for ev in events.listen(ps, timeout=10.0):
+                if await request.is_disconnected():
+                    break
+                if ev is None:
+                    yield ": ping\n\n"  # heartbeat keeps the connection alive
+                else:
+                    yield f"data: {json.dumps(ev)}\n\n"
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                 "Connection": "keep-alive"},
+    )
 
 
 # --------------------------------------------------------------------------- #

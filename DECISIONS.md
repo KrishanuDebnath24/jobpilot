@@ -233,3 +233,77 @@ Running log of non-obvious engineering choices. One line + rationale each.
 - **GDPR:** the resume (personal data) now flows into LLM calls under the Phase 1 consent/erasure
   model; we log skills/counts, never full resume content. `qualifications` cascade-delete with the
   user like every other user-owned table.
+
+## Phase 4 — Orchestrator (autonomous Scout→Qualify) + live status
+
+- **LangGraph = control plane; Celery = data plane.** The graph holds pipeline state +
+  sequencing only; the heavy work (crawl, LLM refine) stays in the existing Celery stage tasks.
+  Each node **triggers** its stage on the data-plane queue and **awaits** completion — it never
+  executes the stage inline (a long crawl would block the graph). **No LLM runs in the
+  orchestrator** — it's deterministic control logic, so Phase 4 adds **zero new LLM cost** (a
+  re-run of an already-qualified pool costs $0.00, verified).
+- **Two Celery queues, two workers.** The orchestrator task (`pipeline.run_full`) is routed to
+  its own `orchestrator` queue consumed by a dedicated `orchestrator-worker`; stages
+  (`scout.run`/`qualify.run`) + the beat tick stay on the default `celery` queue consumed by the
+  data-plane `worker`. This is mandatory, not cosmetic: an orchestrator that blocks awaiting a
+  stage must not sit in the same pool as the stage it's waiting for (self-starvation/deadlock).
+- **Postgres checkpointer, `thread_id = pipeline_id`.** LangGraph's `AsyncPostgresSaver`
+  (psycopg v3 — the DSN strips `+asyncpg`) checkpoints after each node, giving resumability: a
+  crash mid-pipeline **resumes from the last completed node** rather than restarting. Verified on
+  the real stack — killed the orchestrator-worker mid-Qualify, redelivered, and Scout was **not**
+  re-run (exactly one scout row). This is the same pause/resume mechanism Phase 6 gates will use.
+- **Durable + idempotent.** `pipeline.run_full` is `acks_late=True, reject_on_worker_lost=True`
+  so a killed task is redelivered. Redis restores an unacked task after
+  `broker_transport_options.visibility_timeout` — set to **6h** (> any pipeline) so a still-running
+  long task is never spuriously redelivered mid-flight. Re-invoking a completed thread is a no-op
+  replay (LangGraph `aget_state`), so redelivery can't double-run.
+- **Correlation via an umbrella row.** `pipeline_runs.pipeline_id` (= `thread_id`) groups the
+  stages of one execution; a `stage='pipeline'` **umbrella** row per execution anchors status +
+  the guard. `get_pipeline`/`list_pipelines` fold the rows into `{status, stages:{scout,qualify}}`.
+- **One active pipeline per user — enforced at the DB.** A partial unique index
+  `uq_active_pipeline_per_user (user_id) WHERE stage='pipeline' AND status IN ('queued','running')`
+  makes a concurrent second `open_pipeline` raise `IntegrityError`; `run_full_pipeline` catches it
+  and **rejects** (not queues) the second trigger, returning the active `pipeline_id`. Policy:
+  **reject**, to avoid unbounded stacking and job-pool races. `reap_stale_pipelines` fails an
+  umbrella stuck active past `pipeline_stale_seconds` (1h) so a crashed worker never locks a user
+  out permanently. `trigger_stage` (standalone Scout/Qualify) is likewise rejected while a full
+  pipeline is active.
+- **Progression is event-driven but status-reconciled.** Stages publish
+  `scout.started/completed/failed`, `qualify.started/progress/completed/failed`, and the
+  orchestrator emits `pipeline.started/completed/failed` on a **per-user** Redis channel
+  (`jobpilot:events:{user_id}`). The orchestrator's await loop treats events as the fast path but
+  polls `get_stage_status` (the persisted `pipeline_runs` row) every ≤2s as the **source of
+  truth** — a dropped pub/sub message can only cost latency, never hang a run. The runner commits
+  the terminal row *before* publishing, so an event always implies the DB is already authoritative.
+- **Failure routing.** `[scout] → [qualify] → END` with a conditional edge to a terminal `failed`
+  node. **Scout failure stops the chain** (Qualify must not run on no data); a connector *partial*
+  failure is recorded (Phase 2g) but still counts as stage success and proceeds. Verified both.
+- **pipeline-mcp** (new streamable service, `:8005`) owns the control surface — `run_full_pipeline`,
+  `get_pipeline_status`, `trigger_stage`, `list_runs`, `get_run` — all user-scoped via the signed
+  context; `user_id` is bound from the authenticated session, never from content. It reads
+  `pipeline_runs` through the shared `repositories` layer and enqueues by task **name** (producer
+  only — no task code in the MCP image). db-mcp still tracks the individual stage runs; both go
+  through one query layer, so co-owning the table is safe.
+- **Scheduled kickoff (beat).** A `pipeline.scheduler_tick` runs every `beat_tick_seconds` (60s);
+  it reads `search_configs.schedule` (cadence keyword → interval) across users — the **one**
+  legitimate cross-user read, done as the *system*, not on behalf of a user — and fires
+  `run_full_pipeline` for each due user **through the same guard** (an already-running user's tick
+  is skipped, not stacked). Verified: beat fired a full pipeline with no human action; an
+  active user's tick was skipped.
+- **Live status (SSE).** `GET /pipeline/stream` relays **this user's** Redis channel to the
+  browser (per-user only — no cross-user leakage), with heartbeats. The frontend uses a
+  **fetch-based** SSE reader (so it can send the `Authorization` header, which `EventSource`
+  can't) with auto-reconnect; on load/reconnect it re-fetches `/pipeline/status` then streams, so
+  a mid-run refresh re-syncs and keeps streaming. Verified live: `pipeline.started → scout.* →
+  qualify.progress (60/177…) → pipeline.completed` arrived without a refresh.
+- **Worker event-loop lifecycle (bug found + fixed).** Every Celery task drives async work with
+  `asyncio.run` (a fresh loop per task); the cached async SQLAlchemy engine binds asyncpg
+  connections to the loop that made them, so reusing it on a later task's loop raises "attached to
+  a different loop". New in Phase 4 because `scheduler_tick` is the first worker task to touch the
+  engine **directly** (Scout/Qualify only ever go through MCP HTTP). Fix: `run_async` disposes +
+  resets the engine at the end of every task (`app/asyncrun.py`).
+- **Stage-arg correlation (bug found + fixed).** `scout_run(user_id, pipeline_id)` and
+  `qualify_run(user_id, requalify_all, pipeline_id)` have different positional shapes, so the
+  orchestrator/`trigger_stage` pass `pipeline_id` as a **keyword** — a positional pid would both
+  mis-set `requalify_all` (accidental full re-qualify) and drop the correlation id (orchestrator
+  never sees the stage finish → hang). Caught by the live integration test.

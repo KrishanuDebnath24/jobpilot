@@ -175,6 +175,10 @@ class PipelineRun(Base):
 
     id: Mapped[uuid.UUID] = _pk()
     user_id: Mapped[uuid.UUID] = _user_fk()
+    # Correlation id (= LangGraph thread_id): stages of one autonomous run share it.
+    # A row with stage='pipeline' is the per-execution "umbrella"; scout/qualify rows
+    # carry the same pipeline_id so the UI can group "Run X: Scout ✓ → Qualify ⏳".
+    pipeline_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
     stage: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

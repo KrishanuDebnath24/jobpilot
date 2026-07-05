@@ -1,3 +1,6 @@
 # MCP service deps. The shared data layer comes from ../packages/core.
 mcp==1.28.1
 uvicorn[standard]==0.34.0
+# pipeline-mcp enqueues the orchestrator task (producer only; task code lives in
+# the backend image). Same pin as the backend so broker wire-format matches.
+celery[redis]==5.6.3

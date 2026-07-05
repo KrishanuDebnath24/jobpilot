@@ -1,58 +1,34 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { Job, PipelineRun } from "@/lib/types";
-import {
-  getDashboardJobs,
-  getMe,
-  getQualifyRuns,
-  getScoutRuns,
-  getToken,
-  runQualify,
-  runScout,
-  setToken,
-} from "@/lib/api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { Job } from "@/lib/types";
+import { getDashboardJobs, getMe, getToken, setToken } from "@/lib/api";
 import LoginGate from "./LoginGate";
-import RunHeader from "./RunHeader";
+import PipelineLive from "./PipelineLive";
 import JobsTable from "./JobsTable";
 
 type Decision = "all" | "qualified" | "disqualified" | "unscored";
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-async function waitForNewRun(
-  fetchRuns: () => Promise<PipelineRun[]>,
-  prevId: string | undefined,
-  timeoutMs = 180_000,
-): Promise<PipelineRun[]> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const runs = await fetchRuns();
-    const latest = runs[0];
-    if (latest && latest.id !== prevId && ["completed", "failed"].includes(latest.status)) {
-      return runs;
-    }
-    await sleep(3000);
-  }
-  return fetchRuns();
-}
 
 export default function Dashboard() {
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [email, setEmail] = useState<string>("");
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [scoutRuns, setScoutRuns] = useState<PipelineRun[]>([]);
-  const [qualifyRuns, setQualifyRuns] = useState<PipelineRun[]>([]);
-  const [scoutBusy, setScoutBusy] = useState(false);
-  const [qualifyBusy, setQualifyBusy] = useState(false);
   const [decision, setDecision] = useState<Decision>("all");
   const [source, setSource] = useState<string>("all");
   const [error, setError] = useState<string | null>(null);
+  const loadingJobs = useRef(false);
 
-  const loadAll = useCallback(async () => {
-    const [j, sr, qr] = await Promise.all([getDashboardJobs(), getScoutRuns(), getQualifyRuns()]);
-    setJobs(j);
-    setScoutRuns(sr);
-    setQualifyRuns(qr);
+  // Single-flight job reload — PipelineLive calls this live during a run.
+  const loadJobs = useCallback(async () => {
+    if (loadingJobs.current) return;
+    loadingJobs.current = true;
+    try {
+      setJobs(await getDashboardJobs());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      loadingJobs.current = false;
+    }
   }, []);
 
   useEffect(() => {
@@ -70,8 +46,8 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    if (authed) loadAll().catch((e) => setError(String(e)));
-  }, [authed, loadAll]);
+    if (authed) loadJobs();
+  }, [authed, loadJobs]);
 
   const onAuthed = async () => {
     try {
@@ -86,36 +62,6 @@ export default function Dashboard() {
   const logout = () => {
     setToken(null);
     setAuthed(false);
-  };
-
-  const triggerScout = async () => {
-    setScoutBusy(true);
-    setError(null);
-    try {
-      const prev = scoutRuns[0]?.id;
-      await runScout();
-      setScoutRuns(await waitForNewRun(getScoutRuns, prev));
-      setJobs(await getDashboardJobs());
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setScoutBusy(false);
-    }
-  };
-
-  const triggerQualify = async () => {
-    setQualifyBusy(true);
-    setError(null);
-    try {
-      const prev = qualifyRuns[0]?.id;
-      await runQualify(true);
-      setQualifyRuns(await waitForNewRun(getQualifyRuns, prev));
-      setJobs(await getDashboardJobs());
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setQualifyBusy(false);
-    }
   };
 
   const sources = useMemo(
@@ -149,7 +95,9 @@ export default function Dashboard() {
       <header className="mb-6 flex items-center gap-3">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">JobPilot</h1>
-          <p className="text-sm text-neutral-500">Qualifier dashboard — fit guidance, not a verdict.</p>
+          <p className="text-sm text-neutral-500">
+            Autonomous scout → qualify — fit guidance, not a verdict.
+          </p>
         </div>
         <div className="ml-auto flex items-center gap-3 text-sm text-neutral-400">
           <span>{email}</span>
@@ -162,14 +110,7 @@ export default function Dashboard() {
         </div>
       </header>
 
-      <RunHeader
-        scoutRun={scoutRuns[0] ?? null}
-        qualifyRun={qualifyRuns[0] ?? null}
-        scoutBusy={scoutBusy}
-        qualifyBusy={qualifyBusy}
-        onRunScout={triggerScout}
-        onRunQualify={triggerQualify}
-      />
+      <PipelineLive onJobsChanged={loadJobs} />
 
       {error && (
         <p className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-300">

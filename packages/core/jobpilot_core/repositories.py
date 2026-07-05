@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -474,6 +474,7 @@ def pipeline_run_to_dict(run: models.PipelineRun) -> dict:
             counts = None
     return {
         "id": str(run.id),
+        "pipeline_id": str(run.pipeline_id) if run.pipeline_id else None,
         "stage": run.stage,
         "status": run.status,
         "started_at": _iso(run.started_at),
@@ -484,11 +485,20 @@ def pipeline_run_to_dict(run: models.PipelineRun) -> dict:
     }
 
 
+# States a pipeline/stage run is in while it still occupies the concurrency guard.
+ACTIVE_STATUSES = ("queued", "running")
+UMBRELLA_STAGE = "pipeline"  # the per-execution correlation row
+
+
 async def create_pipeline_run(
-    session: AsyncSession, user_id: uuid.UUID, stage: str
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    stage: str,
+    pipeline_id: uuid.UUID | None = None,
+    status: str = "running",
 ) -> models.PipelineRun:
     run = models.PipelineRun(
-        user_id=user_id, stage=stage, status="running",
+        user_id=user_id, stage=stage, status=status, pipeline_id=pipeline_id,
         started_at=datetime.now(timezone.utc),
     )
     session.add(run)
@@ -528,6 +538,167 @@ async def get_pipeline_runs(
         stmt = stmt.where(models.PipelineRun.stage == stage)
     stmt = stmt.order_by(models.PipelineRun.created_at.desc()).limit(limit)
     return [pipeline_run_to_dict(r) for r in (await session.execute(stmt)).scalars().all()]
+
+
+# --------------------------------------------------------------------------- #
+# Pipeline correlation, concurrency guard, and grouping (Phase 4 orchestrator)
+# --------------------------------------------------------------------------- #
+async def get_stage_status(
+    session: AsyncSession, user_id: uuid.UUID, pipeline_id: uuid.UUID, stage: str
+) -> dict | None:
+    """The persisted status of one stage of one pipeline — the *source of truth*
+    the orchestrator reconciles against (never trusts a pub/sub event alone)."""
+    stmt = (
+        select(models.PipelineRun)
+        .where(
+            models.PipelineRun.user_id == user_id,
+            models.PipelineRun.pipeline_id == pipeline_id,
+            models.PipelineRun.stage == stage,
+        )
+        .order_by(models.PipelineRun.created_at.desc())
+        .limit(1)
+    )
+    run = (await session.execute(stmt)).scalar_one_or_none()
+    return pipeline_run_to_dict(run) if run else None
+
+
+async def get_active_pipeline(
+    session: AsyncSession, user_id: uuid.UUID
+) -> models.PipelineRun | None:
+    """The user's currently-active umbrella run (if any) — the guard anchor."""
+    stmt = (
+        select(models.PipelineRun)
+        .where(
+            models.PipelineRun.user_id == user_id,
+            models.PipelineRun.stage == UMBRELLA_STAGE,
+            models.PipelineRun.status.in_(ACTIVE_STATUSES),
+        )
+        .order_by(models.PipelineRun.created_at.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def reap_stale_pipelines(
+    session: AsyncSession, user_id: uuid.UUID, ttl_seconds: int
+) -> int:
+    """Fail-close any umbrella that has been 'active' longer than ``ttl_seconds`` (a
+    worker died mid-run). Prevents a crashed run from locking the user out forever.
+    Returns the number reaped."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
+    stmt = select(models.PipelineRun).where(
+        models.PipelineRun.user_id == user_id,
+        models.PipelineRun.stage == UMBRELLA_STAGE,
+        models.PipelineRun.status.in_(ACTIVE_STATUSES),
+        models.PipelineRun.started_at < cutoff,
+    )
+    stale = (await session.execute(stmt)).scalars().all()
+    for run in stale:
+        run.status = "failed"
+        run.finished_at = datetime.now(timezone.utc)
+        run.error = f"reaped: no completion within {ttl_seconds}s (worker lost?)"
+    if stale:
+        await session.flush()
+    return len(stale)
+
+
+async def open_pipeline(
+    session: AsyncSession, user_id: uuid.UUID, pipeline_id: uuid.UUID
+) -> models.PipelineRun:
+    """Insert the umbrella row for a new execution. The partial-unique index
+    ``uq_active_pipeline_per_user`` makes a concurrent second open raise
+    ``IntegrityError`` — the hard "one active pipeline per user" guard. Callers
+    catch that and surface "already running"."""
+    run = models.PipelineRun(
+        user_id=user_id, stage=UMBRELLA_STAGE, status="running",
+        pipeline_id=pipeline_id, started_at=datetime.now(timezone.utc),
+    )
+    session.add(run)
+    await session.flush()  # raises IntegrityError here if one is already active
+    return run
+
+
+async def get_pipeline(
+    session: AsyncSession, user_id: uuid.UUID, pipeline_id: uuid.UUID
+) -> dict | None:
+    """Assemble one execution: the umbrella + its stage runs, newest-stage-wins."""
+    stmt = (
+        select(models.PipelineRun)
+        .where(
+            models.PipelineRun.user_id == user_id,
+            models.PipelineRun.pipeline_id == pipeline_id,
+        )
+        .order_by(models.PipelineRun.created_at.asc())
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    if not rows:
+        return None
+    return _assemble_pipeline(pipeline_id, rows)
+
+
+async def list_pipelines(
+    session: AsyncSession, user_id: uuid.UUID, limit: int = 20
+) -> list[dict]:
+    """Recent executions (grouped by pipeline_id), newest first."""
+    stmt = (
+        select(models.PipelineRun)
+        .where(
+            models.PipelineRun.user_id == user_id,
+            models.PipelineRun.pipeline_id.is_not(None),
+        )
+        .order_by(models.PipelineRun.created_at.desc())
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    groups: dict[uuid.UUID, list[models.PipelineRun]] = {}
+    for r in rows:
+        groups.setdefault(r.pipeline_id, []).append(r)
+    out = [_assemble_pipeline(pid, sorted(rs, key=lambda x: x.created_at)) for pid, rs in groups.items()]
+    out.sort(key=lambda p: p["created_at"] or "", reverse=True)
+    return out[:limit]
+
+
+def _assemble_pipeline(pipeline_id: uuid.UUID, rows: list[models.PipelineRun]) -> dict:
+    """Fold an execution's rows into {pipeline_id, status, stages:{scout,qualify}}."""
+    umbrella = next((r for r in rows if r.stage == UMBRELLA_STAGE), None)
+    stages: dict[str, dict] = {}
+    for r in rows:
+        if r.stage == UMBRELLA_STAGE:
+            continue
+        stages[r.stage] = pipeline_run_to_dict(r)  # last one wins (rows are time-asc)
+    created = umbrella.created_at if umbrella else (rows[0].created_at if rows else None)
+    return {
+        "pipeline_id": str(pipeline_id),
+        "status": umbrella.status if umbrella else "unknown",
+        "error": umbrella.error if umbrella else None,
+        "created_at": _iso(created),
+        "finished_at": _iso(umbrella.finished_at) if umbrella else None,
+        "stages": stages,
+    }
+
+
+async def list_scheduled_users(session: AsyncSession) -> list[dict]:
+    """SYSTEM-level read (the scheduler daemon, not a user): every user with a
+    non-empty ``search_configs.schedule``, plus the timestamp of their most recent
+    umbrella run (to compute due-ness). This is the one cross-user query in the
+    codebase; it exists only to let the beat scheduler fire pipelines autonomously.
+    """
+    cfg = models.SearchConfig
+    stmt = select(cfg.user_id, cfg.schedule).where(
+        cfg.schedule.is_not(None), func.length(func.trim(cfg.schedule)) > 0
+    )
+    rows = (await session.execute(stmt)).all()
+    out: list[dict] = []
+    for user_id, schedule in rows:
+        last = (
+            await session.execute(
+                select(func.max(models.PipelineRun.created_at)).where(
+                    models.PipelineRun.user_id == user_id,
+                    models.PipelineRun.stage == UMBRELLA_STAGE,
+                )
+            )
+        ).scalar_one_or_none()
+        out.append({"user_id": str(user_id), "schedule": schedule, "last_run_at": _iso(last)})
+    return out
 
 
 # --------------------------------------------------------------------------- #

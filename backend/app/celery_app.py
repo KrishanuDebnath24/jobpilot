@@ -25,6 +25,22 @@ celery.conf.update(
     accept_content=["json"],
     task_track_started=True,
     broker_connection_retry_on_startup=True,
+    # Redis broker restores an unacked (crashed) task after this window — so it must
+    # exceed the longest task, or a still-running orchestrator/stage gets redelivered
+    # and double-runs. 6h > any pipeline; crash-recovery redelivery happens within it.
+    broker_transport_options={"visibility_timeout": 21600},
+    # Control plane / data plane split: the orchestrator waits on stages, so it must
+    # not share a worker pool with them (a waiting orchestrator would starve the
+    # stage it's waiting for). Route it to its own queue, consumed by a dedicated
+    # orchestrator worker. Stages + the scheduler tick stay on the default queue.
+    task_routes={"pipeline.run_full": {"queue": settings.orchestrator_queue}},
+    # Beat: check for due scheduled pipelines every tick.
+    beat_schedule={
+        "pipeline-scheduler-tick": {
+            "task": "pipeline.scheduler_tick",
+            "schedule": float(settings.beat_tick_seconds),
+        }
+    },
 )
 
 if os.environ.get("CELERY_TASK_ALWAYS_EAGER") == "1":

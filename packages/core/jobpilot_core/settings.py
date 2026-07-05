@@ -44,6 +44,15 @@ class Settings(BaseSettings):
     resume_mcp_url: str = "http://localhost:8002/mcp"
     config_mcp_url: str = "http://localhost:8003/mcp"
     sources_mcp_url: str = "http://localhost:8004/mcp"
+    pipeline_mcp_url: str = "http://localhost:8005/mcp"
+
+    # --- Orchestrator (Phase 4). LangGraph = control plane (own Celery queue so it
+    # never blocks a stage); stages run on the default queue = data plane. ---
+    orchestrator_queue: str = "orchestrator"
+    data_queue: str = "celery"  # Celery's default queue (the existing worker)
+    stage_timeout_seconds: int = 1800  # max wait for one stage to finish
+    pipeline_stale_seconds: int = 3600  # reap an umbrella stuck 'running' past this
+    beat_tick_seconds: int = 60  # how often the scheduler checks for due pipelines
 
     # --- Anthropic (Phase 2+). Required in services that call an LLM
     # (sources-mcp for crawl extraction). Fail-fast via require_anthropic_key(). ---

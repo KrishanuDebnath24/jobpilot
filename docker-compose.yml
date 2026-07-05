@@ -160,6 +160,35 @@ services:
       timeout: 5s
       retries: 5
 
+  # pipeline-mcp — Phase 4 control surface (run/status/history + concurrency guard).
+  # Enqueues the orchestrator task (producer only); reads pipeline_runs directly.
+  pipeline-mcp:
+    image: jobpilot-mcp:local
+    build:
+      context: .
+      dockerfile: mcp/Dockerfile
+    command: ["uvicorn", "pipeline_mcp.server:app", "--host", "0.0.0.0", "--port", "8005"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jobpilot}:${POSTGRES_PASSWORD:-jobpilot_dev_pw}@db:5432/${POSTGRES_DB:-jobpilot}
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8005:8005"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('localhost',8005),2)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   backend:
     build:
       context: .
@@ -175,6 +204,7 @@ services:
       RESUME_MCP_URL: http://resume-mcp:8002/mcp
       CONFIG_MCP_URL: http://config-mcp:8003/mcp
       SOURCES_MCP_URL: http://sources-mcp:8004/mcp
+      PIPELINE_MCP_URL: http://pipeline-mcp:8005/mcp
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
     ports:
       - "8000:8000"
@@ -193,15 +223,18 @@ services:
         condition: service_started
       sources-mcp:
         condition: service_started
+      pipeline-mcp:
+        condition: service_started
 
-  # Celery worker — runs Scout in the background. Calls the MCP services over HTTP
-  # (same as the backend); persists jobs only through db-mcp.
+  # Celery DATA-PLANE worker — runs the heavy stages (Scout fan-out + crawl, Qualify
+  # LLM refine) on the default queue. Calls MCP services over HTTP; persists only
+  # through db-mcp. Does NOT consume the orchestrator queue.
   worker:
     image: jobpilot-backend:local
     build:
       context: .
       dockerfile: backend/Dockerfile
-    command: ["sh", "-c", "cd /app/backend && celery -A app.celery_app.celery worker --loglevel=info"]
+    command: ["sh", "-c", "cd /app/backend && celery -A app.celery_app.celery worker -Q celery --loglevel=info"]
     env_file:
       - path: .env
         required: false
@@ -216,6 +249,7 @@ services:
       RESUME_MCP_URL: http://resume-mcp:8002/mcp
       CONFIG_MCP_URL: http://config-mcp:8003/mcp
       SOURCES_MCP_URL: http://sources-mcp:8004/mcp
+      PIPELINE_MCP_URL: http://pipeline-mcp:8005/mcp
     depends_on:
       redis:
         condition: service_healthy
@@ -229,6 +263,55 @@ services:
         condition: service_started
       sources-mcp:
         condition: service_started
+
+  # Celery CONTROL-PLANE worker — runs ONLY the LangGraph orchestrator task on its
+  # own queue, so awaiting a stage never starves the worker that runs the stage.
+  # LLM-free; needs DATABASE_URL (Postgres checkpointer) + db-mcp (reconciliation).
+  orchestrator-worker:
+    image: jobpilot-backend:local
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["sh", "-c", "cd /app/backend && celery -A app.celery_app.celery worker -Q orchestrator --loglevel=info"]
+    env_file:
+      - path: .env
+        required: false
+    healthcheck:
+      disable: true
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jobpilot}:${POSTGRES_PASSWORD:-jobpilot_dev_pw}@db:5432/${POSTGRES_DB:-jobpilot}
+      REDIS_URL: redis://redis:6379/0
+      DB_MCP_URL: http://db-mcp:8001/mcp
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      db-mcp:
+        condition: service_started
+
+  # Celery beat — the "agents run themselves" payoff. Ticks every minute and fires a
+  # full pipeline for each user whose search_configs.schedule is due (respecting the
+  # one-active-pipeline guard). Enqueues via the same task; heavy work runs elsewhere.
+  beat:
+    image: jobpilot-backend:local
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["sh", "-c", "cd /app/backend && celery -A app.celery_app.celery beat --loglevel=info"]
+    env_file:
+      - path: .env
+        required: false
+    healthcheck:
+      disable: true
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jobpilot}:${POSTGRES_PASSWORD:-jobpilot_dev_pw}@db:5432/${POSTGRES_DB:-jobpilot}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   frontend:
     build:

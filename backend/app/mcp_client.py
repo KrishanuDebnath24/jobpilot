@@ -85,3 +85,7 @@ async def config_mcp(user_id: uuid.UUID, tool: str, arguments: dict | None = Non
 
 async def sources_mcp(user_id: uuid.UUID, tool: str, arguments: dict | None = None) -> Any:
     return await call_tool(get_settings().sources_mcp_url, user_id, tool, arguments)
+
+
+async def pipeline_mcp(user_id: uuid.UUID, tool: str, arguments: dict | None = None) -> Any:
+    return await call_tool(get_settings().pipeline_mcp_url, user_id, tool, arguments)
