@@ -7,6 +7,8 @@ import LoginGate from "./LoginGate";
 import PipelineLive from "./PipelineLive";
 import JobsTable from "./JobsTable";
 import Suggestions from "./Suggestions";
+import Chat from "./Chat";
+import Gates from "./Gates";
 
 type Decision = "all" | "qualified" | "disqualified" | "unscored";
 
@@ -122,6 +124,11 @@ export default function Dashboard() {
       </header>
 
       <PipelineLive onJobsChanged={loadJobs} />
+
+      <div className="mt-6 grid gap-4 lg:grid-cols-[1.6fr_1fr]">
+        <Chat onChanged={loadJobs} />
+        <Gates onChanged={loadJobs} />
+      </div>
 
       {error && (
         <p className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-300">

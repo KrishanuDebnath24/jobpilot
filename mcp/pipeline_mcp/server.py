@@ -17,7 +17,7 @@ from __future__ import annotations
 import uuid
 
 from celery import Celery
-from jobpilot_core import repositories
+from jobpilot_core import gates, repositories
 from jobpilot_core.db import session_scope
 from jobpilot_core.mcp_auth import UserContextMiddleware, require_user_id
 from jobpilot_core.settings import get_settings
@@ -62,17 +62,61 @@ async def run_full_pipeline() -> dict:
     return {"pipeline_id": str(pid), "status": "queued"}
 
 
+def _pending_gate(pipeline: dict | None) -> dict | None:
+    """Surface a paused gate (if any) so the UI/Concierge can prompt for approval."""
+    if not pipeline:
+        return None
+    for stage, run in (pipeline.get("stages") or {}).items():
+        if stage.startswith(gates.GATE_STAGE_PREFIX) and run and run.get("status") == "pending":
+            gate_key = stage[len(gates.GATE_STAGE_PREFIX):]
+            return {"gate_key": gate_key, "gate_id": gates.gate_id(pipeline["pipeline_id"], gate_key)}
+    return None
+
+
 @mcp.tool()
 async def get_pipeline_status() -> dict:
-    """Current stage + per-stage counts for the active run, or the most recent one."""
+    """Current stage + per-stage counts for the active run, or the most recent one.
+    Includes ``pending_gate`` when the pipeline is paused awaiting a review approval."""
     uid = require_user_id()
     async with session_scope() as session:
         active = await repositories.get_active_pipeline(session, uid)
         if active and active.pipeline_id:
-            return {"pipeline": await repositories.get_pipeline(session, uid, active.pipeline_id),
-                    "active": True}
+            pipeline = await repositories.get_pipeline(session, uid, active.pipeline_id)
+            return {"pipeline": pipeline, "active": True, "pending_gate": _pending_gate(pipeline)}
         recent = await repositories.list_pipelines(session, uid, limit=1)
-        return {"pipeline": recent[0] if recent else None, "active": False}
+        pipeline = recent[0] if recent else None
+        return {"pipeline": pipeline, "active": False, "pending_gate": _pending_gate(pipeline)}
+
+
+@mcp.tool()
+async def approve_gate(gate_id: str) -> dict:
+    """Approve a pending review gate → resume the paused pipeline. Records the decision
+    against the persisted gate row (source of truth) FIRST, then re-enqueues the
+    orchestrator task, which reconciles and continues past the gate."""
+    return await _resolve_gate(gate_id, "approve")
+
+
+@mcp.tool()
+async def skip_gate(gate_id: str) -> dict:
+    """Skip a pending review gate → resume the paused pipeline without the gated review.
+    Same resume mechanism as approve_gate; both advance the graph from the checkpoint."""
+    return await _resolve_gate(gate_id, "skip")
+
+
+async def _resolve_gate(gate_id: str, decision: str) -> dict:
+    uid = require_user_id()
+    try:
+        pipeline_id, gate_key = gates.parse_gate_id(gate_id)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    async with session_scope() as session:
+        await repositories.resolve_gate(session, uid, uuid.UUID(pipeline_id), gate_key, decision)
+    # Re-enqueue the SAME orchestrator task; it resumes from the Postgres checkpoint and
+    # the now-resolved gate row lets the gate node proceed (no hang on an event).
+    _celery.send_task("pipeline.run_full", args=[str(uid), pipeline_id],
+                      queue=settings.orchestrator_queue)
+    return {"gate_id": gate_id, "decision": "approved" if decision == "approve" else "skipped",
+            "status": "resuming"}
 
 
 @mcp.tool()

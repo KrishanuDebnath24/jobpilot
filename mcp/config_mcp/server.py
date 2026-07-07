@@ -105,4 +105,37 @@ async def ensure_qualifier_config(resume_skills: list[str] | None = None) -> dic
         return {"config": repositories.qualifier_config_to_dict(cfg), "seeded": True}
 
 
+# --------------------------------------------------------------------------- #
+# Gate config (Phase 6) — human-in-the-loop review toggles
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+async def get_gate_config() -> dict:
+    """The caller's effective gate config (stored overrides merged onto the defaults):
+    which pipeline transitions pause for review. Includes the default set for the UI."""
+    from jobpilot_core import gates
+
+    uid = require_user_id()
+    async with session_scope() as session:
+        stored = await repositories.get_gate_configs(session, uid)
+    return {
+        "gates": gates.effective_gates(stored),
+        "defaults": dict(gates.GATE_DEFAULTS),
+        "keys": list(gates.GATE_KEYS),
+    }
+
+
+@mcp.tool()
+async def update_gate_config(gate_key: str, enabled: bool) -> dict:
+    """Enable/disable a single review gate for the caller. Rejects unknown keys."""
+    from jobpilot_core import gates
+
+    uid = require_user_id()
+    if gate_key not in gates.GATE_KEYS:
+        return {"error": f"unknown gate {gate_key!r} (expected {list(gates.GATE_KEYS)})"}
+    async with session_scope() as session:
+        await repositories.upsert_gate_config(session, uid, gate_key, bool(enabled))
+        stored = await repositories.get_gate_configs(session, uid)
+    return {"gates": gates.effective_gates(stored)}
+
+
 app = UserContextMiddleware(mcp.streamable_http_app(), settings)

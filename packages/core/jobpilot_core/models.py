@@ -13,6 +13,7 @@ from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -71,6 +72,15 @@ class Resume(Base):
     retention_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Phase 6 versioning: 'upload' (an uploaded file) vs 'assembled' (a new version
+    # built from accepted suggestions). ``parent_id`` links an assembled version back
+    # to the resume it derived from; ``label`` is a human tag. Original is preserved
+    # (a new row), and every version falls under the Phase 1 erasure/consent model.
+    source: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="upload", default="upload"
+    )
+    label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
     created_at: Mapped[datetime] = _created()
 
 
@@ -99,6 +109,19 @@ class QualifierConfig(Base):
     threshold: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
     must_have: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
     nice_to_have: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
+    created_at: Mapped[datetime] = _created()
+
+
+class GateConfig(Base):
+    """Per-user human-in-the-loop gate toggles (Phase 6). One row per (user, gate_key);
+    absent keys fall back to the defaults in ``jobpilot_core.gates``."""
+
+    __tablename__ = "gate_configs"
+
+    id: Mapped[uuid.UUID] = _pk()
+    user_id: Mapped[uuid.UUID] = _user_fk()
+    gate_key: Mapped[str] = mapped_column(String(32), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = _created()
 
 
@@ -238,6 +261,7 @@ USER_OWNED_TABLES = [
     "analyses",
     "qualifications",
     "jobs",
+    "gate_configs",
     "qualifier_configs",
     "search_configs",
     "resumes",

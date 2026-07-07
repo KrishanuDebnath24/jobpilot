@@ -1,4 +1,16 @@
-import type { Job, PipelineEvent, PipelineExecution, PipelineRun, Suggestion } from "./types";
+import type {
+  ApplyPreview,
+  ChatMessage,
+  ChatTurn,
+  GateConfig,
+  Job,
+  PendingGate,
+  PipelineEvent,
+  PipelineExecution,
+  PipelineRun,
+  ResumeVersion,
+  Suggestion,
+} from "./types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const TOKEN_KEY = "jobpilot_token";
@@ -79,7 +91,9 @@ export const runPipeline = () =>
 export const runStage = (stage: "scout" | "qualify") =>
   request<RunPipelineResult>(`/pipeline/stage/${stage}`, { method: "POST" });
 export const getPipelineStatus = () =>
-  request<{ pipeline: PipelineExecution; active: boolean }>("/pipeline/status");
+  request<{ pipeline: PipelineExecution; active: boolean; pending_gate: PendingGate }>(
+    "/pipeline/status",
+  );
 export const listPipelineRuns = () =>
   request<{ runs: PipelineExecution[] }>("/pipeline/runs").then((r) => r.runs);
 
@@ -106,6 +120,67 @@ export const setSuggestionStatus = (id: string, status: "accepted" | "dismissed"
   request<{ suggestion: unknown }>(`/suggestions/${id}/status?status=${status}`, {
     method: "POST",
   });
+
+// --- Phase 6: Concierge chat + gates + apply-to-resume ---
+export const createChatSession = () =>
+  request<{ id: string }>("/chat/sessions", { method: "POST" });
+export const listChatSessions = () =>
+  request<{ sessions: { id: string; title: string | null }[] }>("/chat/sessions").then(
+    (r) => r.sessions,
+  );
+export const getChatMessages = (id: string) =>
+  request<{ messages: ChatMessage[] }>(`/chat/sessions/${id}/messages`).then((r) => r.messages);
+export const postChatMessage = (id: string, text: string) =>
+  request<ChatTurn>(`/chat/sessions/${id}/message`, {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+
+export const getGates = () => request<GateConfig>("/gates");
+export const updateGate = (gate_key: string, enabled: boolean) =>
+  request<GateConfig>("/gates", {
+    method: "POST",
+    body: JSON.stringify({ gate_key, enabled }),
+  });
+export const approveGate = (gate_id: string) =>
+  request<{ status: string }>("/pipeline/gate/approve", {
+    method: "POST",
+    body: JSON.stringify({ gate_id }),
+  });
+export const skipGate = (gate_id: string) =>
+  request<{ status: string }>("/pipeline/gate/skip", {
+    method: "POST",
+    body: JSON.stringify({ gate_id }),
+  });
+
+export const prepareApply = (confirmed_skills?: string[]) =>
+  request<ApplyPreview>("/resume/apply/prepare", {
+    method: "POST",
+    body: JSON.stringify({ confirmed_skills: confirmed_skills ?? null }),
+  });
+export const applyResume = (confirmed_skills?: string[], label?: string) =>
+  request<{ applied: boolean; resume?: { id: string } }>("/resume/apply", {
+    method: "POST",
+    body: JSON.stringify({ confirmed_skills: confirmed_skills ?? null, label: label ?? null }),
+  });
+export const getResumeVersions = () =>
+  request<{ resumes: ResumeVersion[] }>("/resume/versions").then((r) => r.resumes);
+
+/** Download a resume version as text (fetch with the auth header, then save). */
+export async function downloadResumeVersion(id: string): Promise<void> {
+  const res = await fetch(`${API_URL}/resume/versions/${id}/download`, {
+    headers: { Authorization: `Bearer ${getToken() ?? ""}` },
+    cache: "no-store",
+  });
+  if (!res.ok) throw new ApiError(res.status, `download failed (${res.status})`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `resume-${id.slice(0, 8)}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 /** Subscribe to the live pipeline event stream (SSE over fetch, so we can send the
  *  auth header). Auto-reconnects until the returned stop() is called. */

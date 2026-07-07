@@ -178,6 +178,18 @@ async def create_pipeline_run(stage: str, pipeline_id: str | None = None) -> dic
 
 
 @mcp.tool()
+async def open_gate_pending(pipeline_id: str, gate_key: str) -> dict:
+    """Mark a review gate pending for a pipeline (Phase 6). Idempotent — a resumed
+    pipeline that re-enters the gate keeps the existing row. Read the gate's status
+    back via ``get_stage_status`` with stage ``gate:<gate_key>``."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        row = await repositories.open_gate_pending(session, uid, uuid.UUID(pipeline_id), gate_key)
+        return {"id": str(row.id), "stage": row.stage, "status": row.status,
+                "pipeline_id": pipeline_id}
+
+
+@mcp.tool()
 async def get_stage_status(pipeline_id: str, stage: str) -> dict:
     """The persisted status of one stage of one pipeline — the *source of truth* the
     orchestrator reconciles against so a dropped pub/sub event can't hang a run."""
@@ -207,6 +219,45 @@ async def get_pipeline_runs(stage: str | None = None, limit: int = 20) -> dict:
     uid = require_user_id()
     async with session_scope() as session:
         return {"runs": await repositories.get_pipeline_runs(session, uid, stage=stage, limit=limit)}
+
+
+# --------------------------------------------------------------------------- #
+# Chat sessions + messages (Phase 6 Concierge) — persisted conversation
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+async def create_chat_session(title: str | None = None) -> dict:
+    uid = require_user_id()
+    async with session_scope() as session:
+        cs = await repositories.create_chat_session(session, uid, title)
+        return {"id": str(cs.id), "title": cs.title}
+
+
+@mcp.tool()
+async def list_chat_sessions(limit: int = 50) -> dict:
+    uid = require_user_id()
+    async with session_scope() as session:
+        return {"sessions": await repositories.list_chat_sessions(session, uid, limit=limit)}
+
+
+@mcp.tool()
+async def append_message(
+    chat_session_id: str, role: str, content: str | None = None, tool_calls_json: dict | None = None
+) -> dict:
+    """Append one message to a chat session the caller owns. Returns None if the
+    session doesn't belong to the caller (scoping is enforced, never spoofable)."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        m = await repositories.append_message(
+            session, uid, uuid.UUID(chat_session_id), role, content, tool_calls_json)
+        return {"message": repositories.message_to_dict(m) if m else None}
+
+
+@mcp.tool()
+async def get_messages(chat_session_id: str, limit: int = 200) -> dict:
+    uid = require_user_id()
+    async with session_scope() as session:
+        return {"messages": await repositories.get_messages(
+            session, uid, uuid.UUID(chat_session_id), limit=limit)}
 
 
 @mcp.tool()

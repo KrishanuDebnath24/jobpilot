@@ -27,10 +27,11 @@ import time
 import uuid
 from typing import TypedDict
 
-from jobpilot_core import events
+from jobpilot_core import events, gates
 from jobpilot_core.settings import Settings, get_settings
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
 
 from . import mcp_client
 from .celery_app import celery
@@ -154,6 +155,50 @@ async def _enhance_node(state: PipelineState) -> dict:
     return await _run_stage_node(state, "enhance", "enhance.run", {"all_qualified": True})
 
 
+# --------------------------------------------------------------------------- #
+# Gate nodes (Phase 6, 6a) — a configurable pause point after a stage. When the gate
+# is on and unresolved it emits ``gate_pending`` and LangGraph-``interrupt``s, which
+# checkpoints to Postgres and suspends until approve/skip. Reconciled against the
+# persisted gate row so a resumed/replayed pipeline never re-pauses a cleared gate and
+# never hangs on an approval event (same discipline as the stage nodes).
+# --------------------------------------------------------------------------- #
+async def _gate_status(user_id: uuid.UUID, pipeline_id: str, gate_key: str) -> str | None:
+    res = await mcp_client.db_mcp(
+        user_id, "get_stage_status",
+        {"pipeline_id": pipeline_id, "stage": gates.gate_stage(gate_key)})
+    row = res.get("run")
+    return row["status"] if row else None
+
+
+async def _run_gate(state: PipelineState, gate_key: str) -> dict:
+    user_id = uuid.UUID(state["user_id"])
+    pid = state["pipeline_id"]
+    try:
+        cfg = await mcp_client.config_mcp(user_id, "get_gate_config", {})
+        enabled = bool((cfg.get("gates") or {}).get(gate_key))
+    except Exception as exc:  # noqa: BLE001 - a config read failure must not wedge a run
+        logger.warning("gate.config read failed (%s) — treating %s as off", exc, gate_key)
+        enabled = False
+    status = await _gate_status(user_id, pid, gate_key)
+    if gates.gate_decision(enabled, status) == "proceed":
+        return {}
+    # Pause: persist pending (idempotent), emit, then interrupt (checkpoints + suspends).
+    await mcp_client.db_mcp(user_id, "open_gate_pending", {"pipeline_id": pid, "gate_key": gate_key})
+    gid = gates.gate_id(pid, gate_key)
+    await _emit(user_id, events.make_event(
+        "gate", "pending", pipeline_id=pid, gate_key=gate_key, gate_id=gid))
+    logger.info("orchestrator.gate paused pipeline=%s gate=%s", pid, gate_key)
+    interrupt({"gate_key": gate_key, "gate_id": gid})  # suspends here until resumed
+    return {}
+
+
+def _make_gate_node(gate_key: str):
+    async def _node(state: PipelineState) -> dict:
+        return await _run_gate(state, gate_key)
+
+    return _node
+
+
 async def _failed_node(state: PipelineState) -> dict:
     # Terminal marker. The umbrella row + failed event are finalized by the wrapper.
     logger.warning("orchestrator.failed stage=%s error=%s",
@@ -166,24 +211,33 @@ def _route(state: PipelineState) -> str:
 
 
 def build_graph(checkpointer) -> object:
-    """[scout] → [qualify] → END, with a conditional error edge to [failed].
-    Scout failure must NOT let Qualify run on no data. When ``analyze_in_pipeline`` is
-    on (Phase 5, default OFF), [analyze] → [enhance] are appended after qualify —
-    otherwise the auto-pipeline stops at Qualify."""
+    """[scout] → (gate) → [qualify] → (gate) → END, with a conditional error edge to
+    [failed]. Scout failure must NOT let Qualify run on no data. A gate node sits after
+    each stage: it no-ops when the gate is off (default) and interrupts when on (Phase
+    6). When ``analyze_in_pipeline`` is on (Phase 5, default OFF), [analyze] → [enhance]
+    (each gated) are appended after qualify — otherwise the auto-pipeline stops at
+    Qualify."""
     g = StateGraph(PipelineState)
     g.add_node("scout", _scout_node)
     g.add_node("qualify", _qualify_node)
+    g.add_node("gate_scout", _make_gate_node("after_scout"))
+    g.add_node("gate_qualify", _make_gate_node("after_qualify"))
     g.add_node("failed", _failed_node)
     g.add_edge(START, "scout")
-    g.add_conditional_edges("scout", _route, {"ok": "qualify", "failed": "failed"})
+    g.add_conditional_edges("scout", _route, {"ok": "gate_scout", "failed": "failed"})
+    g.add_edge("gate_scout", "qualify")
     if get_settings().analyze_in_pipeline:
         g.add_node("analyze", _analyze_node)
         g.add_node("enhance", _enhance_node)
-        g.add_conditional_edges("qualify", _route, {"ok": "analyze", "failed": "failed"})
-        g.add_conditional_edges("analyze", _route, {"ok": "enhance", "failed": "failed"})
+        g.add_node("gate_analyze", _make_gate_node("after_analyze"))
+        g.add_conditional_edges("qualify", _route, {"ok": "gate_qualify", "failed": "failed"})
+        g.add_edge("gate_qualify", "analyze")
+        g.add_conditional_edges("analyze", _route, {"ok": "gate_analyze", "failed": "failed"})
+        g.add_edge("gate_analyze", "enhance")
         g.add_conditional_edges("enhance", _route, {"ok": END, "failed": "failed"})
     else:
-        g.add_conditional_edges("qualify", _route, {"ok": END, "failed": "failed"})
+        g.add_conditional_edges("qualify", _route, {"ok": "gate_qualify", "failed": "failed"})
+        g.add_edge("gate_qualify", END)
     g.add_edge("failed", END)
     return g.compile(checkpointer=checkpointer)
 
@@ -211,31 +265,50 @@ def _summary(state: PipelineState) -> dict:
     }
 
 
+def _is_interrupted(snap) -> bool:
+    """True if the graph is paused at a gate interrupt (as opposed to a normal
+    pending step). Checks both the top-level ``interrupts`` and per-task interrupts,
+    across langgraph versions."""
+    if getattr(snap, "interrupts", None):
+        return True
+    return any(getattr(t, "interrupts", None) for t in (getattr(snap, "tasks", ()) or ()))
+
+
 async def run_pipeline_graph(user_id: str, pipeline_id: str) -> dict:
-    """Execute (or RESUME) the pipeline graph for one execution. Idempotent per
-    ``pipeline_id``: a redelivered task resumes from the checkpoint rather than
-    re-running completed stages."""
+    """Execute, RESUME, or CONTINUE-PAST-A-GATE the pipeline graph for one execution.
+    Idempotent per ``pipeline_id``: a redelivered task resumes from the checkpoint
+    rather than re-running completed stages, and an approve/skip re-enqueues this same
+    task to continue past the gate (the resolved gate row drives it forward)."""
     settings = get_settings()
     uid = uuid.UUID(user_id)
-    await _emit(uid, events.make_event("pipeline", events.STARTED, pipeline_id=pipeline_id))
 
     async with AsyncPostgresSaver.from_conn_string(_psycopg_dsn(settings)) as cp:
         await _ensure_setup(cp)
         graph = build_graph(cp)
         cfg = {"configurable": {"thread_id": pipeline_id}}
         snap = await graph.aget_state(cfg)
-        if snap.next:  # a step is pending -> RESUME (do not restart)
+        if _is_interrupted(snap):  # paused at a gate -> resume past it
+            logger.info("orchestrator.resume-gate pipeline=%s", pipeline_id)
+            final = await graph.ainvoke(Command(resume={}), cfg)
+        elif snap.next:  # a step is pending -> RESUME (do not restart)
             logger.info("orchestrator.resume pipeline=%s next=%s", pipeline_id, snap.next)
             final = await graph.ainvoke(None, cfg)
         elif snap.values:  # already ran to completion for this thread -> no-op
             logger.info("orchestrator.replay pipeline=%s already complete", pipeline_id)
             final = snap.values
         else:  # fresh start
+            await _emit(uid, events.make_event("pipeline", events.STARTED, pipeline_id=pipeline_id))
             init: PipelineState = {
                 "user_id": user_id, "pipeline_id": pipeline_id,
                 "status": "running", "counts": {}, "stage_run_ids": {},
             }
             final = await graph.ainvoke(init, cfg)
+        # Did we stop at a (new) gate interrupt rather than reaching the end?
+        paused = _is_interrupted(await graph.aget_state(cfg))
+
+    if paused:
+        logger.info("orchestrator.paused pipeline=%s (awaiting gate approval)", pipeline_id)
+        return {"pipeline_id": pipeline_id, "status": "paused"}
 
     summary = _summary(final)
     # Finalize the umbrella row (created by pipeline-mcp's guarded open) + emit.

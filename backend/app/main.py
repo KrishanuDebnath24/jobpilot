@@ -68,6 +68,26 @@ class ScopeRequest(BaseModel):
     all_qualified: bool = False
 
 
+class ChatMessageRequest(BaseModel):
+    """Phase 6: one user turn to the Concierge."""
+    text: str
+
+
+class GateUpdateRequest(BaseModel):
+    gate_key: str
+    enabled: bool
+
+
+class GateActionRequest(BaseModel):
+    gate_id: str
+
+
+class ApplyRequest(BaseModel):
+    """Phase 6: apply accepted suggestions — only ``confirmed_skills`` get added."""
+    confirmed_skills: list[str] | None = None
+    label: str | None = None
+
+
 # --------------------------------------------------------------------------- #
 # System
 # --------------------------------------------------------------------------- #
@@ -332,6 +352,114 @@ async def set_suggestion_status(
     return await mcp_client.db_mcp(
         current_user.id, "update_suggestion_status",
         {"suggestion_id": suggestion_id, "status": status})
+
+
+# --------------------------------------------------------------------------- #
+# Concierge chat (Phase 6) — the acting agent, scoped through MCP
+# --------------------------------------------------------------------------- #
+@app.post("/chat/sessions", tags=["chat"])
+async def create_chat_session(current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.db_mcp(current_user.id, "create_chat_session", {})
+
+
+@app.get("/chat/sessions", tags=["chat"])
+async def list_chat_sessions(current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.db_mcp(current_user.id, "list_chat_sessions", {})
+
+
+@app.get("/chat/sessions/{session_id}/messages", tags=["chat"])
+async def chat_messages(session_id: str, current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.db_mcp(
+        current_user.id, "get_messages", {"chat_session_id": session_id})
+
+
+@app.post("/chat/sessions/{session_id}/message", tags=["chat"])
+async def post_chat_message(
+    session_id: str, body: ChatMessageRequest, current_user=Depends(get_current_user)
+) -> dict:
+    """Run one Concierge turn. The agent acts only through user-scoped MCP tools;
+    consequential/paid actions are confirmed in-conversation before firing."""
+    from .concierge_runner import run_turn
+    import uuid as _uuid
+
+    try:
+        return await run_turn(current_user.id, _uuid.UUID(session_id), body.text)
+    except RuntimeError as exc:  # e.g. missing Anthropic key
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+# --------------------------------------------------------------------------- #
+# Gates (Phase 6) — human-in-the-loop review config + approve/skip
+# --------------------------------------------------------------------------- #
+@app.get("/gates", tags=["gates"])
+async def get_gates(current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.config_mcp(current_user.id, "get_gate_config", {})
+
+
+@app.post("/gates", tags=["gates"])
+async def update_gate(body: GateUpdateRequest, current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.config_mcp(
+        current_user.id, "update_gate_config",
+        {"gate_key": body.gate_key, "enabled": body.enabled})
+
+
+@app.post("/pipeline/gate/approve", tags=["gates"])
+async def approve_gate(body: GateActionRequest, current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.pipeline_mcp(current_user.id, "approve_gate", {"gate_id": body.gate_id})
+
+
+@app.post("/pipeline/gate/skip", tags=["gates"])
+async def skip_gate(body: GateActionRequest, current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.pipeline_mcp(current_user.id, "skip_gate", {"gate_id": body.gate_id})
+
+
+# --------------------------------------------------------------------------- #
+# Apply-to-resume (Phase 6) — gated, versioned, honest
+# --------------------------------------------------------------------------- #
+@app.post("/resume/apply/prepare", tags=["resume"])
+async def prepare_resume_apply(
+    body: ApplyRequest, current_user=Depends(get_current_user)
+) -> dict:
+    """Preview the new resume version (the approval gate) — no changes are written."""
+    from .apply_runner import prepare_apply
+
+    return await prepare_apply(current_user.id, body.confirmed_skills)
+
+
+@app.post("/resume/apply", tags=["resume"])
+async def apply_resume(body: ApplyRequest, current_user=Depends(get_current_user)) -> dict:
+    """Write a new resume version from accepted suggestions. Only confirmed skills are
+    added; the original is preserved."""
+    from .apply_runner import apply_to_resume
+
+    return await apply_to_resume(current_user.id, body.confirmed_skills, body.label)
+
+
+@app.get("/resume/versions", tags=["resume"])
+async def resume_versions(current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.resume_mcp(current_user.id, "list_resume_versions", {})
+
+
+@app.get("/resume/versions/{resume_id}", tags=["resume"])
+async def resume_version(resume_id: str, current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.resume_mcp(
+        current_user.id, "get_resume_version", {"resume_id": resume_id})
+
+
+@app.get("/resume/versions/{resume_id}/download", tags=["resume"])
+async def download_resume_version(resume_id: str, current_user=Depends(get_current_user)):
+    """Download a resume version as plain text."""
+    from fastapi.responses import PlainTextResponse
+
+    res = await mcp_client.resume_mcp(
+        current_user.id, "get_resume_version", {"resume_id": resume_id})
+    resume = res.get("resume")
+    if not resume:
+        raise HTTPException(status_code=404, detail="resume version not found")
+    return PlainTextResponse(
+        resume.get("raw_text") or "",
+        headers={"Content-Disposition": f'attachment; filename="resume-{resume_id[:8]}.txt"'},
+    )
 
 
 # --------------------------------------------------------------------------- #

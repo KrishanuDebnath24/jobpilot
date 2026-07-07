@@ -13,6 +13,7 @@ from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import models
+from .gates import gate_stage  # gate rows are pipeline_runs with a 'gate:<key>' stage
 from .schemas import JobIn
 
 # --------------------------------------------------------------------------- #
@@ -48,6 +49,9 @@ def resume_to_dict(resume: models.Resume) -> dict:
         "consent_at": _iso(resume.consent_at),
         "retention_expires_at": _iso(resume.retention_expires_at),
         "has_embedding": resume.embedding is not None,
+        "source": resume.source,
+        "label": resume.label,
+        "parent_id": str(resume.parent_id) if resume.parent_id else None,
         "created_at": _iso(resume.created_at),
     }
 
@@ -230,6 +234,86 @@ async def list_resume_file_refs(session: AsyncSession, user_id: uuid.UUID) -> li
         select(models.Resume.file_ref).where(models.Resume.user_id == user_id)
     )
     return [r for (r,) in res.all()]
+
+
+async def create_resume_version(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    parsed_json: dict,
+    raw_text: str,
+    label: str | None,
+    parent_id: uuid.UUID | None,
+    consent_at: datetime | None,
+    retention_expires_at: datetime | None,
+) -> models.Resume:
+    """Persist an *assembled* resume version (Phase 6, 6e). It's a new row — the
+    original is preserved. ``file_ref`` is a synthetic marker (no uploaded file)."""
+    resume = models.Resume(
+        user_id=user_id,
+        file_ref=f"assembled://{uuid.uuid4()}",
+        raw_text=raw_text,
+        parsed_json=parsed_json,
+        source="assembled",
+        label=label,
+        parent_id=parent_id,
+        consent_at=consent_at,
+        retention_expires_at=retention_expires_at,
+    )
+    session.add(resume)
+    await session.flush()
+    return resume
+
+
+async def list_resumes(session: AsyncSession, user_id: uuid.UUID) -> list[dict]:
+    """All of a user's resume versions (upload + assembled), newest first."""
+    res = await session.execute(
+        select(models.Resume)
+        .where(models.Resume.user_id == user_id)
+        .order_by(models.Resume.created_at.desc())
+    )
+    return [resume_to_dict(r) for r in res.scalars().all()]
+
+
+async def get_resume(
+    session: AsyncSession, user_id: uuid.UUID, resume_id: uuid.UUID
+) -> models.Resume | None:
+    return (
+        await session.execute(
+            select(models.Resume).where(
+                models.Resume.user_id == user_id, models.Resume.id == resume_id
+            )
+        )
+    ).scalar_one_or_none()
+
+
+# --------------------------------------------------------------------------- #
+# Gate config (Phase 6) — per-user human-in-the-loop toggles
+# --------------------------------------------------------------------------- #
+async def get_gate_configs(session: AsyncSession, user_id: uuid.UUID) -> dict[str, bool]:
+    """Return the user's stored gate overrides as ``{gate_key: enabled}`` (defaults
+    are applied by ``jobpilot_core.gates.effective_gates`` at the read boundary)."""
+    res = await session.execute(
+        select(models.GateConfig).where(models.GateConfig.user_id == user_id)
+    )
+    return {g.gate_key: g.enabled for g in res.scalars().all()}
+
+
+async def upsert_gate_config(
+    session: AsyncSession, user_id: uuid.UUID, gate_key: str, enabled: bool
+) -> models.GateConfig:
+    existing = (
+        await session.execute(
+            select(models.GateConfig).where(
+                models.GateConfig.user_id == user_id, models.GateConfig.gate_key == gate_key
+            )
+        )
+    ).scalar_one_or_none()
+    row = existing or models.GateConfig(user_id=user_id, gate_key=gate_key)
+    row.enabled = enabled
+    if existing is None:
+        session.add(row)
+    await session.flush()
+    return row
 
 
 # --------------------------------------------------------------------------- #
@@ -558,6 +642,83 @@ async def update_suggestion_status(
 
 
 # --------------------------------------------------------------------------- #
+# Chat sessions + messages (Phase 6 Concierge) — the persisted conversation
+# --------------------------------------------------------------------------- #
+def message_to_dict(m: models.Message) -> dict:
+    return {
+        "id": str(m.id),
+        "role": m.role,
+        "content": m.content,
+        "tool_calls_json": m.tool_calls_json,
+        "created_at": _iso(m.created_at),
+    }
+
+
+async def create_chat_session(
+    session: AsyncSession, user_id: uuid.UUID, title: str | None = None
+) -> models.ChatSession:
+    cs = models.ChatSession(user_id=user_id, title=title)
+    session.add(cs)
+    await session.flush()
+    return cs
+
+
+async def list_chat_sessions(session: AsyncSession, user_id: uuid.UUID, limit: int = 50) -> list[dict]:
+    res = await session.execute(
+        select(models.ChatSession)
+        .where(models.ChatSession.user_id == user_id)
+        .order_by(models.ChatSession.created_at.desc())
+        .limit(limit)
+    )
+    return [{"id": str(c.id), "title": c.title, "created_at": _iso(c.created_at)}
+            for c in res.scalars().all()]
+
+
+async def append_message(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    chat_session_id: uuid.UUID,
+    role: str,
+    content: str | None,
+    tool_calls_json: dict | None = None,
+) -> models.Message | None:
+    """Append a message to a chat session the caller owns (scoped by user_id — a
+    caller can never write into another user's conversation)."""
+    owner = (
+        await session.execute(
+            select(models.ChatSession.id).where(
+                models.ChatSession.id == chat_session_id,
+                models.ChatSession.user_id == user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if owner is None:
+        return None
+    msg = models.Message(
+        user_id=user_id, session_id=chat_session_id, role=role,
+        content=content, tool_calls_json=tool_calls_json,
+    )
+    session.add(msg)
+    await session.flush()
+    return msg
+
+
+async def get_messages(
+    session: AsyncSession, user_id: uuid.UUID, chat_session_id: uuid.UUID, limit: int = 200
+) -> list[dict]:
+    res = await session.execute(
+        select(models.Message)
+        .where(
+            models.Message.user_id == user_id,
+            models.Message.session_id == chat_session_id,
+        )
+        .order_by(models.Message.created_at.asc())
+        .limit(limit)
+    )
+    return [message_to_dict(m) for m in res.scalars().all()]
+
+
+# --------------------------------------------------------------------------- #
 # Pipeline runs (Scout background-job tracking)
 # --------------------------------------------------------------------------- #
 def pipeline_run_to_dict(run: models.PipelineRun) -> dict:
@@ -655,6 +816,66 @@ async def get_stage_status(
     )
     run = (await session.execute(stmt)).scalar_one_or_none()
     return pipeline_run_to_dict(run) if run else None
+
+
+# --------------------------------------------------------------------------- #
+# Gate lifecycle (Phase 6) — a gate is a pipeline_runs row with stage 'gate:<key>'
+# so the orchestrator reconciles a gate decision against persisted truth the same way
+# it reconciles a stage (never hanging on an approval event).
+# --------------------------------------------------------------------------- #
+async def _latest_gate_row(
+    session: AsyncSession, user_id: uuid.UUID, pipeline_id: uuid.UUID, gate_key: str
+) -> models.PipelineRun | None:
+    stmt = (
+        select(models.PipelineRun)
+        .where(
+            models.PipelineRun.user_id == user_id,
+            models.PipelineRun.pipeline_id == pipeline_id,
+            models.PipelineRun.stage == gate_stage(gate_key),
+        )
+        .order_by(models.PipelineRun.created_at.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def get_gate_status(
+    session: AsyncSession, user_id: uuid.UUID, pipeline_id: uuid.UUID, gate_key: str
+) -> str | None:
+    """The persisted status of one gate ('pending' | 'approved' | 'skipped'), or None."""
+    row = await _latest_gate_row(session, user_id, pipeline_id, gate_key)
+    return row.status if row else None
+
+
+async def open_gate_pending(
+    session: AsyncSession, user_id: uuid.UUID, pipeline_id: uuid.UUID, gate_key: str
+) -> models.PipelineRun:
+    """Mark a gate pending (idempotent: a pipeline that resumes onto an already-open
+    or already-resolved gate keeps the existing row)."""
+    existing = await _latest_gate_row(session, user_id, pipeline_id, gate_key)
+    if existing is not None:
+        return existing
+    return await create_pipeline_run(
+        session, user_id, gate_stage(gate_key), pipeline_id=pipeline_id, status="pending"
+    )
+
+
+async def resolve_gate(
+    session: AsyncSession, user_id: uuid.UUID, pipeline_id: uuid.UUID, gate_key: str, decision: str
+) -> models.PipelineRun:
+    """Record an approve/skip decision. Upserts so an approval that races ahead of the
+    gate node still lands (the node then reads it as resolved and proceeds)."""
+    status = "approved" if decision == "approve" else "skipped"
+    row = await _latest_gate_row(session, user_id, pipeline_id, gate_key)
+    if row is None:
+        row = await create_pipeline_run(
+            session, user_id, gate_stage(gate_key), pipeline_id=pipeline_id, status=status
+        )
+    else:
+        row.status = status
+    row.finished_at = datetime.now(timezone.utc)
+    await session.flush()
+    return row
 
 
 async def get_active_pipeline(

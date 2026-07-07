@@ -88,10 +88,62 @@ async def get_structured_resume() -> dict:
             "resume": {
                 "id": str(resume.id),
                 "structured": resume.parsed_json,
+                "source": resume.source,
+                "label": resume.label,
                 "consent_at": resume.consent_at.isoformat() if resume.consent_at else None,
                 "created_at": resume.created_at.isoformat() if resume.created_at else None,
             }
         }
+
+
+# --------------------------------------------------------------------------- #
+# Resume versioning (Phase 6, 6e) — apply-to-resume writes a NEW version; the
+# original is preserved and both remain retrievable/downloadable.
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+async def create_resume_version(
+    structured: dict, raw_text: str, label: str | None = None, parent_id: str | None = None
+) -> dict:
+    """Persist an assembled resume version. Inherits consent/retention from the
+    caller's latest resume (they already consented to processing); this is a new row,
+    so the original is preserved. Resume content is never logged."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        latest = await repositories.get_latest_resume(session, uid)
+        if latest is None:
+            return {"error": "no resume on file to version"}
+        resume = await repositories.create_resume_version(
+            session, uid,
+            parsed_json=structured,
+            raw_text=raw_text,
+            label=label,
+            parent_id=uuid.UUID(parent_id) if parent_id else latest.id,
+            consent_at=latest.consent_at,
+            retention_expires_at=latest.retention_expires_at,
+        )
+        return {"resume": {"id": str(resume.id), "source": resume.source, "label": resume.label,
+                           "parent_id": str(resume.parent_id) if resume.parent_id else None}}
+
+
+@mcp.tool()
+async def list_resume_versions() -> dict:
+    """All of the caller's resume versions (upload + assembled), newest first."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        return {"resumes": await repositories.list_resumes(session, uid)}
+
+
+@mcp.tool()
+async def get_resume_version(resume_id: str) -> dict:
+    """One resume version, including its downloadable ``raw_text`` rendering."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        resume = await repositories.get_resume(session, uid, uuid.UUID(resume_id))
+        if resume is None:
+            return {"resume": None}
+        d = repositories.resume_to_dict(resume)
+        d["raw_text"] = resume.raw_text
+        return {"resume": d}
 
 
 app = UserContextMiddleware(mcp.streamable_http_app(), settings)

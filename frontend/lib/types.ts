@@ -124,11 +124,48 @@ export type PipelineExecution = {
 
 // A live event relayed over SSE from the Redis bus.
 export type PipelineEvent = {
-  type: string; // "scout.completed", "qualify.progress", "pipeline.started", …
-  stage: string; // scout | qualify | pipeline
-  kind: string; // started | progress | completed | failed
+  type: string; // "scout.completed", "qualify.progress", "gate.pending", …
+  stage: string; // scout | qualify | pipeline | gate
+  kind: string; // started | progress | completed | failed | pending
   pipeline_id: string | null;
   counts: RunCounts | null;
   ts: string;
   error?: string;
+  gate_key?: string;
+  gate_id?: string;
+};
+
+// Phase 6: Concierge chat + gates + apply-to-resume.
+export type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string | null;
+  created_at: string | null;
+};
+export type ChatEventItem = { tool: string; status: string };
+export type ChatTurn = {
+  reply: string;
+  events: ChatEventItem[];
+  pending: { tool: string; args: unknown } | null;
+};
+export type GateConfig = {
+  gates: Record<string, boolean>;
+  defaults?: Record<string, boolean>;
+  keys?: string[];
+};
+export type PendingGate = { gate_key: string; gate_id: string } | null;
+export type ResumeVersion = {
+  id: string;
+  source: string;
+  label: string | null;
+  parent_id: string | null;
+  created_at: string | null;
+};
+export type ApplyPreview = {
+  accepted_count: number;
+  applied_rewrites: BulletRewrite[];
+  added_skills: string[];
+  withheld_skills: string[];
+  project_guidance: ProjectIdea[];
+  parent_id: string | null;
 };

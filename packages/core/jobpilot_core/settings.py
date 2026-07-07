@@ -84,6 +84,14 @@ class Settings(BaseSettings):
     # analyzing every scheduled scout is expensive and presumptuous (Phase 5 decision).
     analyze_in_pipeline: bool = False
 
+    # --- Phase 6 (Concierge). A Sonnet tier: reasoning/routing/judgment over a scoped
+    #     toolset. Interactive (no batch); the stable system prompt + tool defs cache.
+    #     Config-driven so the tier can be promoted without code changes. ---
+    concierge_model: str = "claude-sonnet-5"
+    concierge_max_tokens: int = 2048
+    # Hard cap on tool-call rounds per chat turn (bounds an agent that loops on tools).
+    concierge_max_tool_iterations: int = 8
+
     # --- Adzuna connector (free developer tier). Backend/sources-mcp env only. ---
     adzuna_app_id: str = ""
     adzuna_app_key: str = ""
