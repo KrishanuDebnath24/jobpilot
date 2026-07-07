@@ -114,57 +114,105 @@ def _to_anthropic_messages(history: list[dict]) -> list[dict]:
     return out
 
 
+def _confirm_reply(tool: str, result: dict) -> str:
+    """A short, honest summary for the (LLM-free) confirmation turn."""
+    if tool == "run_pipeline":
+        pid = result.get("pipeline_id")
+        if result.get("rejected"):
+            return f"A pipeline is already running ({result.get('active_pipeline_id')})."
+        return f"Done — the pipeline is queued ({pid})." if pid else "Pipeline queued."
+    if tool == "trigger_stage":
+        return f"Done — the {result.get('stage')} stage is queued." if result.get("pipeline_id") \
+            else f"Couldn't start that stage: {result.get('reason') or result}."
+    if tool == "update_qualifier_config":
+        return "Done — updated your qualifier scoring config."
+    if tool == "apply_resume":
+        if result.get("applied"):
+            added = ", ".join(result.get("added_skills") or []) or "no new skills"
+            return f"Done — created a new resume version ({result.get('applied_rewrites', 0)} rewrite(s); added: {added})."
+        return f"Nothing applied — {result.get('reason', 'no accepted suggestions')}."
+    if tool == "delete_user_data":
+        return "Done — all of your data has been erased."
+    return f"Done — {tool}."
+
+
+async def _persist(user_id, chat_session_id, role, content, tool_calls_json=None):
+    await mcp_client.db_mcp(user_id, "append_message", {
+        "chat_session_id": str(chat_session_id), "role": role,
+        "content": content, "tool_calls_json": tool_calls_json})
+
+
+async def _safe_execute(executor: "ConciergeExecutor", name: str, args: dict, confirmed: bool):
+    """Execute a tool, turning a failure into an error result so one bad tool call can't
+    crash the whole chat turn."""
+    try:
+        return await executor.execute(name, args, confirmed=confirmed)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("concierge.tool %s failed: %s", name, exc)
+        return {"error": f"{type(exc).__name__}: {exc}"}, False
+
+
 async def run_turn(user_id: uuid.UUID, chat_session_id: uuid.UUID, user_text: str) -> dict:
     """Run one Concierge turn. Persists the exchange, drives the tool-use loop, and
-    returns the reply plus a list of tool-call events (for streaming)."""
+    returns the reply plus a list of tool-call events (for streaming). A pending
+    consequential action from the previous turn, confirmed by an explicit yes, executes
+    on the fast path (no LLM call) — deterministic and free."""
     settings = get_settings()
     history = (await mcp_client.db_mcp(
         user_id, "get_messages", {"chat_session_id": str(chat_session_id)}))["messages"]
+    executor = ConciergeExecutor(user_id)
+    await _persist(user_id, chat_session_id, "user", user_text)
 
+    # Fast path: the user is confirming a consequential action proposed last turn.
     pending = _last_pending(history)
-    confirmed_action = pending if (pending and concierge.is_affirmative(user_text)) else None
-
-    await mcp_client.db_mcp(user_id, "append_message", {
-        "chat_session_id": str(chat_session_id), "role": "user", "content": user_text})
+    if pending and concierge.confirms_action(pending["tool"], user_text):
+        result, _ = await _safe_execute(executor, pending["tool"], pending["args"], confirmed=True)
+        reply = _confirm_reply(pending["tool"], result if isinstance(result, dict) else {})
+        await _persist(user_id, chat_session_id, "assistant", reply)
+        logger.info("concierge.turn confirmed=%s", pending["tool"])
+        return {"reply": reply, "events": [{"tool": pending["tool"], "status": "confirmed"}],
+                "pending": None}
 
     messages = _to_anthropic_messages(history) + [{"role": "user", "content": user_text}]
-    executor = ConciergeExecutor(user_id)
     client = get_client(settings)
     events_out: list[dict] = []
     new_pending: dict | None = None
     resp = None
 
-    for _ in range(settings.concierge_max_tool_iterations):
-        resp = await client.messages.create(
-            model=settings.concierge_model,
-            max_tokens=settings.concierge_max_tokens,
-            system=concierge.system_blocks(),
-            tools=concierge.TOOLS,
-            messages=messages,
-            thinking={"type": "disabled"},  # interactive chat: low latency, no scratchpad
-        )
-        messages.append({"role": "assistant", "content": resp.content})
-        tool_uses = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
-        if resp.stop_reason != "tool_use" or not tool_uses:
-            break
-        tool_results = []
-        for tu in tool_uses:
-            confirmed = bool(confirmed_action and confirmed_action.get("tool") == tu.name)
-            # On confirmation reuse the ORIGINALLY-proposed args (prevents arg drift).
-            args = confirmed_action["args"] if confirmed else (tu.input or {})
-            result, is_data = await executor.execute(tu.name, args, confirmed=confirmed)
-            events_out.append({"tool": tu.name,
-                               "status": result.get("status", "ok") if isinstance(result, dict) else "ok"})
-            if isinstance(result, dict) and result.get("status") == "confirmation_required":
-                new_pending = {"tool": tu.name, "args": tu.input or {}}
-            content = concierge.wrap_retrieved(tu.name, json.dumps(result)) if is_data else json.dumps(result)
-            tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": content})
-        messages.append({"role": "user", "content": tool_results})
-        confirmed_action = None  # consumed for this turn
+    try:
+        for _ in range(settings.concierge_max_tool_iterations):
+            resp = await client.messages.create(
+                model=settings.concierge_model,
+                max_tokens=settings.concierge_max_tokens,
+                system=concierge.system_blocks(),
+                tools=concierge.TOOLS,
+                messages=messages,
+                thinking={"type": "disabled"},  # interactive chat: low latency, no scratchpad
+            )
+            messages.append({"role": "assistant", "content": resp.content})
+            tool_uses = [b for b in resp.content if getattr(b, "type", None) == "tool_use"]
+            if resp.stop_reason != "tool_use" or not tool_uses:
+                break
+            tool_results = []
+            for tu in tool_uses:
+                # Never confirmed inside the loop — a consequential call returns
+                # confirmation_required and is held for the user's next explicit yes.
+                result, is_data = await _safe_execute(executor, tu.name, tu.input or {}, confirmed=False)
+                events_out.append({"tool": tu.name,
+                                   "status": result.get("status", "ok") if isinstance(result, dict) else "ok"})
+                if isinstance(result, dict) and result.get("status") == "confirmation_required":
+                    new_pending = {"tool": tu.name, "args": tu.input or {}}
+                content = concierge.wrap_retrieved(tu.name, json.dumps(result)) if is_data else json.dumps(result)
+                tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": content})
+            messages.append({"role": "user", "content": tool_results})
+    finally:
+        try:
+            await client.close()  # release the httpx pool with the loop that owns it
+        except Exception:  # noqa: BLE001
+            pass
 
     reply = "".join(b.text for b in (resp.content if resp else []) if getattr(b, "type", None) == "text")
-    await mcp_client.db_mcp(user_id, "append_message", {
-        "chat_session_id": str(chat_session_id), "role": "assistant", "content": reply,
-        "tool_calls_json": {"pending_confirmation": new_pending} if new_pending else None})
+    await _persist(user_id, chat_session_id, "assistant", reply,
+                   {"pending_confirmation": new_pending} if new_pending else None)
     logger.info("concierge.turn tools=%d pending=%s", len(events_out), bool(new_pending))
     return {"reply": reply, "events": events_out, "pending": new_pending}

@@ -468,10 +468,20 @@ Running log of non-obvious engineering choices. One line + rationale each.
   Consequential = paid runs (`run_pipeline`/`trigger_stage`), scoring-config changes
   (`update_qualifier_config`), and `apply_resume`; destructive = `delete_user_data`
   (confirmed regardless of any gate). Plain config edits (search filters, gate toggles) and
-  reads fire directly. Confirmation is a two-turn flow: the pending action is recorded in
-  the assistant message metadata and released only when the next user message is an
-  explicit yes (`is_affirmative` is conservative — negations win, and "delete everything"
-  is NOT a confirmation).
+  reads fire directly. Confirmation is **executor-driven, not model-judged**: the model
+  calls the tool, the executor returns `confirmation_required` with a prompt to relay, the
+  action is recorded as pending on the assistant message, and the user's next explicit yes
+  runs it on an **LLM-free fast path** (deterministic + free). `is_affirmative` is
+  conservative (negations win); `delete_user_data` needs unambiguous erasure intent
+  ("yes, delete my data"), never a bare "yes" — so a delete proposal that arose from
+  retrieved data can't be greenlit by an unrelated yes.
+- **Live end-to-end coverage (key-gated).** `test_phase6_live.py` drives the real Sonnet
+  Concierge over the real MCP boundary (skips without a key): reconfigure scout + qualifier
+  and run the pipeline entirely by chat with a confirmation before the paid run; an injected
+  "delete my data" in a retrieved job leaves all data intact; and apply-to-resume is gated,
+  versioned, and honest (rewrite applied, unconfirmed skill withheld). Minimum cost — short
+  turns, cached prompt, confirmation turns are LLM-free, and no paid pipeline work executes
+  (the run only enqueues). The pure/DB tests remain the deterministic guarantees.
 - **Apply-to-resume is honest at write time.** `resume_apply.apply_suggestions` (pure)
   applies bullet rewrites only where the `before` matches an existing bullet (unmatched
   rewrites dropped — never invent an accomplishment), adds a skill only if it's accepted
