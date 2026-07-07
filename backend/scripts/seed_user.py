@@ -24,7 +24,20 @@ DEFAULT_SEARCH_CONFIG = {
     # Adzuna (NI), Greenhouse (ATS/RoI), crawler (RoI), + free aggregators for RoI
     # breadth. JSearch is metered, so it stays OFF until a user opts in.
     "sources": ["adzuna", "greenhouse", "crawl", "jooble", "careerjet"],
-    "target_employers": ["intercom", "stripe"],
+    # Addendum 2.2 (revised) step 3: `target_employers` is the cheapest full-text lever
+    # — every RoI employer with a public Greenhouse board adds full-text ATS jobs at
+    # zero metered cost. Grown to a batch of Dublin-HQ'd/large-RoI-presence employers.
+    # A slug that doesn't resolve is recorded as a connector error, never fatal, so
+    # curate this list against live boards (boards.greenhouse.io/<slug>).
+    "target_employers": [
+        "intercom",
+        "stripe",
+        "workhuman",
+        "tines",
+        "wayflyer",
+        "hubspot",
+        "udemy",
+    ],
     "schedule": None,
 }
 

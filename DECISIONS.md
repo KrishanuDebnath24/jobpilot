@@ -187,6 +187,80 @@ Running log of non-obvious engineering choices. One line + rationale each.
   fan-out's error isolation (one failing/unconfigured source is recorded on the `pipeline_runs`
   row, never fatal). This keeps optional sources optional without failing service boot.
 
+## Phase 2 Addendum 2.2 — Description completeness flag (hydration evaluated, then dropped)
+
+- **What shipped: the honesty flag, not hydration.** Aggregator-only jobs (Jooble/Careerjet/
+  Adzuna) arrive as teaser **snippets**, which gives the Qualifier (and later the Analyzer) thin
+  text to score on. We tag every job with `description_completeness` (**`full | snippet`**) and let
+  the Qualifier mark snippet-based results **`limited_data`**, surfaced in the dashboard — so a
+  confident-looking score is never shown as if it rode on two sentences.
+- **`description_completeness` on `jobs`: `full | snippet`.** Connectors set it by source
+  (ATS/crawler/JSearch → `full`; Adzuna/Jooble/Careerjet → `snippet`). Migration `0005` adds the
+  column and backfills existing rows from `source_type` (direct → `full`, aggregator → `snippet`).
+  `upsert_jobs` sets it alongside the other fields, so the `ats > crawl > aggregator` precedence
+  that collapses a shared job onto the direct record also upgrades its flag to `full`.
+- **`limited_data` policy: mark, don't penalise.** The Qualifier stamps `reasons_json.limited_data`
+  when a job was scored on `snippet` text; `full` jobs carry no flag. We deliberately do **not**
+  skip or down-weight snippet jobs — that would silently distort the score — we only flag them so
+  the UI is honest (an amber "limited data" badge next to the decision + a caveat line in the
+  detail). The Phase 5 Analyzer can read the same flag when it lands.
+- **Hydration was built, tested live, and removed.** The original plan added a deterministic
+  post-dedupe **hydration** stage (fetch the destination, extract main content with trafilatura,
+  robots/blocklist-gated, zero LLM) to upgrade crawlable snippets to full text. A real run against
+  the live stack showed it yields **~0** on our actual sources: all three aggregators expose
+  click-**tracker/redirect** URLs (Adzuna `…/jobs/land/…`, Careerjet `jobviewtrack.com`, Jooble
+  `…/jdp/…`) whose targets are robots-disallowed (Careerjet) or bot-blocked (Jooble `403`, Adzuna
+  `429`). The gate behaved correctly (refuse robots-disallowed, degrade gracefully on 403/429) but
+  hydrated nothing — so the fetch stage, the `trafilatura` dependency, and the `HYDRATION_*` config
+  were **not worth their cost** for these sources. We removed the hydration connector, the
+  `sources-mcp hydrate_jobs` tool, the `db-mcp mark_jobs_hydrated` write path, the Scout wiring, and
+  the `hydrated`/`hydrated_at` schema, keeping only the flag. If a future source links directly to
+  crawlable employer pages, hydration can be reintroduced behind the same flag.
+
+## Phase 2 Addendum 2.2 (Revised) — Full-text coverage & honest aggregation
+
+- **Full-text-primary, snippets demoted not deleted.** Building on the completeness flag,
+  the goal is that a `snippet` never wins a contest against `full` text — in dedup, in the
+  aggregate, or in the UI — so snippets only ever *add coverage* and never *dilute*. Sources
+  are pruned on measured unique contribution, never on the "snippet" label.
+- **Dedup completeness tiebreaker (step 1).** Precedence is now `(source tier, completeness)`
+  compared as a tuple (`jobpilot_core.scout.record_precedence`): the `ats > crawl > aggregator`
+  tier still decides first, but WITHIN a tier a `full` record beats a `snippet` for the same
+  `dedupe_hash` (equal completeness keeps last-writer-wins). So the same Dublin role arriving
+  full-text (JSearch/ATS) *and* as a Jooble snippet — both `source_type='api'` — collapses to
+  the full-text record and is marked `full`, regardless of connector run order. `upsert_jobs`
+  already copies the winner's fields, so the survivor keeps the full description + `full` flag.
+- **Full-text-only aggregate + stated basis (step 2).** Phase 5c frequency stats
+  (`analyzer.aggregate`) now compute over **full-text jobs only** — analyses flagged
+  `limited_data` (scored on snippet text) are excluded and the denominator is the full-text
+  count N, so excluding snippets makes the numbers *rise* (correcting the earlier
+  snippet-diluted undercount). The aggregate carries `full_text_jobs`, `snippet_jobs`, and a
+  `basis` string ("computed from N full-text jobs of M qualified"); the Enhancer prompt states
+  the basis, and the Suggestions UI shows the basis line + "K snippet-only excluded". Skill
+  inference from text we don't have is avoided by construction.
+- **Full-text-weighted cap strategy (step 3).** `target_employers` is the cheapest full-text
+  lever (every RoI Greenhouse board = free full-text ATS jobs), so the seeded default list was
+  grown to a batch of Dublin-HQ'd employers (slugs curate-against-live; a dead slug is a
+  recorded connector error, never fatal). **JSearch stays metered** — `jsearch_max_pages`
+  default held at 1 in code; pagination is already bounded + every call quota-logged, so a
+  bump is an env change (`JSEARCH_MAX_PAGES=2/3`), not a code default. **Adzuna left as-is**
+  (its `gb` coverage buys Northern Ireland, not Dublin — dead weight for RoI). **Jooble/
+  Careerjet snippet caps held** until the aggregate is full-text-safe (raising them would
+  amplify the dilution just fixed).
+- **Measured pruning instrumentation (step 5).** The Scout summary now reports
+  `unique_by_connector` (`jobpilot_core.scout.unique_contribution`): per-connector count of
+  deduped jobs that survive *only* via that source. A `dedupe_hash` produced by exactly one
+  connector is that connector's unique contribution; a shared hash counts for none. This is
+  the keep/drop signal — a source is judged on the unique breadth it adds, so even a full-text
+  source is a drop candidate if it adds little unique, and a snippet source is kept if it adds
+  real unique breadth. Surfaced on the `pipeline_runs` counts + run log.
+- **Apify Indeed/LinkedIn — gated, not built.** Considered compliant-coverage-*last*: only if
+  full-text ATS + JSearch leave a real measured gap. If ever adopted it is a new connector
+  behind the interface, **default-off**, with its own cap/quota guards; **Indeed only** as the
+  less-exposed target, **LinkedIn not recommended** for a product. Apify hosts the scraper but
+  does not launder the ToS — this is a business-risk decision, not a technical one, and is left
+  to the account owner. Nothing Apify-related is in the codebase.
+
 ## Phase 3 — Qualifier (hybrid ATS scoring) + Dashboard v1
 
 - **Hybrid scoring: deterministic gate + weighted math first, LLM only to refine.** A pure
@@ -307,3 +381,50 @@ Running log of non-obvious engineering choices. One line + rationale each.
   orchestrator/`trigger_stage` pass `pipeline_id` as a **keyword** — a positional pid would both
   mis-set `requalify_all` (accidental full re-qualify) and drop the correlation id (orchestrator
   never sees the stage finish → hang). Caught by the live integration test.
+
+## Phase 5 — Analyzer + Enhancer (Batch + prompt caching) + Suggestions UI
+
+- **Two agents, clean split.** **Analyzer** (`jobpilot_core/analyzer.py`) = factual extraction
+  (required_skills, keywords, seniority, tech_stack, gaps_vs_resume) → `analyses`. **Enhancer**
+  (`enhancer.py`) = prescriptive suggestions (skills_to_add, projects, bullet_rewrites) →
+  `suggestions`. Analysis is reusable/cacheable/aggregatable; suggestions are advisory. Both are
+  forced-tool-call structured output — job text is data, never instructions (injection-hardened).
+- **Model split, config-driven.** Analyzer → Haiku (`ANALYZER_MODEL`, high-volume, batched).
+  Enhancer → Sonnet (`ENHANCER_MODEL=claude-sonnet-5`, user-facing reasoning). The enhance runner
+  **falls back to the Analyzer model** if the Sonnet tier is unavailable (access/400), so a run
+  still completes. No temperature is sent on the Enhancer (the Sonnet tier 400s on non-default
+  sampling params); the forced tool call already constrains output.
+- **Caching + Batch are the cost point.** Prompt shape is `[stable: resume+rubric][variable:
+  job]`; the stable prefix carries a `cache_control` breakpoint (identical across every job in a
+  run → ~0.1x reads after the first write). Selected/few jobs run **synchronous cached** calls;
+  ≥ `ANALYZE_BATCH_THRESHOLD` (8) switches to the **Message Batches API** (50% off). `LLMUsage`
+  now tracks cache-read/cache-write tokens + a `batch` flag and reports `estimated_cost_usd` vs a
+  `naive_cost_usd` (no cache, no batch) so the run log **proves the savings** (`savings_pct`),
+  rather than assuming them.
+- **Aggregate by counting, not by model.** Batch mode rolls per-job `analyses` into
+  `{skill_frequency, common_keywords, tech_stack_frequency, seniority_distribution,
+  recurring_gaps}` **deterministically** (normalized counts, e.g. "Kubernetes in 70% of qualified
+  jobs"). The Enhancer reasons over that compact aggregate — never 40 raw job descriptions.
+- **Honesty is a hard rule.** The Enhancer's system prompt + schema enforce three buckets:
+  `bullet_rewrites` (reframe GENUINE experience), `projects` (build a REAL gap skill),
+  `skills_to_add` (only if truthfully held — must name a `truthful_basis`). It must never suggest
+  fabricating skills, experience, titles, or credentials; every item is grounded in the analysis.
+  Structured output makes the categories non-optional; a malicious posting can't surface an
+  injected instruction as a "recommended change" (data-only at each hop, forced tool call).
+- **On-demand by default; auto-pipeline stops at Qualify.** Analyze/Enhance run standalone on a
+  scope (selected `job_ids` | all qualified) via the backend `/analyze/run` `/enhance/run`
+  endpoints and via `pipeline-mcp trigger_stage`. They are appended to the Phase-4 auto-pipeline
+  as `[analyze]→[enhance]` graph nodes **only when `ANALYZE_IN_PIPELINE=true`** (default off) —
+  auto-analyzing every scheduled scout is expensive and presumptuous.
+- **Batch-await, don't hang.** The analyze runner submits the batch, polls `processing_status`
+  every `BATCH_POLL_INTERVAL_SECONDS`, and reconciles against persisted `analyses` — same
+  event-vs-truth discipline as Phase 4. Failed/expired batch items are skipped (those jobs stay
+  un-analyzed, re-attempted next run), never dropped.
+- **Suggestions lifecycle.** `suggestions.status ∈ {proposed, accepted, dismissed}`; job-scoped
+  suggestions upsert by (user, job); the aggregate is one `job_id`-NULL row that a re-run
+  replaces. The dashboard adds multi-select + "Analyze & suggest" / "Analyze all qualified", shows
+  the aggregate (recurring gaps / most-required skills as frequency bars) + per-job suggestions
+  with grounding visible, a batch status indicator (analyzing → generating → ready), and
+  accept/dismiss controls. `limited_data` (snippet-based) is carried into each analysis so thin
+  source text stays visible downstream. Boundary intact: reads via MCP, writes `analyses`/
+  `suggestions` via db-mcp; `user_id` from the signed context. No new Compose services.

@@ -1,4 +1,4 @@
-import type { Job, PipelineEvent, PipelineExecution, PipelineRun } from "./types";
+import type { Job, PipelineEvent, PipelineExecution, PipelineRun, Suggestion } from "./types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const TOKEN_KEY = "jobpilot_token";
@@ -82,6 +82,30 @@ export const getPipelineStatus = () =>
   request<{ pipeline: PipelineExecution; active: boolean }>("/pipeline/status");
 export const listPipelineRuns = () =>
   request<{ runs: PipelineExecution[] }>("/pipeline/runs").then((r) => r.runs);
+
+// --- Phase 5: Analyzer + Enhancer ---
+export type Scope = { job_ids?: string[] | null; all_qualified?: boolean };
+
+export const runAnalyze = (scope: Scope) =>
+  request<{ task_id: string }>("/analyze/run", {
+    method: "POST",
+    body: JSON.stringify(scope),
+  });
+export const runEnhance = (scope: Scope) =>
+  request<{ task_id: string }>("/enhance/run", {
+    method: "POST",
+    body: JSON.stringify(scope),
+  });
+export const getAnalyzeRuns = () =>
+  request<{ runs: PipelineRun[] }>("/analyze/runs").then((r) => r.runs);
+export const getEnhanceRuns = () =>
+  request<{ runs: PipelineRun[] }>("/enhance/runs").then((r) => r.runs);
+export const getSuggestions = () =>
+  request<{ suggestions: Suggestion[] }>("/suggestions").then((r) => r.suggestions);
+export const setSuggestionStatus = (id: string, status: "accepted" | "dismissed" | "proposed") =>
+  request<{ suggestion: unknown }>(`/suggestions/${id}/status?status=${status}`, {
+    method: "POST",
+  });
 
 /** Subscribe to the live pipeline event stream (SSE over fetch, so we can send the
  *  auth header). Auto-reconnects until the returned stop() is called. */

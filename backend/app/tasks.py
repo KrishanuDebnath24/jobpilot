@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import uuid
 
+from .analyze_runner import run_analyze_tracked
 from .asyncrun import run_async
 from .celery_app import celery
+from .enhance_runner import run_enhance_tracked
 from .orchestrator import run_pipeline_graph
 from .qualify_runner import run_qualify_tracked
 from .scout_runner import run_scout_tracked
@@ -28,6 +30,33 @@ def qualify_run(user_id: str, requalify_all: bool = False, pipeline_id: str | No
     return run_async(
         run_qualify_tracked(uuid.UUID(user_id), requalify_all=requalify_all, pipeline_id=pipeline_id)
     )
+
+
+@celery.task(name="analyze.run")
+def analyze_run(
+    user_id: str,
+    job_ids: list[str] | None = None,
+    all_qualified: bool = False,
+    pipeline_id: str | None = None,
+) -> dict:
+    """Background Analyze (Phase 5): extract structured analyses over a scope (selected
+    jobs or all qualified) — cached sync calls or the Batch API — then a deterministic
+    aggregate. Persists via db-mcp, records a pipeline_runs row."""
+    return run_async(run_analyze_tracked(
+        uuid.UUID(user_id), job_ids=job_ids, all_qualified=all_qualified, pipeline_id=pipeline_id))
+
+
+@celery.task(name="enhance.run")
+def enhance_run(
+    user_id: str,
+    job_ids: list[str] | None = None,
+    all_qualified: bool = False,
+    pipeline_id: str | None = None,
+) -> dict:
+    """Background Enhance (Phase 5): grounded, non-fabricating suggestions from
+    analyses (single) or the aggregate (batch). Persists via db-mcp + tracks the run."""
+    return run_async(run_enhance_tracked(
+        uuid.UUID(user_id), job_ids=job_ids, all_qualified=all_qualified, pipeline_id=pipeline_id))
 
 
 # --------------------------------------------------------------------------- #

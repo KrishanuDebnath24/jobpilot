@@ -104,7 +104,9 @@ async def _await_stage(
     )
 
 
-async def _run_stage_node(state: PipelineState, stage: str, task_name: str) -> dict:
+async def _run_stage_node(
+    state: PipelineState, stage: str, task_name: str, extra_kwargs: dict | None = None
+) -> dict:
     """Generic node: ensure the stage completes exactly once, then fold results.
     Resume-safe: if a prior (killed) invocation already finished or is mid-flight,
     we reconcile instead of re-triggering."""
@@ -117,11 +119,12 @@ async def _run_stage_node(state: PipelineState, stage: str, task_name: str) -> d
         if not (row and row["status"] == "running"):
             # Not started yet -> trigger on the DATA-PLANE queue (never inline: a
             # long crawl must not block the control-plane worker). pipeline_id MUST go
-            # as a kwarg: scout_run/qualify_run have different positional signatures
-            # (qualify_run's 2nd positional is requalify_all), so a positional pid
-            # would both mis-set requalify_all and drop the correlation id.
+            # as a kwarg: stage tasks have different positional signatures (qualify_run's
+            # 2nd positional is requalify_all), so a positional pid would both mis-set
+            # that and drop the correlation id. Analyze/Enhance also pass their scope.
             celery.send_task(task_name, args=[state["user_id"]],
-                             kwargs={"pipeline_id": pid}, queue=settings.data_queue)
+                             kwargs={"pipeline_id": pid, **(extra_kwargs or {})},
+                             queue=settings.data_queue)
             logger.info("orchestrator.triggered stage=%s pipeline=%s", stage, pid)
         row = await _await_stage(settings, user_id, pid, stage)
 
@@ -141,6 +144,16 @@ async def _qualify_node(state: PipelineState) -> dict:
     return await _run_stage_node(state, "qualify", "qualify.run")
 
 
+# Phase 5: appended only when `analyze_in_pipeline` is on (auto-pipeline stops at
+# Qualify by default). Both run the whole qualified set.
+async def _analyze_node(state: PipelineState) -> dict:
+    return await _run_stage_node(state, "analyze", "analyze.run", {"all_qualified": True})
+
+
+async def _enhance_node(state: PipelineState) -> dict:
+    return await _run_stage_node(state, "enhance", "enhance.run", {"all_qualified": True})
+
+
 async def _failed_node(state: PipelineState) -> dict:
     # Terminal marker. The umbrella row + failed event are finalized by the wrapper.
     logger.warning("orchestrator.failed stage=%s error=%s",
@@ -154,14 +167,23 @@ def _route(state: PipelineState) -> str:
 
 def build_graph(checkpointer) -> object:
     """[scout] → [qualify] → END, with a conditional error edge to [failed].
-    Scout failure must NOT let Qualify run on no data."""
+    Scout failure must NOT let Qualify run on no data. When ``analyze_in_pipeline`` is
+    on (Phase 5, default OFF), [analyze] → [enhance] are appended after qualify —
+    otherwise the auto-pipeline stops at Qualify."""
     g = StateGraph(PipelineState)
     g.add_node("scout", _scout_node)
     g.add_node("qualify", _qualify_node)
     g.add_node("failed", _failed_node)
     g.add_edge(START, "scout")
     g.add_conditional_edges("scout", _route, {"ok": "qualify", "failed": "failed"})
-    g.add_conditional_edges("qualify", _route, {"ok": END, "failed": "failed"})
+    if get_settings().analyze_in_pipeline:
+        g.add_node("analyze", _analyze_node)
+        g.add_node("enhance", _enhance_node)
+        g.add_conditional_edges("qualify", _route, {"ok": "analyze", "failed": "failed"})
+        g.add_conditional_edges("analyze", _route, {"ok": "enhance", "failed": "failed"})
+        g.add_conditional_edges("enhance", _route, {"ok": END, "failed": "failed"})
+    else:
+        g.add_conditional_edges("qualify", _route, {"ok": END, "failed": "failed"})
     g.add_edge("failed", END)
     return g.compile(checkpointer=checkpointer)
 
@@ -179,10 +201,12 @@ async def _ensure_setup(cp: AsyncPostgresSaver) -> None:
 def _summary(state: PipelineState) -> dict:
     status = "failed" if state.get("status") == "failed" else "completed"
     counts = state.get("counts") or {}
+    # Only include stages that actually ran (analyze/enhance are config-gated).
+    stage_counts = {k: counts[k] for k in ("scout", "qualify", "analyze", "enhance") if k in counts}
     return {
         "pipeline_id": state.get("pipeline_id"),
         "status": status,
-        "counts": {"scout": counts.get("scout"), "qualify": counts.get("qualify")},
+        "counts": stage_counts or {"scout": counts.get("scout"), "qualify": counts.get("qualify")},
         "error": state.get("error"),
     }
 

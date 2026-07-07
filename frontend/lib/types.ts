@@ -11,6 +11,8 @@ export type ReasonsJson = {
   semantic_fit?: number | null;
   gate?: string;
   reasons?: string[];
+  // Addendum 2.2: scored on aggregator snippet text only (low-confidence).
+  limited_data?: boolean;
   resume_version?: string | null;
   config_version?: string | null;
 } | null;
@@ -32,10 +34,54 @@ export type Job = {
   source: string | null;
   source_type: string | null;
   connector: string | null;
+  // Addendum 2.2: full | snippet.
+  description_completeness?: string | null;
   dedupe_hash: string | null;
   status: string;
   created_at: string | null;
   qualification: Qualification;
+};
+
+// Phase 5: Analyzer + Enhancer
+export type SkillToAdd = {
+  skill: string;
+  why?: string;
+  frequency?: string;
+  truthful_basis?: string;
+};
+export type ProjectIdea = { title: string; builds_skill: string; description: string };
+export type BulletRewrite = { before: string; after: string; grounding: string };
+export type AggregateRow = { label: string; count: number; pct: number };
+export type Aggregate = {
+  total_jobs?: number;
+  // Addendum 2.2 (revised): frequency stats are computed from full-text jobs only;
+  // `basis` states the honest denominator ("N full-text of M qualified").
+  full_text_jobs?: number;
+  snippet_jobs?: number;
+  basis?: string;
+  skill_frequency?: AggregateRow[];
+  common_keywords?: AggregateRow[];
+  tech_stack_frequency?: AggregateRow[];
+  seniority_distribution?: AggregateRow[];
+  recurring_gaps?: AggregateRow[];
+};
+
+export type Suggestion = {
+  id: string;
+  job_id: string | null;
+  batch_id: string | null;
+  skills_to_add: string[];
+  projects_json:
+    | {
+        projects?: ProjectIdea[];
+        skills_detail?: SkillToAdd[];
+        mode?: string;
+        aggregate?: Aggregate;
+      }
+    | null;
+  bullet_rewrites_json: { bullet_rewrites?: BulletRewrite[] } | null;
+  status: "proposed" | "accepted" | "dismissed";
+  created_at: string | null;
 };
 
 export type RunCounts = Record<string, unknown> & {
@@ -47,6 +93,9 @@ export type RunCounts = Record<string, unknown> & {
   fetched?: number;
   new?: number;
   by_connector?: Record<string, number>;
+  // Addendum 2.2 (revised) step 5: per-connector jobs that survive dedup uniquely via
+  // that source (the measured keep/drop signal).
+  unique_by_connector?: Record<string, number>;
   errors?: Record<string, string>;
   llm_usage?: { estimated_cost_usd?: number };
 };

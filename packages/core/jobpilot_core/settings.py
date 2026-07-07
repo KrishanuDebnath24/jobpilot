@@ -65,6 +65,25 @@ class Settings(BaseSettings):
     # Cap jobs scored per Qualifier run (bounds LLM spend on the gated refine pass).
     qualify_max_jobs: int = 200
 
+    # --- Phase 5 (Analyzer + Enhancer). Two-model split, config-driven so tiers can
+    #     be promoted without code changes. Analyzer = high-volume extraction (Haiku,
+    #     batched + cached); Enhancer = lower-volume user-facing reasoning (Sonnet). ---
+    analyzer_model: str = "claude-haiku-4-5-20251001"
+    enhancer_model: str = "claude-sonnet-5"
+    # The Enhancer emits three buckets (skills/projects/bullet_rewrites) — it needs
+    # more room than the extraction default so its output isn't truncated mid-bucket.
+    enhancer_max_tokens: int = 3000
+    analyze_max_jobs: int = 200  # hard cap on jobs analyzed per run (spend guard)
+    # Selected/single mode runs synchronous cached calls; at/above this count a run
+    # switches to the Batch API (50% cheaper, non-interactive).
+    analyze_batch_threshold: int = 8
+    batch_poll_interval_seconds: float = 10.0  # how often the batch node polls status
+    batch_max_wait_seconds: int = 1800  # give up (gracefully) after this
+    analyze_max_desc_chars: int = 6000  # cap job description sent to the LLM (spend guard)
+    # Append Analyze→Enhance to the autonomous Scout→Qualify pipeline? Off by default:
+    # analyzing every scheduled scout is expensive and presumptuous (Phase 5 decision).
+    analyze_in_pipeline: bool = False
+
     # --- Adzuna connector (free developer tier). Backend/sources-mcp env only. ---
     adzuna_app_id: str = ""
     adzuna_app_key: str = ""

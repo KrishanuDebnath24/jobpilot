@@ -35,6 +35,7 @@ def _to_raw(j: dict) -> RawJob:
         description=j.get("description"),
         url=j.get("url"),
         external_id=None,  # Careerjet has no stable job id; dedupe uses company+title+loc
+        description_completeness="snippet",  # Careerjet returns a short description teaser
         raw={k: j.get(k) for k in ("salary", "salary_min", "salary_max", "date", "site") if j.get(k)},
     )
 

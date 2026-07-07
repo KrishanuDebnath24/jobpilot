@@ -28,6 +28,7 @@ def _to_raw(j: dict) -> RawJob:
         description=j.get("snippet"),
         url=j.get("link"),
         external_id=str(j["id"]) if j.get("id") is not None else None,
+        description_completeness="snippet",  # Jooble gives a teaser snippet only
         raw={k: j.get(k) for k in ("salary", "type", "updated", "source") if j.get(k)},
     )
 

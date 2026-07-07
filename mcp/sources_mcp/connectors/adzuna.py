@@ -35,6 +35,7 @@ def _to_raw(r: dict) -> RawJob:
         description=r.get("description"),
         url=r.get("redirect_url"),
         external_id=str(r["id"]) if r.get("id") is not None else None,
+        description_completeness="snippet",  # Adzuna returns teaser text, not the full body
         raw={k: r.get(k) for k in _RAW_KEYS if r.get(k) is not None},
     )
 

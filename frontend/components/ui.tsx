@@ -48,6 +48,19 @@ export function DecisionPill({ decision }: { decision: string | null | undefined
   );
 }
 
+/** Addendum 2.2: flags a score computed on aggregator snippet text only, so a
+ * confident-looking number is never shown as if it rode on a full description. */
+export function LimitedDataBadge() {
+  return (
+    <span
+      title="Scored on a short snippet — the source text was limited, so treat this score as low-confidence."
+      className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-300"
+    >
+      limited data
+    </span>
+  );
+}
+
 export function Chip({ label, tone }: { label: string; tone: "match" | "miss" }) {
   const cls =
     tone === "match"

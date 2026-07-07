@@ -26,9 +26,27 @@ _SOURCE_TYPES = {"api", "ats", "crawl", "seed"}
 # never overwrite direct data.
 _SOURCE_RANK = {"ats": 3, "crawl": 2, "api": 1, "seed": 0}
 
+# Addendum 2.2 (revised) — full-text-primary. WITHIN a source tier, a `full` record
+# beats a `snippet` one for the same dedupe_hash, so a snippet never wins a contest
+# against full text (e.g. JSearch full-text vs a Jooble snippet, both source_type
+# 'api'). This is the *secondary* precedence key: source tier decides first, then
+# completeness. Snippets only ever add coverage; they never overwrite full text.
+_COMPLETENESS_RANK = {"full": 1, "snippet": 0}
+
 
 def source_rank(source_type: str | None) -> int:
     return _SOURCE_RANK.get(source_type or "", 1)
+
+
+def completeness_rank(completeness: str | None) -> int:
+    return _COMPLETENESS_RANK.get(completeness or "", 0)
+
+
+def record_precedence(source_type: str | None, completeness: str | None) -> tuple[int, int]:
+    """Combined dedupe precedence for a record: (source tier, completeness). Compared
+    as a tuple so tier dominates and `full` breaks ties within a tier. A higher tuple
+    wins the collapse for a shared ``dedupe_hash``."""
+    return (source_rank(source_type), completeness_rank(completeness))
 
 
 class RawJob(BaseModel):
@@ -43,6 +61,9 @@ class RawJob(BaseModel):
     description: str | None = None
     url: str | None = None
     external_id: str | None = None
+    # Addendum 2.2: how complete `description` is. Direct sources (ATS/crawl/JSearch)
+    # emit "full"; aggregators (Adzuna/Jooble/Careerjet) emit "snippet" teaser text.
+    description_completeness: str = "snippet"
     raw: dict = Field(default_factory=dict)  # the connector's original payload
 
 
@@ -107,6 +128,7 @@ def normalize_raw(raw: RawJob | dict) -> JobIn:
         "source_type": source_type,
         "connector": rj.connector,
         "external_id": rj.external_id,
+        "description_completeness": rj.description_completeness,
     }
     return JobIn(
         title=rj.title,
@@ -117,8 +139,33 @@ def normalize_raw(raw: RawJob | dict) -> JobIn:
         source=rj.source,
         source_type=source_type,
         connector=rj.connector,
+        description_completeness=rj.description_completeness,
         dedupe_hash=compute_dedupe_hash(rj.company, rj.title, rj.location, url),
         raw_json=rj.raw or None,
         normalized_json=normalized,
         status="scouted",
     )
+
+
+def unique_contribution(
+    raw_jobs: list[RawJob | dict], hashes: list[str]
+) -> dict[str, int]:
+    """Per-connector count of deduped jobs seen *only* via that connector in this batch
+    (Addendum 2.2 revised, step 5 — the measured drop-candidate signal).
+
+    ``raw_jobs`` and ``hashes`` are parallel: ``hashes[i]`` is the ``dedupe_hash`` of
+    ``raw_jobs[i]``. A ``dedupe_hash`` produced by exactly one connector counts as that
+    connector's unique contribution; a hash carried by two or more is shared and counts
+    for none. This measures *unique breadth after dedup*, so a source is judged on what
+    it adds that nothing else does — not on the "snippet" label.
+    """
+    by_hash: dict[str, set[str]] = {}
+    for rj, h in zip(raw_jobs, hashes):
+        connector = rj.get("connector") if isinstance(rj, dict) else rj.connector
+        by_hash.setdefault(h, set()).add(connector or "?")
+    out: dict[str, int] = {}
+    for connectors in by_hash.values():
+        if len(connectors) == 1:
+            (only,) = tuple(connectors)
+            out[only] = out.get(only, 0) + 1
+    return out

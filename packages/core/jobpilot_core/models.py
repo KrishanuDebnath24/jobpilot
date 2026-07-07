@@ -115,6 +115,12 @@ class Job(Base):
     company: Mapped[str | None] = mapped_column(Text, nullable=True)
     location: Mapped[str | None] = mapped_column(Text, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Addendum 2.2: full | snippet. Connectors set it by source — ATS/crawl/JSearch
+    # carry full descriptions; the aggregators (Adzuna/Jooble/Careerjet) only teasers.
+    # Consumers treat `snippet` as low-confidence (the Qualifier flags it limited_data).
+    description_completeness: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="snippet", default="snippet"
+    )
     raw_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     normalized_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)

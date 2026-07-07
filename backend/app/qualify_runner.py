@@ -87,12 +87,18 @@ async def run_qualify(
                 counts["gated_out"] += 1  # hard-fail: NO llm call made
 
             final = combine(det, llm_data, qcfg)
+            # Addendum 2.2: a job scored on aggregator `snippet` text (a teaser, not the
+            # full body) is low-confidence. We flag it — but neither skip nor down-weight
+            # it — so the UI can be honest without silently distorting the score. `full`
+            # jobs are scored normally and carry no flag.
+            limited_data = job.get("description_completeness") == "snippet"
             reasons_json = {
                 "dimension_scores": det["dimension_scores"],
                 "weighted_score": det["weighted_score"],
                 "semantic_fit": final["semantic_fit"],
                 "gate": det["must_have_gate"],
                 "reasons": final["reasons"],
+                "limited_data": limited_data,
                 "resume_version": resume_version,
                 "config_version": config_version,
             }

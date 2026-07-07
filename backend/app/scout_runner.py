@@ -13,7 +13,7 @@ import logging
 import uuid
 
 from jobpilot_core import events
-from jobpilot_core.scout import normalize_raw
+from jobpilot_core.scout import normalize_raw, unique_contribution
 from jobpilot_core.settings import get_settings
 
 from . import mcp_client
@@ -111,6 +111,10 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
     before = await _count_jobs(user_id)
     normalized = [normalize_raw(rj).model_dump() for rj in raw_jobs]
     unique_hashes = {n["dedupe_hash"] for n in normalized}
+    # Addendum 2.2 (revised) step 5: per-connector unique-after-dedup contribution —
+    # jobs that survive dedup ONLY via that source. The measured keep/drop signal (a
+    # source is judged on the unique breadth it adds, never on the "snippet" label).
+    unique_by_connector = unique_contribution(raw_jobs, [n["dedupe_hash"] for n in normalized])
     if normalized:
         await mcp_client.db_mcp(user_id, "upsert_jobs", {"jobs": normalized})
     after = await _count_jobs(user_id)
@@ -121,6 +125,7 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
         "new": after - before,
         "deduped": len(raw_jobs) - len(unique_hashes),
         "by_connector": by_connector,
+        "unique_by_connector": unique_by_connector,
         "errors": errors,
         "llm_usage": {**usage, "estimated_cost_usd": round(usage["estimated_cost_usd"], 6)},
     }

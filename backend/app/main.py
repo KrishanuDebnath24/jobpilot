@@ -62,6 +62,12 @@ class UserOut(BaseModel):
     email: EmailStr
 
 
+class ScopeRequest(BaseModel):
+    """Phase 5: scope for Analyze/Enhance — selected job ids OR all qualified jobs."""
+    job_ids: list[str] | None = None
+    all_qualified: bool = False
+
+
 # --------------------------------------------------------------------------- #
 # System
 # --------------------------------------------------------------------------- #
@@ -272,6 +278,60 @@ async def pipeline_stream(
 @app.get("/dashboard/jobs", tags=["dashboard"])
 async def dashboard_jobs(current_user=Depends(get_current_user)) -> dict:
     return await mcp_client.db_mcp(current_user.id, "get_qualified_jobs", {"limit": 1000})
+
+
+# --------------------------------------------------------------------------- #
+# Analyzer + Enhancer (Phase 5) — on-demand, over a scope (selected | all qualified)
+# --------------------------------------------------------------------------- #
+@app.post("/analyze/run", tags=["analyze"], status_code=status.HTTP_202_ACCEPTED)
+async def trigger_analyze(body: ScopeRequest, current_user=Depends(get_current_user)) -> dict:
+    """Queue an Analyze run over the scope: structured extraction (cached sync or the
+    Batch API) + deterministic aggregation. Returns a task id."""
+    from .tasks import analyze_run
+
+    task = analyze_run.delay(str(current_user.id), body.job_ids, body.all_qualified)
+    return {"task_id": task.id, "status": "queued"}
+
+
+@app.post("/enhance/run", tags=["enhance"], status_code=status.HTTP_202_ACCEPTED)
+async def trigger_enhance(body: ScopeRequest, current_user=Depends(get_current_user)) -> dict:
+    """Queue an Enhance run: grounded, non-fabricating suggestions from the analyses."""
+    from .tasks import enhance_run
+
+    task = enhance_run.delay(str(current_user.id), body.job_ids, body.all_qualified)
+    return {"task_id": task.id, "status": "queued"}
+
+
+@app.get("/analyze/runs", tags=["analyze"])
+async def list_analyze_runs(current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.db_mcp(current_user.id, "get_pipeline_runs", {"stage": "analyze"})
+
+
+@app.get("/enhance/runs", tags=["enhance"])
+async def list_enhance_runs(current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.db_mcp(current_user.id, "get_pipeline_runs", {"stage": "enhance"})
+
+
+@app.get("/analyses", tags=["analyze"])
+async def list_analyses(current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.db_mcp(current_user.id, "get_analyses", {})
+
+
+@app.get("/suggestions", tags=["enhance"])
+async def list_suggestions(current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.db_mcp(current_user.id, "get_suggestions", {})
+
+
+@app.post("/suggestions/{suggestion_id}/status", tags=["enhance"])
+async def set_suggestion_status(
+    suggestion_id: str, status: str, current_user=Depends(get_current_user)
+) -> dict:
+    """Accept/dismiss a suggestion (lifecycle: proposed → accepted | dismissed)."""
+    if status not in ("proposed", "accepted", "dismissed"):
+        raise HTTPException(status_code=400, detail="status must be proposed|accepted|dismissed")
+    return await mcp_client.db_mcp(
+        current_user.id, "update_suggestion_status",
+        {"suggestion_id": suggestion_id, "status": status})
 
 
 # --------------------------------------------------------------------------- #

@@ -78,6 +78,7 @@ async def fetch_greenhouse(
                 company=display,
                 location=location,
                 description=_text(job.get("content")),
+                description_completeness="full",  # Greenhouse ATS serves the full posting body
                 url=job.get("absolute_url"),
                 external_id=str(job["id"]) if job.get("id") is not None else None,
                 raw={

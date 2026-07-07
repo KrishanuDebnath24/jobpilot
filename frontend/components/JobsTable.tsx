@@ -2,7 +2,15 @@
 
 import { useState } from "react";
 import type { Job } from "@/lib/types";
-import { Chip, DecisionPill, DimensionBars, ScoreCell, SourceBadge, pct } from "./ui";
+import {
+  Chip,
+  DecisionPill,
+  DimensionBars,
+  LimitedDataBadge,
+  ScoreCell,
+  SourceBadge,
+  pct,
+} from "./ui";
 
 function JobDetail({ job }: { job: Job }) {
   const q = job.qualification;
@@ -15,6 +23,13 @@ function JobDetail({ job }: { job: Job }) {
         </p>
       ) : (
         <>
+          {rj?.limited_data ? (
+            <p className="text-sm text-amber-300">
+              Limited data — this job&apos;s source provided only a short snippet, so the
+              score is low-confidence (no full description was available).
+            </p>
+          ) : null}
+
           {rj?.gate === "fail" ? (
             <p className="text-sm text-rose-300">
               Hard-disqualified by the must-have gate (no LLM scoring performed).
@@ -94,19 +109,42 @@ function JobDetail({ job }: { job: Job }) {
   );
 }
 
-function JobRow({ job }: { job: Job }) {
+function JobRow({
+  job,
+  selected,
+  onToggleSelect,
+}: {
+  job: Job;
+  selected?: boolean;
+  onToggleSelect?: (id: string) => void;
+}) {
   const [open, setOpen] = useState(false);
+  const colSpan = onToggleSelect ? 7 : 6;
   return (
     <>
       <tr
         onClick={() => setOpen((o) => !o)}
         className="cursor-pointer border-t border-neutral-800/70 transition hover:bg-neutral-900/50"
       >
-        <td className="py-3 pl-4 pr-2">
+        {onToggleSelect && (
+          <td className="py-3 pl-4 pr-1" onClick={(e) => e.stopPropagation()}>
+            <input
+              type="checkbox"
+              checked={!!selected}
+              onChange={() => onToggleSelect(job.id)}
+              className="h-4 w-4 accent-emerald-500"
+              aria-label="select job"
+            />
+          </td>
+        )}
+        <td className={`py-3 pr-2 ${onToggleSelect ? "pl-1" : "pl-4"}`}>
           <ScoreCell score={job.qualification?.score ?? null} />
         </td>
         <td className="px-2 py-3">
-          <DecisionPill decision={job.qualification?.decision} />
+          <div className="flex flex-wrap items-center gap-1.5">
+            <DecisionPill decision={job.qualification?.decision} />
+            {job.qualification?.reasons_json?.limited_data ? <LimitedDataBadge /> : null}
+          </div>
         </td>
         <td className="px-2 py-3">
           <div className="flex items-center gap-2">
@@ -122,7 +160,7 @@ function JobRow({ job }: { job: Job }) {
       </tr>
       {open && (
         <tr>
-          <td colSpan={6} className="p-0">
+          <td colSpan={colSpan} className="p-0">
             <JobDetail job={job} />
           </td>
         </tr>
@@ -131,7 +169,15 @@ function JobRow({ job }: { job: Job }) {
   );
 }
 
-export default function JobsTable({ jobs }: { jobs: Job[] }) {
+export default function JobsTable({
+  jobs,
+  selected,
+  onToggleSelect,
+}: {
+  jobs: Job[];
+  selected?: Set<string>;
+  onToggleSelect?: (id: string) => void;
+}) {
   if (jobs.length === 0) {
     return (
       <div className="rounded-xl border border-dashed border-neutral-800 py-16 text-center text-sm text-neutral-500">
@@ -144,7 +190,8 @@ export default function JobsTable({ jobs }: { jobs: Job[] }) {
       <table className="w-full min-w-[720px] text-left text-sm">
         <thead className="sticky top-0 bg-neutral-900/80 text-xs uppercase tracking-wide text-neutral-500 backdrop-blur">
           <tr>
-            <th className="py-2.5 pl-4 pr-2 font-medium">Score</th>
+            {onToggleSelect && <th className="py-2.5 pl-4 pr-1 font-medium"> </th>}
+            <th className={`py-2.5 pr-2 font-medium ${onToggleSelect ? "pl-1" : "pl-4"}`}>Score</th>
             <th className="px-2 py-2.5 font-medium">Decision</th>
             <th className="px-2 py-2.5 font-medium">Title</th>
             <th className="px-2 py-2.5 font-medium">Company</th>
@@ -154,7 +201,12 @@ export default function JobsTable({ jobs }: { jobs: Job[] }) {
         </thead>
         <tbody>
           {jobs.map((job) => (
-            <JobRow key={job.id} job={job} />
+            <JobRow
+              key={job.id}
+              job={job}
+              selected={selected?.has(job.id)}
+              onToggleSelect={onToggleSelect}
+            />
           ))}
         </tbody>
       </table>

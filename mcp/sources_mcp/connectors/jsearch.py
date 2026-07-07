@@ -41,6 +41,7 @@ def _to_raw(j: dict) -> RawJob:
         description=j.get("job_description"),
         url=j.get("job_apply_link"),
         external_id=j.get("job_id"),
+        description_completeness="full",  # JSearch/Google-for-Jobs returns full descriptions
         raw={
             k: j.get(k)
             for k in ("job_posted_at_datetime_utc", "job_publisher", "job_employment_type")

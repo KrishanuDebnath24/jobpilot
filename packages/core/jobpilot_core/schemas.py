@@ -49,6 +49,7 @@ class JobIn(BaseModel):
     source: str | None = None
     source_type: str | None = None  # api|ats|crawl|seed
     connector: str | None = None
+    description_completeness: str = "snippet"  # full|snippet|hydrated (set per source)
     dedupe_hash: str | None = None
     raw_json: dict | None = None
     normalized_json: dict | None = None

@@ -120,6 +120,44 @@ async def get_suggestions() -> dict:
 
 
 @mcp.tool()
+async def upsert_analysis(
+    job_id: str,
+    extracted_json: dict,
+    gaps_json: dict | None = None,
+    seniority: str | None = None,
+    batch_id: str | None = None,
+) -> dict:
+    """Persist a job analysis (Phase 5, 5a). One per user+job; re-analyze overwrites."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        a = await repositories.upsert_analysis(
+            session, uid, uuid.UUID(job_id), extracted_json, gaps_json, seniority,
+            batch_id=uuid.UUID(batch_id) if batch_id else None,
+        )
+        return {"analysis": {"id": str(a.id), "job_id": str(a.job_id)}}
+
+
+@mcp.tool()
+async def upsert_suggestion(
+    job_id: str | None = None,
+    skills_to_add: list[str] | None = None,
+    projects_json: dict | None = None,
+    bullet_rewrites_json: dict | None = None,
+    batch_id: str | None = None,
+) -> dict:
+    """Persist a suggestion (Phase 5, 5d). ``job_id=None`` = the batch aggregate."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        s = await repositories.upsert_suggestion(
+            session, uid, uuid.UUID(job_id) if job_id else None,
+            skills_to_add or [], projects_json, bullet_rewrites_json,
+            batch_id=uuid.UUID(batch_id) if batch_id else None,
+        )
+        return {"suggestion": {"id": str(s.id), "job_id": str(s.job_id) if s.job_id else None,
+                               "status": s.status}}
+
+
+@mcp.tool()
 async def update_suggestion_status(suggestion_id: str, status: str) -> dict:
     uid = require_user_id()
     async with session_scope() as session:

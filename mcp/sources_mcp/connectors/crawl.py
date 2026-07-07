@@ -151,6 +151,7 @@ async def run_crawl(
                         company=(j.get("company") or "").strip() or None,
                         location=(j.get("location") or location).strip() or None,
                         url=jurl,
+                        description_completeness="full",  # direct board crawl (Addendum 2.2 source table)
                         raw={"board": board, "page": page, "page_url": page_url},
                     )
                 )

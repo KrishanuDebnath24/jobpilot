@@ -76,21 +76,30 @@ async def get_pipeline_status() -> dict:
 
 
 @mcp.tool()
-async def trigger_stage(stage: str) -> dict:
-    """Run one stage (``scout`` or ``qualify``) standalone. Rejected while a full
-    pipeline is active (it already owns the job pool — no racing on it)."""
+async def trigger_stage(
+    stage: str,
+    job_ids: list[str] | None = None,
+    all_qualified: bool = False,
+) -> dict:
+    """Run one stage standalone. ``scout`` | ``qualify`` (whole pool), or the Phase-5
+    ``analyze`` | ``enhance`` on a scope (``job_ids`` or ``all_qualified``). Rejected
+    while a full pipeline is active (it already owns the job pool — no racing on it)."""
     uid = require_user_id()
-    if stage not in ("scout", "qualify"):
-        return {"error": f"unknown stage {stage!r} (expected 'scout' or 'qualify')"}
+    if stage not in ("scout", "qualify", "analyze", "enhance"):
+        return {"error": f"unknown stage {stage!r} (expected scout|qualify|analyze|enhance)"}
     async with session_scope() as session:
         active = await repositories.get_active_pipeline(session, uid)
     if active:
         return {"rejected": True, "reason": "a pipeline is already running",
                 "active_pipeline_id": str(active.pipeline_id) if active.pipeline_id else None}
     pid = str(uuid.uuid4())
-    # pipeline_id as a kwarg (scout_run/qualify_run have different positional shapes).
-    _celery.send_task(f"{stage}.run", args=[str(uid)], kwargs={"pipeline_id": pid},
-                      queue=settings.data_queue)
+    # pipeline_id as a kwarg (stage tasks have different positional shapes). Analyze/
+    # Enhance also carry their scope as kwargs.
+    kwargs: dict = {"pipeline_id": pid}
+    if stage in ("analyze", "enhance"):
+        kwargs["job_ids"] = job_ids
+        kwargs["all_qualified"] = all_qualified
+    _celery.send_task(f"{stage}.run", args=[str(uid)], kwargs=kwargs, queue=settings.data_queue)
     return {"stage": stage, "pipeline_id": pid, "status": "queued"}
 
 

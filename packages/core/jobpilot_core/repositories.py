@@ -33,6 +33,7 @@ def job_to_dict(job: models.Job) -> dict:
         "source": job.source,
         "source_type": job.source_type,
         "connector": job.connector,
+        "description_completeness": job.description_completeness,
         "dedupe_hash": job.dedupe_hash,
         "status": job.status,
         "created_at": _iso(job.created_at),
@@ -89,11 +90,13 @@ async def upsert_jobs(
     session: AsyncSession, user_id: uuid.UUID, jobs: list[JobIn]
 ) -> list[models.Job]:
     """Idempotent upsert keyed by ``(user_id, dedupe_hash)``. Collapses duplicates
-    both against existing rows AND within this batch. On a collision, source
-    precedence decides which record's fields survive: a *direct* source (ats > crawl)
-    beats an *aggregator* (api), so a shared job keeps its canonical apply link and
-    richer fields regardless of connector run order."""
-    from .scout import source_rank
+    both against existing rows AND within this batch. On a collision, record precedence
+    decides which record's fields survive — ``(source tier, completeness)`` compared as
+    a tuple: a *direct* source (ats > crawl) beats an *aggregator* (api), and WITHIN a
+    tier a ``full`` record beats a ``snippet`` (Addendum 2.2 revised). So a shared job
+    keeps its canonical apply link, richer fields, and full text regardless of connector
+    run order, and the survivor's ``description_completeness`` reflects the winner."""
+    from .scout import record_precedence
 
     saved: list[models.Job] = []
     batch: dict[str, models.Job] = {}  # dedupe_hash -> row created/updated in this call
@@ -115,9 +118,13 @@ async def upsert_jobs(
                 session.add(target)
             batch[dedupe] = target
             saved.append(target)  # one entry per unique dedupe_hash (new or updated)
-        # Overwrite only when the incoming record is at least as "direct" as what's
-        # there; a lower-precedence aggregator copy never clobbers a direct record.
-        if is_new or source_rank(data.source_type) >= source_rank(target.source_type):
+        # Overwrite only when the incoming record's precedence is at least as high as
+        # what's there: a lower-tier aggregator copy never clobbers a direct record, and
+        # within a tier a snippet never clobbers full text (full wins the tiebreak; equal
+        # completeness keeps last-writer-wins).
+        incoming = record_precedence(data.source_type, data.description_completeness)
+        current = record_precedence(target.source_type, target.description_completeness)
+        if is_new or incoming >= current:
             target.title = data.title
             target.company = data.company
             target.location = data.location
@@ -126,6 +133,7 @@ async def upsert_jobs(
             target.source = data.source
             target.source_type = data.source_type
             target.connector = data.connector
+            target.description_completeness = data.description_completeness
             target.raw_json = data.raw_json
             target.normalized_json = data.normalized_json
             target.status = data.status
@@ -420,29 +428,116 @@ async def get_qualifications(session: AsyncSession, user_id: uuid.UUID) -> list[
     ]
 
 
+def analysis_to_dict(a: models.Analysis) -> dict:
+    return {
+        "id": str(a.id),
+        "job_id": str(a.job_id) if a.job_id else None,
+        "batch_id": str(a.batch_id) if a.batch_id else None,
+        "extracted_json": a.extracted_json,
+        "gaps_json": a.gaps_json,
+        "seniority": a.seniority,
+        "created_at": _iso(a.created_at),
+    }
+
+
+def suggestion_to_dict(s: models.Suggestion) -> dict:
+    return {
+        "id": str(s.id),
+        "job_id": str(s.job_id) if s.job_id else None,
+        "batch_id": str(s.batch_id) if s.batch_id else None,
+        "skills_to_add": list(s.skills_to_add or []),
+        "projects_json": s.projects_json,
+        "bullet_rewrites_json": s.bullet_rewrites_json,
+        "status": s.status,
+        "created_at": _iso(s.created_at),
+    }
+
+
+async def upsert_analysis(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    job_id: uuid.UUID,
+    extracted_json: dict,
+    gaps_json: dict | None,
+    seniority: str | None,
+    batch_id: uuid.UUID | None = None,
+) -> models.Analysis:
+    """One analysis per (user, job); re-analyze overwrites (idempotent)."""
+    existing = (
+        await session.execute(
+            select(models.Analysis).where(
+                models.Analysis.user_id == user_id, models.Analysis.job_id == job_id
+            )
+        )
+    ).scalar_one_or_none()
+    a = existing or models.Analysis(user_id=user_id, job_id=job_id)
+    a.extracted_json = extracted_json
+    a.gaps_json = gaps_json
+    a.seniority = seniority
+    a.batch_id = batch_id
+    if existing is None:
+        session.add(a)
+    await session.flush()
+    return a
+
+
+async def upsert_suggestion(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    job_id: uuid.UUID | None,
+    skills_to_add: list[str],
+    projects_json: dict | None,
+    bullet_rewrites_json: dict | None,
+    batch_id: uuid.UUID | None = None,
+) -> models.Suggestion:
+    """Persist a suggestion (status resets to 'proposed' on regenerate). Job-scoped
+    suggestions upsert by (user, job); the batch aggregate (job_id NULL) replaces any
+    prior aggregate for the user so re-running 'analyze all' doesn't stack duplicates."""
+    if job_id is not None:
+        existing = (
+            await session.execute(
+                select(models.Suggestion).where(
+                    models.Suggestion.user_id == user_id, models.Suggestion.job_id == job_id
+                )
+            )
+        ).scalar_one_or_none()
+        s = existing or models.Suggestion(user_id=user_id, job_id=job_id)
+        is_new = existing is None
+    else:
+        await session.execute(
+            delete(models.Suggestion).where(
+                models.Suggestion.user_id == user_id, models.Suggestion.job_id.is_(None)
+            )
+        )
+        s = models.Suggestion(user_id=user_id, job_id=None)
+        is_new = True
+    s.skills_to_add = skills_to_add
+    s.projects_json = projects_json
+    s.bullet_rewrites_json = bullet_rewrites_json
+    s.batch_id = batch_id
+    s.status = "proposed"
+    if is_new:
+        session.add(s)
+    await session.flush()
+    return s
+
+
 async def get_analyses(session: AsyncSession, user_id: uuid.UUID) -> list[dict]:
     res = await session.execute(
-        select(models.Analysis).where(models.Analysis.user_id == user_id)
+        select(models.Analysis)
+        .where(models.Analysis.user_id == user_id)
+        .order_by(models.Analysis.created_at.desc())
     )
-    return [
-        {"id": str(a.id), "job_id": str(a.job_id) if a.job_id else None, "seniority": a.seniority}
-        for a in res.scalars().all()
-    ]
+    return [analysis_to_dict(a) for a in res.scalars().all()]
 
 
 async def get_suggestions(session: AsyncSession, user_id: uuid.UUID) -> list[dict]:
     res = await session.execute(
-        select(models.Suggestion).where(models.Suggestion.user_id == user_id)
+        select(models.Suggestion)
+        .where(models.Suggestion.user_id == user_id)
+        .order_by(models.Suggestion.created_at.desc())
     )
-    return [
-        {
-            "id": str(s.id),
-            "job_id": str(s.job_id) if s.job_id else None,
-            "skills_to_add": s.skills_to_add,
-            "status": s.status,
-        }
-        for s in res.scalars().all()
-    ]
+    return [suggestion_to_dict(s) for s in res.scalars().all()]
 
 
 async def update_suggestion_status(

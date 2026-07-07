@@ -6,6 +6,7 @@ import { getDashboardJobs, getMe, getToken, setToken } from "@/lib/api";
 import LoginGate from "./LoginGate";
 import PipelineLive from "./PipelineLive";
 import JobsTable from "./JobsTable";
+import Suggestions from "./Suggestions";
 
 type Decision = "all" | "qualified" | "disqualified" | "unscored";
 
@@ -16,7 +17,17 @@ export default function Dashboard() {
   const [decision, setDecision] = useState<Decision>("all");
   const [source, setSource] = useState<string>("all");
   const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const loadingJobs = useRef(false);
+
+  const toggleSelect = useCallback((id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
 
   // Single-flight job reload — PipelineLive calls this live during a run.
   const loadJobs = useCallback(async () => {
@@ -149,7 +160,13 @@ export default function Dashboard() {
         </span>
       </div>
 
-      <JobsTable jobs={visible} />
+      <JobsTable jobs={visible} selected={selected} onToggleSelect={toggleSelect} />
+
+      <Suggestions
+        selectedJobIds={[...selected]}
+        qualifiedCount={qualifiedCount}
+        jobTitleById={(id) => jobs.find((j) => j.id === id)?.title ?? "Job"}
+      />
     </main>
   );
 }

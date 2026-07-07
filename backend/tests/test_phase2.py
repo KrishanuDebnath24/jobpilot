@@ -17,9 +17,12 @@ from jobpilot_core import repositories
 from jobpilot_core.db import session_scope
 from jobpilot_core.scout import (
     canonicalize_url,
+    completeness_rank,
     compute_dedupe_hash,
     normalize_raw,
+    record_precedence,
     source_rank,
+    unique_contribution,
 )
 from jobpilot_core.security import hash_password, mint_mcp_context_token
 from jobpilot_core.settings import get_settings
@@ -101,6 +104,30 @@ def test_source_precedence_ordering():
     assert source_rank("ats") > source_rank("crawl") > source_rank("api")
 
 
+def test_completeness_tiebreaker_precedence():
+    """Addendum 2.2 (revised) step 1: within a source tier, `full` beats `snippet`; the
+    source tier still dominates completeness (a full aggregator never outranks an ATS)."""
+    assert completeness_rank("full") > completeness_rank("snippet")
+    # Same tier (both api): full-text JSearch outranks a Jooble snippet.
+    assert record_precedence("api", "full") > record_precedence("api", "snippet")
+    # Tier dominates: an ATS snippet still outranks a full-text aggregator.
+    assert record_precedence("ats", "snippet") > record_precedence("api", "full")
+
+
+def test_unique_contribution_counts_source_only_jobs():
+    """Step 5: a dedupe_hash produced by exactly one connector is that connector's unique
+    contribution; a hash carried by two or more is shared and counts for none."""
+    raw = [
+        {"connector": "jsearch"},   # hash A — jsearch only
+        {"connector": "jooble"},    # hash B — shared with careerjet
+        {"connector": "careerjet"}, # hash B — shared
+        {"connector": "jooble"},    # hash C — jooble only
+    ]
+    hashes = ["A", "B", "B", "C"]
+    contrib = unique_contribution(raw, hashes)
+    assert contrib == {"jsearch": 1, "jooble": 1}  # careerjet added nothing unique
+
+
 async def test_source_precedence_direct_beats_aggregator(mcp_services):
     """A job in an aggregator AND a direct source collapses to one row keeping the
     direct record, regardless of run order (uses db-mcp; no external keys)."""
@@ -152,6 +179,88 @@ async def test_crawler_honors_robots_disallow():
     assert await _robots_ok(_FakeClient(disallow), "https://x.ie/jobs/dev", "Mozilla/5.0") is False
     allow = "User-agent: *\nDisallow: /private/\n"
     assert await _robots_ok(_FakeClient(allow), "https://x.ie/jobs/dev", "Mozilla/5.0") is True
+
+
+# --------------------------------------------------------------------------- #
+# Addendum 2.2 — description completeness tagging (no network/LLM)
+# --------------------------------------------------------------------------- #
+def test_connector_tags_description_completeness():
+    """Connectors set the source-appropriate completeness, and normalize_raw carries
+    it through to the persisted shape."""
+    from sources_mcp.connectors.adzuna import _to_raw as adzuna_raw
+    from sources_mcp.connectors.careerjet import _to_raw as careerjet_raw
+    from sources_mcp.connectors.jooble import _to_raw as jooble_raw
+    from sources_mcp.connectors.jsearch import _to_raw as jsearch_raw
+
+    assert jooble_raw({"title": "x", "snippet": "t"}).description_completeness == "snippet"
+    assert careerjet_raw({"title": "x", "description": "t"}).description_completeness == "snippet"
+    assert adzuna_raw({"title": "x"}).description_completeness == "snippet"
+    assert jsearch_raw({"job_title": "x"}).description_completeness == "full"
+
+    ji = normalize_raw(jooble_raw({"title": "x", "company": "c", "snippet": "t"}))
+    assert ji.description_completeness == "snippet"
+
+
+async def test_completeness_persisted_and_precedence(mcp_services):
+    """The completeness flag round-trips through upsert/get, and an ATS full-text twin
+    overwrites an aggregator snippet's flag when it collapses onto the same row."""
+    db = mcp_services["db"]
+
+    def job(connector, source_type, completeness, url):
+        return normalize_raw({
+            "connector": connector, "source": connector, "source_type": source_type,
+            "company": "Globex", "title": "Data Engineer", "location": "Dublin",
+            "url": url, "description": "text", "description_completeness": completeness,
+        }).model_dump()
+
+    uid = await _mk_user()
+    try:
+        await _call(db, uid, "upsert_jobs",
+                    {"jobs": [job("jooble", "api", "snippet", "https://jooble/x")]})
+        rows = (await _call(db, uid, "get_jobs", {"limit": 100}))["jobs"]
+        assert len(rows) == 1 and rows[0]["description_completeness"] == "snippet"
+        # the ATS twin (direct) collapses on and upgrades the flag to full
+        await _call(db, uid, "upsert_jobs",
+                    {"jobs": [job("greenhouse:globex", "ats", "full",
+                                  "https://boards.greenhouse.io/globex/y")]})
+        rows = (await _call(db, uid, "get_jobs", {"limit": 100}))["jobs"]
+        assert len(rows) == 1 and rows[0]["description_completeness"] == "full"
+    finally:
+        await _cleanup(uid)
+
+
+async def test_full_text_beats_snippet_within_tier(mcp_services):
+    """Addendum 2.2 (revised) step 1: the SAME role arriving full-text (JSearch) and as
+    a Jooble snippet — both source_type='api' — collapses to the full-text record and is
+    marked `full`, regardless of connector run order (snippet never wins the contest)."""
+    db = mcp_services["db"]
+
+    def job(connector, completeness, url, description):
+        return normalize_raw({
+            "connector": connector, "source": connector, "source_type": "api",
+            "company": "Initech", "title": "Platform Engineer", "location": "Dublin",
+            "url": url, "description": description, "description_completeness": completeness,
+        }).model_dump()
+
+    for order in (
+        # snippet first, then full — full must upgrade the row
+        [("jooble", "snippet", "https://jooble/x", "teaser"),
+         ("jsearch", "full", "https://jsearch/y", "full description text")],
+        # full first, then snippet — snippet must NOT clobber the full record
+        [("jsearch", "full", "https://jsearch/y", "full description text"),
+         ("jooble", "snippet", "https://jooble/x", "teaser")],
+    ):
+        uid = await _mk_user()
+        try:
+            for connector, completeness, url, desc in order:
+                await _call(db, uid, "upsert_jobs", {"jobs": [job(connector, completeness, url, desc)]})
+            rows = (await _call(db, uid, "get_jobs", {"limit": 100}))["jobs"]
+            assert len(rows) == 1
+            assert rows[0]["description_completeness"] == "full"
+            assert rows[0]["connector"] == "jsearch"  # the full-text survivor
+            assert rows[0]["description"] == "full description text"
+        finally:
+            await _cleanup(uid)
 
 
 # --------------------------------------------------------------------------- #
