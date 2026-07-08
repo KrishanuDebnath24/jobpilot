@@ -14,6 +14,11 @@ celery[redis]==5.6.3
 langgraph==1.2.7
 langgraph-checkpoint-postgres==3.1.0
 psycopg[binary,pool]==3.3.4
+# Phase 7: local embeddings for semantic search (zero API cost; heavy torch dep). The
+# backend embeds a query at ask-time; the worker backfills + embeds-on-write. The MCP
+# services do NOT need this — db-mcp only stores/searches the float vectors. If it isn't
+# installed, jobpilot_core.embeddings falls back to a deterministic hashing backend.
+sentence-transformers==3.3.1
 
 # --- Tests / dev ---
 pytest==8.3.4

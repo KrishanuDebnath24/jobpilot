@@ -144,4 +144,6 @@ async def run_enhance_tracked(
         "run_id": run_id, "status": "completed", "counts": summary, "error": err_str})
     summary["run_id"] = run_id
     summary["pipeline_id"] = pid
+    from .embed_runner import enqueue_embed  # embed-on-write: new suggestions (Phase 7)
+    enqueue_embed(user_id, ["suggestions"])
     return summary

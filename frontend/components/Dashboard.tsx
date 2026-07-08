@@ -8,6 +8,7 @@ import PipelineLive from "./PipelineLive";
 import JobsTable from "./JobsTable";
 import Suggestions from "./Suggestions";
 import Chat from "./Chat";
+import Ask from "./Ask";
 import Gates from "./Gates";
 
 type Decision = "all" | "qualified" | "disqualified" | "unscored";
@@ -125,8 +126,13 @@ export default function Dashboard() {
 
       <PipelineLive onJobsChanged={loadJobs} />
 
-      <div className="mt-6 grid gap-4 lg:grid-cols-[1.6fr_1fr]">
+      {/* The two conversational agents, side by side: the Concierge acts; Ask answers
+          (read-only). Distinct privilege sets — Ask has no action tools. */}
+      <div className="mt-6 grid gap-4 lg:grid-cols-2">
         <Chat onChanged={loadJobs} />
+        <Ask />
+      </div>
+      <div className="mt-4">
         <Gates onChanged={loadJobs} />
       </div>
 

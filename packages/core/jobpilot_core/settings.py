@@ -149,8 +149,25 @@ class Settings(BaseSettings):
     resume_max_bytes: int = 10 * 1024 * 1024  # 10 MB
     resume_retention_days: int = 365
 
-    # --- Embeddings (columns defined now; population deferred to Phase 3) ---
+    # --- Embeddings (Phase 7). Local sentence-transformers by default — zero API cost
+    #     (the heavy dep is torch), pluggable via EMBEDDING_BACKEND. The DB pgvector
+    #     columns are fixed at 1024 dims (Phase 1); a model with a smaller native dim is
+    #     zero-padded to fit, which preserves cosine ordering. A dependency-free hashing
+    #     backend (bag-of-words) is used for tests / offline and as a graceful fallback. ---
     embedding_dim: int = 1024
+    embedding_backend: str = "sentence_transformers"  # sentence_transformers | hashing
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"  # 384-dim, ~80MB
+    embedding_batch_size: int = 64  # texts per encode call (bounds memory)
+    embedding_max_chars: int = 4000  # cap text length fed to the embedder (per row)
+
+    # --- Phase 7 (Query agent). Read-only Q&A over the user's own data + work status.
+    #     Haiku by default — routing + synthesizing retrieved results is mechanical;
+    #     config-driven so the tier can be promoted. Interactive (no batch); the stable
+    #     system prompt + tool defs cache. ---
+    query_model: str = "claude-haiku-4-5"
+    query_max_tokens: int = 1024
+    query_max_tool_iterations: int = 6
+    query_semantic_limit: int = 8  # rows returned by a semantic similarity search
 
     def effective_mcp_secret(self) -> str:
         return self.mcp_shared_secret or self.jwt_secret

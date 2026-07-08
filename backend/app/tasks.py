@@ -9,6 +9,7 @@ import uuid
 from .analyze_runner import run_analyze_tracked
 from .asyncrun import run_async
 from .celery_app import celery
+from .embed_runner import run_embed
 from .enhance_runner import run_enhance_tracked
 from .orchestrator import run_pipeline_graph
 from .qualify_runner import run_qualify_tracked
@@ -69,6 +70,15 @@ def run_full_pipeline(user_id: str, pipeline_id: str) -> dict:
     """Run the autonomous Scout→Qualify graph for one execution. Returns immediately
     to the caller (it's enqueued); executes here in the orchestrator worker."""
     return run_async(run_pipeline_graph(user_id, pipeline_id))
+
+
+@celery.task(name="embed.run")
+def embed_run(user_id: str, kinds: list[str] | None = None) -> dict:
+    """Backfill / embed-on-write (Phase 7): embed the user's un-embedded jobs/analyses/
+    suggestions/resume into the pgvector columns. Enqueued after a write (scout/analyze/
+    enhance/resume-upload) so embedding never blocks the write, and by the backfill
+    endpoint for existing rows. Idempotent."""
+    return run_async(run_embed(uuid.UUID(user_id), kinds=kinds))
 
 
 @celery.task(name="pipeline.scheduler_tick")

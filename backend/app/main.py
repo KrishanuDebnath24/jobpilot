@@ -88,6 +88,13 @@ class ApplyRequest(BaseModel):
     label: str | None = None
 
 
+class QueryRequest(BaseModel):
+    """Phase 7: one read-only question to the Query agent. ``session_id`` continues an
+    existing Q&A thread; omit it to start a fresh one."""
+    question: str
+    session_id: str | None = None
+
+
 # --------------------------------------------------------------------------- #
 # System
 # --------------------------------------------------------------------------- #
@@ -177,6 +184,10 @@ async def upload_resume(
             )
         except Exception:  # noqa: BLE001 - config seeding is best-effort, never blocks upload
             pass
+        # Phase 7: embed the new resume (async; never blocks the upload response).
+        from .embed_runner import enqueue_embed
+
+        enqueue_embed(current_user.id, ["resumes"])
     return result
 
 
@@ -460,6 +471,61 @@ async def download_resume_version(resume_id: str, current_user=Depends(get_curre
         resume.get("raw_text") or "",
         headers={"Content-Disposition": f'attachment; filename="resume-{resume_id[:8]}.txt"'},
     )
+
+
+# --------------------------------------------------------------------------- #
+# Query agent (Phase 7) — read-only Q&A over the user's data + work status
+# --------------------------------------------------------------------------- #
+@app.post("/query/session", tags=["query"])
+async def create_query_session(current_user=Depends(get_current_user)) -> dict:
+    """Start a Query (Ask-about-your-data) thread. Its own session, distinct from the
+    Concierge's, so the read-only agent and the acting agent never share a transcript."""
+    return await mcp_client.db_mcp(current_user.id, "create_chat_session", {"title": "query"})
+
+
+@app.get("/query/session/{session_id}/messages", tags=["query"])
+async def query_messages(session_id: str, current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.db_mcp(
+        current_user.id, "get_messages", {"chat_session_id": session_id})
+
+
+@app.post("/query/ask", tags=["query"])
+async def query_ask(body: QueryRequest, current_user=Depends(get_current_user)) -> dict:
+    """Answer one read-only question — routed to exact/semantic/status tools, grounded
+    and cited. Creates a session if none is supplied. The Query agent has NO action
+    tools; action requests are redirected to the Concierge."""
+    import uuid as _uuid
+
+    from .query_runner import run_query_turn
+
+    session_id = body.session_id
+    if not session_id:
+        session_id = (await mcp_client.db_mcp(
+            current_user.id, "create_chat_session", {"title": "query"}))["id"]
+    try:
+        turn = await run_query_turn(current_user.id, _uuid.UUID(session_id), body.question)
+    except RuntimeError as exc:  # e.g. missing Anthropic key
+        raise HTTPException(status_code=503, detail=str(exc))
+    return {**turn, "session_id": session_id}
+
+
+# --------------------------------------------------------------------------- #
+# Embeddings (Phase 7) — backfill + coverage. Population is async in the worker.
+# --------------------------------------------------------------------------- #
+@app.post("/embeddings/backfill", tags=["embeddings"], status_code=status.HTTP_202_ACCEPTED)
+async def backfill_embeddings(current_user=Depends(get_current_user)) -> dict:
+    """Queue an embedding backfill for the current user (all kinds). Idempotent — only
+    rows without an embedding are touched."""
+    from .tasks import embed_run
+
+    task = embed_run.delay(str(current_user.id), None)
+    return {"task_id": task.id, "status": "queued"}
+
+
+@app.get("/embeddings/coverage", tags=["embeddings"])
+async def embeddings_coverage(current_user=Depends(get_current_user)) -> dict:
+    """Per-kind {total, embedded} — how much of the pool is semantically searchable."""
+    return await mcp_client.db_mcp(current_user.id, "embedding_coverage", {})
 
 
 # --------------------------------------------------------------------------- #

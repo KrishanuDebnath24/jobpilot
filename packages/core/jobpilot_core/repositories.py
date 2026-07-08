@@ -1018,6 +1018,246 @@ async def list_scheduled_users(session: AsyncSession) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# Phase 7 — embeddings I/O (populate the pgvector columns; worker computes vectors)
+# --------------------------------------------------------------------------- #
+# kind -> (model, serializer). The embed text is built from the serialized row via
+# jobpilot_core.embeddings.TEXT_BUILDERS, so this stays the single kind registry.
+_EMBED_MODELS: dict[str, tuple] = {
+    "jobs": (models.Job, "job_to_dict"),
+    "analyses": (models.Analysis, "analysis_to_dict"),
+    "suggestions": (models.Suggestion, "suggestion_to_dict"),
+    "resumes": (models.Resume, "resume_to_dict"),
+}
+
+
+def _embed_row_dict(kind: str, row) -> dict:
+    """Serialize a row for the embed-text builder. Resumes need raw_text (not in the
+    default serializer), so add it here."""
+    d = globals()[_EMBED_MODELS[kind][1]](row)
+    if kind == "resumes":
+        d["raw_text"] = row.raw_text
+    return d
+
+
+async def list_unembedded_texts(
+    session: AsyncSession, user_id: uuid.UUID, kind: str, limit: int = 200
+) -> list[dict]:
+    """``[{id, text}]`` for the user's rows of ``kind`` that have no embedding yet, with
+    a non-empty embed text. Rows whose text is empty are skipped (nothing to embed —
+    they stay NULL and simply aren't semantically searchable)."""
+    from .embeddings import TEXT_BUILDERS
+
+    model, _ = _EMBED_MODELS[kind]
+    build = TEXT_BUILDERS[kind]
+    rows = (
+        await session.execute(
+            select(model)
+            .where(model.user_id == user_id, model.embedding.is_(None))
+            .order_by(model.created_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    out: list[dict] = []
+    for row in rows:
+        text = build(_embed_row_dict(kind, row))
+        if text:
+            out.append({"id": str(row.id), "text": text})
+    return out
+
+
+async def set_embeddings(
+    session: AsyncSession, user_id: uuid.UUID, kind: str, items: list[dict]
+) -> int:
+    """Write ``[{id, embedding}]`` for the user's rows of ``kind`` (scoped, so a caller
+    can only ever set embeddings on their own rows). Returns the number written."""
+    model, _ = _EMBED_MODELS[kind]
+    written = 0
+    for item in items:
+        row = (
+            await session.execute(
+                select(model).where(model.user_id == user_id, model.id == uuid.UUID(item["id"]))
+            )
+        ).scalar_one_or_none()
+        if row is not None and item.get("embedding") is not None:
+            row.embedding = item["embedding"]
+            written += 1
+    if written:
+        await session.flush()
+    return written
+
+
+async def embedding_coverage(session: AsyncSession, user_id: uuid.UUID) -> dict[str, dict]:
+    """Per-kind ``{total, embedded}`` — lets the backfill report progress + the status
+    tool state how fresh the semantic index is."""
+    out: dict[str, dict] = {}
+    for kind, (model, _) in _EMBED_MODELS.items():
+        total = (
+            await session.execute(
+                select(func.count()).select_from(model).where(model.user_id == user_id)
+            )
+        ).scalar_one()
+        embedded = (
+            await session.execute(
+                select(func.count()).select_from(model).where(
+                    model.user_id == user_id, model.embedding.is_not(None)
+                )
+            )
+        ).scalar_one()
+        out[kind] = {"total": int(total), "embedded": int(embedded)}
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Phase 7 — semantic search (pgvector cosine similarity over embedded rows)
+# --------------------------------------------------------------------------- #
+async def semantic_search_jobs(
+    session: AsyncSession, user_id: uuid.UUID, embedding: list[float], limit: int = 8
+) -> list[dict]:
+    """Nearest jobs to the query ``embedding`` by cosine similarity (embedded jobs
+    only). Each result carries ``similarity`` (1 - cosine_distance) so the caller can
+    ground + threshold. Joined with the qualification so answers can cite the decision."""
+    dist = models.Job.embedding.cosine_distance(embedding)
+    stmt = (
+        select(models.Job, models.Qualification, dist.label("distance"))
+        .outerjoin(
+            models.Qualification,
+            (models.Qualification.job_id == models.Job.id)
+            & (models.Qualification.user_id == user_id),
+        )
+        .where(models.Job.user_id == user_id, models.Job.embedding.is_not(None))
+        .order_by(dist)
+        .limit(limit)
+    )
+    out: list[dict] = []
+    for job, q, distance in (await session.execute(stmt)).all():
+        d = job_to_dict(job)
+        d["similarity"] = round(1.0 - float(distance), 4)
+        d["qualification"] = (
+            {"score": q.score, "decision": q.decision} if q is not None else None
+        )
+        out.append(d)
+    return out
+
+
+async def semantic_search_analyses(
+    session: AsyncSession, user_id: uuid.UUID, embedding: list[float], limit: int = 8
+) -> list[dict]:
+    """Nearest job analyses to the query ``embedding`` (embedded analyses only)."""
+    dist = models.Analysis.embedding.cosine_distance(embedding)
+    stmt = (
+        select(models.Analysis, dist.label("distance"))
+        .where(models.Analysis.user_id == user_id, models.Analysis.embedding.is_not(None))
+        .order_by(dist)
+        .limit(limit)
+    )
+    out: list[dict] = []
+    for analysis, distance in (await session.execute(stmt)).all():
+        d = analysis_to_dict(analysis)
+        d["similarity"] = round(1.0 - float(distance), 4)
+        out.append(d)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Phase 7 — exact structured queries (counts/aggregates computed IN SQL, never RAG)
+# --------------------------------------------------------------------------- #
+def _since(since_days: int | None):
+    return datetime.now(timezone.utc) - timedelta(days=since_days) if since_days else None
+
+
+async def count_jobs(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    status: str | None = None,
+    source: str | None = None,
+    since_days: int | None = None,
+) -> int:
+    """Exact count of the user's jobs, optionally filtered by status / connector /
+    recency. This is the answer to 'how many jobs …' — never a similarity search."""
+    stmt = select(func.count()).select_from(models.Job).where(models.Job.user_id == user_id)
+    if status:
+        stmt = stmt.where(models.Job.status == status)
+    if source:
+        stmt = stmt.where(models.Job.connector == source)
+    cutoff = _since(since_days)
+    if cutoff is not None:
+        stmt = stmt.where(models.Job.created_at >= cutoff)
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def count_qualifications(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    decision: str | None = None,
+    since_days: int | None = None,
+) -> int:
+    """Exact count of qualifications, optionally by decision (qualified|disqualified)
+    and recency. 'How many qualified this week?' → this, not RAG."""
+    stmt = (
+        select(func.count())
+        .select_from(models.Qualification)
+        .where(models.Qualification.user_id == user_id)
+    )
+    if decision:
+        stmt = stmt.where(models.Qualification.decision == decision)
+    cutoff = _since(since_days)
+    if cutoff is not None:
+        stmt = stmt.where(models.Qualification.created_at >= cutoff)
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def _group_counts(session, model, column, user_id) -> list[dict]:
+    rows = (
+        await session.execute(
+            select(column, func.count())
+            .where(model.user_id == user_id)
+            .group_by(column)
+            .order_by(func.count().desc())
+        )
+    ).all()
+    return [{"label": (label if label is not None else "unknown"), "count": int(n)} for label, n in rows]
+
+
+async def job_stats(session: AsyncSession, user_id: uuid.UUID) -> dict:
+    """A compact, exact breakdown of the user's pool: totals + counts by decision,
+    source, and description completeness — all computed in SQL. The structured answer
+    surface for 'give me a breakdown' questions."""
+    total_jobs = await count_jobs(session, user_id)
+    qualified = await count_qualifications(session, user_id, decision="qualified")
+    disqualified = await count_qualifications(session, user_id, decision="disqualified")
+    scored = await count_qualifications(session, user_id)
+    return {
+        "total_jobs": total_jobs,
+        "scored": scored,
+        "qualified": qualified,
+        "disqualified": disqualified,
+        "unscored": max(0, total_jobs - scored),
+        "by_source": await _group_counts(session, models.Job, models.Job.connector, user_id),
+        "by_completeness": await _group_counts(
+            session, models.Job, models.Job.description_completeness, user_id),
+    }
+
+
+async def latest_stage_runs(session: AsyncSession, user_id: uuid.UUID) -> dict[str, dict]:
+    """The most recent run of each stage (scout/qualify/analyze/enhance) with its
+    status + finished_at + counts — the live 'when did X last run / is X running' truth,
+    grounded in pipeline_runs (never in any narrative a job description contains)."""
+    out: dict[str, dict] = {}
+    for stage in ("scout", "qualify", "analyze", "enhance"):
+        row = (
+            await session.execute(
+                select(models.PipelineRun)
+                .where(models.PipelineRun.user_id == user_id, models.PipelineRun.stage == stage)
+                .order_by(models.PipelineRun.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if row is not None:
+            out[stage] = pipeline_run_to_dict(row)
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Erasure (GDPR) — hard delete + verification helpers
 # --------------------------------------------------------------------------- #
 async def delete_user_cascade(session: AsyncSession, user_id: uuid.UUID) -> None:

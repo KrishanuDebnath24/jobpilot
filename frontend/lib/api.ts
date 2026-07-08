@@ -8,6 +8,7 @@ import type {
   PipelineEvent,
   PipelineExecution,
   PipelineRun,
+  QueryTurn,
   ResumeVersion,
   Suggestion,
 } from "./types";
@@ -181,6 +182,17 @@ export async function downloadResumeVersion(id: string): Promise<void> {
   a.click();
   URL.revokeObjectURL(url);
 }
+
+// --- Phase 7: Query agent (read-only Q&A over data + work status) ---
+export const createQuerySession = () =>
+  request<{ id: string }>("/query/session", { method: "POST" });
+export const getQueryMessages = (id: string) =>
+  request<{ messages: ChatMessage[] }>(`/query/session/${id}/messages`).then((r) => r.messages);
+export const askQuery = (question: string, session_id?: string | null) =>
+  request<QueryTurn>("/query/ask", {
+    method: "POST",
+    body: JSON.stringify({ question, session_id: session_id ?? null }),
+  });
 
 /** Subscribe to the live pipeline event stream (SSE over fetch, so we can send the
  *  auth header). Auto-reconnects until the returned stop() is called. */

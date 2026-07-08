@@ -160,6 +160,9 @@ async def run_scout_tracked(
         "run_id": run_id, "status": "completed", "counts": summary, "error": err_str})
     summary["run_id"] = run_id
     summary["pipeline_id"] = pid
+    # Embed-on-write: newly-scouted jobs get embedded asynchronously (never blocks scout).
+    from .embed_runner import enqueue_embed
+    enqueue_embed(user_id, ["jobs"])
     await _emit(user_id, events.make_event(
         "scout", events.COMPLETED, pipeline_id=pid, counts=summary))
     return summary

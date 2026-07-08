@@ -180,6 +180,8 @@ class Analysis(Base):
     extracted_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     gaps_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     seniority: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Phase 7: semantic-search vector over the analysis text (NULL until embedded).
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
     created_at: Mapped[datetime] = _created()
 
 
@@ -196,6 +198,8 @@ class Suggestion(Base):
     projects_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     bullet_rewrites_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="proposed")
+    # Phase 7: semantic-search vector over the suggestion text (NULL until embedded).
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
     created_at: Mapped[datetime] = _created()
 
 

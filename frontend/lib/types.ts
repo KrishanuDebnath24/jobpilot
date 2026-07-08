@@ -169,3 +169,28 @@ export type ApplyPreview = {
   project_guidance: ProjectIdea[];
   parent_id: string | null;
 };
+
+// Phase 7: Query agent (read-only Q&A over data + work status).
+export type QueryCitation =
+  | {
+      type: "job";
+      id: string;
+      title: string | null;
+      company: string | null;
+      url: string | null;
+      similarity?: number | null;
+    }
+  | {
+      type: "run";
+      stage: string;
+      status: string | null;
+      finished_at: string | null;
+      pipeline_id: string | null;
+    };
+export type QueryTurn = {
+  answer: string;
+  events: ChatEventItem[];
+  citations: QueryCitation[];
+  routed_to_concierge: boolean;
+  session_id: string;
+};

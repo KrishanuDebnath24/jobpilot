@@ -14,6 +14,7 @@ import uuid
 
 from jobpilot_core import repositories
 from jobpilot_core.db import session_scope
+from jobpilot_core.embeddings import EMBED_KINDS
 from jobpilot_core.mcp_auth import UserContextMiddleware, require_user_id
 from jobpilot_core.schemas import JobIn
 from jobpilot_core.settings import get_settings
@@ -258,6 +259,95 @@ async def get_messages(chat_session_id: str, limit: int = 200) -> dict:
     async with session_scope() as session:
         return {"messages": await repositories.get_messages(
             session, uid, uuid.UUID(chat_session_id), limit=limit)}
+
+
+# --------------------------------------------------------------------------- #
+# Phase 7 — embeddings I/O (the worker computes vectors; db-mcp stores/searches them)
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+async def list_unembedded(kind: str, limit: int = 200) -> dict:
+    """Rows of ``kind`` (jobs|analyses|suggestions|resumes) with no embedding yet, as
+    ``[{id, text}]`` — the worker embeds ``text`` and writes back via ``set_embeddings``."""
+    uid = require_user_id()
+    if kind not in EMBED_KINDS:
+        return {"error": f"unknown kind {kind!r} (expected {list(EMBED_KINDS)})"}
+    async with session_scope() as session:
+        return {"items": await repositories.list_unembedded_texts(session, uid, kind, limit=limit)}
+
+
+@mcp.tool()
+async def set_embeddings(kind: str, items: list[dict]) -> dict:
+    """Persist embeddings ``[{id, embedding}]`` for the caller's rows of ``kind``."""
+    uid = require_user_id()
+    if kind not in EMBED_KINDS:
+        return {"error": f"unknown kind {kind!r} (expected {list(EMBED_KINDS)})"}
+    async with session_scope() as session:
+        return {"written": await repositories.set_embeddings(session, uid, kind, items)}
+
+
+@mcp.tool()
+async def embedding_coverage() -> dict:
+    """Per-kind {total, embedded} — how much of the pool is semantically searchable."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        return {"coverage": await repositories.embedding_coverage(session, uid)}
+
+
+@mcp.tool()
+async def semantic_search_jobs(embedding: list[float], limit: int = 8) -> dict:
+    """Nearest jobs to a query ``embedding`` by cosine similarity (semantic — for FUZZY
+    questions only; counts/aggregates use the exact tools). Each carries ``similarity``."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        return {"jobs": await repositories.semantic_search_jobs(session, uid, embedding, limit=limit)}
+
+
+@mcp.tool()
+async def semantic_search_analyses(embedding: list[float], limit: int = 8) -> dict:
+    """Nearest job analyses to a query ``embedding`` by cosine similarity."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        return {"analyses": await repositories.semantic_search_analyses(session, uid, embedding, limit=limit)}
+
+
+# --------------------------------------------------------------------------- #
+# Phase 7 — exact structured queries (counts/aggregates in SQL; the anti-RAG path)
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+async def count_jobs(
+    status: str | None = None, source: str | None = None, since_days: int | None = None
+) -> dict:
+    """EXACT count of the user's jobs (optional status/connector/recency filter)."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        return {"count": await repositories.count_jobs(
+            session, uid, status=status, source=source, since_days=since_days)}
+
+
+@mcp.tool()
+async def count_qualifications(decision: str | None = None, since_days: int | None = None) -> dict:
+    """EXACT count of qualifications (optional decision=qualified|disqualified + recency)."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        return {"count": await repositories.count_qualifications(
+            session, uid, decision=decision, since_days=since_days)}
+
+
+@mcp.tool()
+async def job_stats() -> dict:
+    """EXACT pool breakdown: totals + counts by decision, source, and completeness."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        return {"stats": await repositories.job_stats(session, uid)}
+
+
+@mcp.tool()
+async def latest_stage_runs() -> dict:
+    """The most recent scout/qualify/analyze/enhance run (status + finished_at + counts)
+    — the live 'when did X last run' truth, grounded in pipeline_runs."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        return {"stages": await repositories.latest_stage_runs(session, uid)}
 
 
 @mcp.tool()
