@@ -570,3 +570,78 @@ Running log of non-obvious engineering choices. One line + rationale each.
   Haiku, short cached turns, read-only (no paid pipeline work). The pure + DB tests remain
   the deterministic guarantees (embedder contract, read-only invariant, executor routing,
   pgvector search, exact SQL counts, erasure).
+
+## Phase 6.5 — Tailored CV Generation, Critique, Export & Re-Qualification
+
+> Slots after Phase 6 (needs the Concierge + resume versioning), uses Phase 5 (Analyzer
+> output) and Phase 3 (Qualifier). Built after Phase 7 in wall-clock order; labelled 6.5.
+
+- **The integrity spine: honest by construction, enforced in code.** Tailoring a CV per
+  job to raise its score is only legitimate if every gain comes from presenting REAL
+  experience in the job's language — never fabrication. `jobpilot_core/cv_fields.py`
+  defines **LOCKED** fields (contact; each role's employer/title/dates; education — factual
+  claims that can never change) vs **MODIFIABLE** (summary, skills *emphasis/ordering only*,
+  bullet *phrasing*). Three guards, not one: (1) `validate_locked` proves the draft's locked
+  content is byte-identical to a `locked_snapshot_json` captured from the base version;
+  (2) `validate_no_fabricated_skills` catches any skill not grounded in the real resume;
+  (3) `enforce_locked` + `drop_fabricated_skills` re-impose the snapshot verbatim and drop
+  un-grounded skills so the persisted/exported draft is honest **by construction**, no
+  matter what the model emitted. The re-qualify report is only meaningful because
+  fabrication is impossible upstream.
+- **Tailor + Critic = A2A refinement, Sonnet, bounded.** The **Tailor** (`tailor.py`)
+  builds a draft from the job's Phase-5 analysis (surface its REAL matching keywords into
+  modifiable fields); a distinct **Critic** (`critic.py`) reviews each draft (locked
+  integrity, non-fabrication, Irish conventions, ATS-parseability, keyword relevance,
+  clarity) and returns a refined draft. The tailor→critic→refine loop is capped at
+  `CRITIC_MAX_ROUNDS` (2); the code validator runs alongside every round and has the final
+  word. Both are a Sonnet tier (config-driven, user-facing quality); the stable prefix
+  (resume + rules + locked snapshot) is cached across the whole selection; no temperature
+  (Sonnet rejects it). **Targeted, not mass:** only user-selected jobs are tailored
+  (`CV_TAILOR_MAX_JOBS` cap), never the whole pool.
+- **Render is deterministic (no LLM) — reportlab over WeasyPrint, documented.** The work
+  order names WeasyPrint, but it needs GTK/pango/cairo system libraries not available on
+  Windows/CI (verified: `import weasyprint` fails here). **reportlab** (already a dependency,
+  pure-Python) meets every Irish/ATS constraint and renders identically on Windows, CI, and
+  the Linux image — and the machine-readability check runs everywhere — so it's the
+  deliberate choice (the work order explicitly permits from-scratch renderers that meet the
+  constraints). `cv_render.py` emits **A4, single-column, standard-font, selectable-text**
+  PDF (reportlab) + DOCX (python-docx), **no photo/DOB/gender/marital status**, Irish section
+  order (Profile → Key Skills → Experience → Education → "References available on request").
+  `pdf_text`/`docx_text` extract the rendered text so export **proves machine-readability**
+  (real selectable text ≥ threshold, not an image) — verified in tests (A4 mediabox, Irish
+  order, locked date present).
+- **Human gate before export; approve by chat OR UI.** Drafts sit in a `draft_ready` review
+  stage; only `approved` drafts render, rejected ones never produce files. Approval works
+  three ways: the UI's **select-all / mass-approve-selected / individual** controls, and the
+  **Concierge** ("approve all" → `approve_cv_drafts(all=true)`). Approve/reject/export are
+  free (not confirmed); tailoring + re-qualify are **consequential (paid) → confirmed
+  in-conversation** (added to the Phase-6 executor-driven confirmation set). The review view
+  shows each change's *why* (grounded in the analysis + real resume) and the critic's notes.
+- **Re-qualify reuses the Phase-3 Qualifier via the Batch API (Phase-5 path).** Each tailored
+  draft is scored against its target job: the deterministic pass runs locally (free); the
+  Haiku fit-refine for gate-passers goes through the **Batch API** when the selection is
+  large (≥ `ANALYZE_BATCH_THRESHOLD`), else sync (`qualifier.refine_batch_params` was added
+  for this). `before_score` (the original resume's score, already on record) and `after_score`
+  land on the draft; the Concierge reports per-job deltas ("N of M scored higher — Stripe
+  55→…"). The user can re-tailor specific drafts by chat, looping just those (a draft is one
+  per (user, job); re-tailoring replaces it and resets it to review).
+- **Data model + storage + GDPR.** `cv_drafts` (migration 0008: content, locked snapshot,
+  critic notes, before/after scores, pdf/docx refs; unique per (user, job)) is user-owned
+  and added to `USER_OWNED_TABLES`. Rendered files are stored via **resume-mcp** (which owns
+  storage) under the user's `resumes/{uid}/cv/` prefix, so `delete_user_data` (which deletes
+  by that prefix) wipes tailored CVs + their files with everything else — verified. The heavy
+  render/tailor work runs in the worker; the MCP services stay dependency-light (db-mcp only
+  stores draft rows; resume-mcp stores bytes). CV content is never logged.
+- **Boundary + scoping hold.** Agents read/write via MCP, user-scoped; `user_id` from the
+  session (stripped from tool args); the analysis is data, not instructions. No new Compose
+  services; the frontend gains a "Tailored CVs" review panel driven by the dashboard's job
+  selection.
+- **Live coverage (key-gated).** `test_phase6_5_live.py` runs the real Sonnet Tailor+Critic:
+  the full flow (tailor a selected job → the draft is honest, locked byte-identical, no
+  fabrication, the real keyword surfaced → **approve by chat** → export a **machine-readable**
+  Irish/ATS PDF with the locked date intact → re-qualify → after_score recorded), plus the
+  Critic **catching a planted fabrication + tampered date** and refining it clean. Minimum
+  cost (Sonnet, short cached turns, one small selection). The pure/DB tests are the
+  deterministic guarantees (locked validation catches every drift + fabrication; enforce
+  makes a tampered draft honest; A4 machine-readable render; executor routing; draft
+  lifecycle + erasure).

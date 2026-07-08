@@ -194,3 +194,50 @@ export type QueryTurn = {
   routed_to_concierge: boolean;
   session_id: string;
 };
+
+// Phase 6.5: tailored CVs.
+export type CvChangeNote = { field: string; why?: string; grounded_in?: string };
+export type CvCriticIssue = { category: string; detail: string };
+export type CvCriticNotes = {
+  rounds?: { verdict?: string; issues?: CvCriticIssue[] }[];
+  caught_before_enforce?: { violations: string[]; fabricated: string[] };
+  final_ok?: boolean;
+  change_notes?: CvChangeNote[];
+} | null;
+export type TailoredContent = {
+  contact?: { name?: string; email?: string; phone?: string; location?: string; links?: string[] };
+  summary?: string;
+  skills?: string[];
+  experience?: { title?: string; company?: string; dates?: string; bullets?: string[] }[];
+  education?: { text?: string }[];
+  change_notes?: CvChangeNote[];
+} | null;
+export type CvDraft = {
+  id: string;
+  job_id: string;
+  status: "draft_ready" | "approved" | "rejected";
+  before_score: number | null;
+  after_score: number | null;
+  pdf_ref: string | null;
+  docx_ref: string | null;
+  critic_notes_json: CvCriticNotes;
+  tailored_content_json: TailoredContent;
+  created_at: string | null;
+};
+export type CvReportRow = {
+  draft_id: string;
+  job_id: string;
+  job_title: string | null;
+  company: string | null;
+  before_score: number | null;
+  after_score: number | null;
+  delta: number | null;
+  status: string;
+};
+export type CvReport = {
+  report: CvReportRow[];
+  improved: number;
+  unchanged: number;
+  worse: number;
+  total: number;
+};

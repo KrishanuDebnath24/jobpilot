@@ -72,6 +72,31 @@ def run_full_pipeline(user_id: str, pipeline_id: str) -> dict:
     return run_async(run_pipeline_graph(user_id, pipeline_id))
 
 
+@celery.task(name="cv.tailor")
+def cv_tailor(user_id: str, job_ids: list[str]) -> dict:
+    """Phase 6.5: tailor a CV per selected job (Tailor + Critic, locked-safe) and
+    persist draft_ready cv_drafts. Sonnet — runs on the data-plane worker."""
+    from .tailor_runner import run_tailor
+
+    return run_async(run_tailor(uuid.UUID(user_id), job_ids))
+
+
+@celery.task(name="cv.export")
+def cv_export(user_id: str, draft_ids: list[str] | None = None) -> dict:
+    """Phase 6.5: render approved drafts to Irish-format ATS-safe PDF+DOCX (no LLM)."""
+    from .cv_export_runner import run_export
+
+    return run_async(run_export(uuid.UUID(user_id), draft_ids))
+
+
+@celery.task(name="cv.requalify")
+def cv_requalify(user_id: str, draft_ids: list[str] | None = None) -> dict:
+    """Phase 6.5: re-qualify tailored drafts vs their jobs (batched) + delta report."""
+    from .requalify_runner import run_requalify
+
+    return run_async(run_requalify(uuid.UUID(user_id), draft_ids))
+
+
 @celery.task(name="embed.run")
 def embed_run(user_id: str, kinds: list[str] | None = None) -> dict:
     """Backfill / embed-on-write (Phase 7): embed the user's un-embedded jobs/analyses/

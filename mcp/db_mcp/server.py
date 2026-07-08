@@ -262,6 +262,75 @@ async def get_messages(chat_session_id: str, limit: int = 200) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Phase 6.5 — tailored CV drafts (locked-safe; content never logged)
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+async def create_cv_draft(
+    job_id: str,
+    tailored_content_json: dict,
+    locked_snapshot_json: dict,
+    base_resume_version: str | None = None,
+    critic_notes_json: dict | None = None,
+    before_score: float | None = None,
+    status: str = "draft_ready",
+) -> dict:
+    """Upsert a tailored CV draft for (caller, job). Re-tailoring replaces the prior one."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        d = await repositories.upsert_cv_draft(
+            session, uid, uuid.UUID(job_id),
+            uuid.UUID(base_resume_version) if base_resume_version else None,
+            tailored_content_json, locked_snapshot_json, critic_notes_json,
+            before_score, status=status,
+        )
+        return {"draft": {"id": str(d.id), "job_id": str(d.job_id), "status": d.status}}
+
+
+@mcp.tool()
+async def get_cv_drafts(status: str | None = None) -> dict:
+    uid = require_user_id()
+    async with session_scope() as session:
+        return {"drafts": await repositories.get_cv_drafts(session, uid, status=status)}
+
+
+@mcp.tool()
+async def get_cv_draft(draft_id: str) -> dict:
+    uid = require_user_id()
+    async with session_scope() as session:
+        d = await repositories.get_cv_draft(session, uid, uuid.UUID(draft_id))
+        return {"draft": repositories.cv_draft_to_dict(d) if d else None}
+
+
+@mcp.tool()
+async def set_cv_draft_status(draft_ids: list[str], status: str) -> dict:
+    """Bulk approve/reject drafts the caller owns. status ∈ draft_ready|approved|rejected."""
+    uid = require_user_id()
+    if status not in ("draft_ready", "approved", "rejected"):
+        return {"error": f"bad status {status!r}"}
+    async with session_scope() as session:
+        n = await repositories.set_cv_draft_status(
+            session, uid, [uuid.UUID(x) for x in draft_ids], status)
+        return {"updated": n, "status": status}
+
+
+@mcp.tool()
+async def set_cv_draft_export(draft_id: str, pdf_ref: str | None, docx_ref: str | None) -> dict:
+    uid = require_user_id()
+    async with session_scope() as session:
+        d = await repositories.set_cv_draft_export(
+            session, uid, uuid.UUID(draft_id), pdf_ref, docx_ref)
+        return {"draft": {"id": str(d.id), "pdf_ref": d.pdf_ref, "docx_ref": d.docx_ref} if d else None}
+
+
+@mcp.tool()
+async def set_cv_draft_after_score(draft_id: str, after_score: float) -> dict:
+    uid = require_user_id()
+    async with session_scope() as session:
+        d = await repositories.set_cv_draft_after_score(session, uid, uuid.UUID(draft_id), after_score)
+        return {"draft": {"id": str(d.id), "after_score": d.after_score} if d else None}
+
+
+# --------------------------------------------------------------------------- #
 # Phase 7 — embeddings I/O (the worker computes vectors; db-mcp stores/searches them)
 # --------------------------------------------------------------------------- #
 @mcp.tool()

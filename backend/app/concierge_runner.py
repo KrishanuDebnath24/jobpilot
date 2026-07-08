@@ -42,9 +42,13 @@ _ROUTES: dict[str, tuple[str, str, object, bool]] = {
     "trigger_stage": ("pipeline", "trigger_stage", None, False),
     "approve_gate": ("pipeline", "approve_gate", None, False),
     "skip_gate": ("pipeline", "skip_gate", None, False),
+    "list_cv_drafts": ("db", "get_cv_drafts", None, True),  # Phase 6.5: the user's own drafts (data)
     "delete_user_data": ("db", "delete_user_data", lambda a: {}, False),
 }
 _LOCAL = {"prepare_resume_apply", "apply_resume"}
+# Phase 6.5 CV-flow tools handled locally (enqueue a task or a scoped db-mcp write).
+_CV_LOCAL = {"tailor_cvs", "export_cvs", "requalify_cvs", "approve_cv_drafts",
+             "reject_cv_drafts", "cv_improvement_report"}
 
 _SERVICES = {
     "db": mcp_client.db_mcp,
@@ -84,11 +88,64 @@ class ConciergeExecutor:
         if name == "apply_resume":
             from .apply_runner import apply_to_resume
             return await apply_to_resume(self.user_id, args.get("confirmed_skills")), False
+        if name in _CV_LOCAL:
+            return await self._cv(name, args)
 
         service, tool, mapper, is_data = _ROUTES[name]
         mcp_args = mapper(args) if mapper else args
         result = await self._call(self.user_id, service, tool, mcp_args)
         return (result if isinstance(result, dict) else {"result": result}), is_data
+
+    async def _resolve_cv_ids(self, args: dict) -> list[str]:
+        if args.get("draft_ids"):
+            return list(args["draft_ids"])
+        if args.get("all"):
+            drafts = (await self._call(self.user_id, "db", "get_cv_drafts", {"status": "draft_ready"}))["drafts"]
+            return [d["id"] for d in drafts]
+        return []
+
+    async def _cv(self, name: str, args: dict) -> tuple[dict, bool]:
+        """Phase 6.5 CV tools: tailoring/export/re-qualify enqueue a task; approve/reject
+        are scoped db-mcp writes; the report is a grounded read of recorded scores."""
+        if name == "tailor_cvs":
+            from .tasks import cv_tailor
+            job_ids = list(args.get("job_ids") or [])
+            cv_tailor.delay(str(self.user_id), job_ids)
+            return {"status": "queued", "job_count": len(job_ids)}, False
+        if name == "export_cvs":
+            from .tasks import cv_export
+            cv_export.delay(str(self.user_id), args.get("draft_ids"))
+            return {"status": "queued"}, False
+        if name == "requalify_cvs":
+            from .tasks import cv_requalify
+            cv_requalify.delay(str(self.user_id), args.get("draft_ids"))
+            return {"status": "queued"}, False
+        if name in ("approve_cv_drafts", "reject_cv_drafts"):
+            status = "approved" if name == "approve_cv_drafts" else "rejected"
+            ids = await self._resolve_cv_ids(args)
+            res = await self._call(self.user_id, "db", "set_cv_draft_status",
+                                   {"draft_ids": ids, "status": status})
+            return res, False
+        if name == "cv_improvement_report":
+            return await self._cv_report(), True
+        return {"error": f"unhandled cv tool {name!r}"}, False
+
+    async def _cv_report(self) -> dict:
+        drafts = (await self._call(self.user_id, "db", "get_cv_drafts", {}))["drafts"]
+        jobs = (await self._call(self.user_id, "db", "get_qualified_jobs", {"limit": 5000}))["jobs"]
+        by_id = {j["id"]: j for j in jobs}
+        rows, improved = [], 0
+        for d in drafts:
+            if d.get("after_score") is None:
+                continue
+            before, after = d.get("before_score"), d["after_score"]
+            delta = round(after - before, 4) if before is not None else None
+            improved += bool(delta is not None and delta > 0.0001)
+            job = by_id.get(d["job_id"]) or {}
+            rows.append({"job_title": job.get("title"), "company": job.get("company"),
+                         "before_score": before, "after_score": after, "delta": delta})
+        rows.sort(key=lambda r: (r["delta"] if r["delta"] is not None else -1), reverse=True)
+        return {"report": rows, "improved": improved, "total": len(rows)}
 
 
 # --------------------------------------------------------------------------- #
@@ -131,6 +188,10 @@ def _confirm_reply(tool: str, result: dict) -> str:
             added = ", ".join(result.get("added_skills") or []) or "no new skills"
             return f"Done — created a new resume version ({result.get('applied_rewrites', 0)} rewrite(s); added: {added})."
         return f"Nothing applied — {result.get('reason', 'no accepted suggestions')}."
+    if tool == "tailor_cvs":
+        return f"Tailoring started for {result.get('job_count', 0)} job(s) — I'll have drafts ready to review shortly."
+    if tool == "requalify_cvs":
+        return "Re-qualification started — I'll report the before/after deltas when it's done."
     if tool == "delete_user_data":
         return "Done — all of your data has been erased."
     return f"Done — {tool}."

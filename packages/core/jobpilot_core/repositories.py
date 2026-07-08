@@ -1018,6 +1018,126 @@ async def list_scheduled_users(session: AsyncSession) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# Phase 6.5 — tailored CV drafts
+# --------------------------------------------------------------------------- #
+def cv_draft_to_dict(d: models.CvDraft) -> dict:
+    return {
+        "id": str(d.id),
+        "job_id": str(d.job_id),
+        "base_resume_version": str(d.base_resume_version) if d.base_resume_version else None,
+        "tailored_content_json": d.tailored_content_json,
+        "locked_snapshot_json": d.locked_snapshot_json,
+        "critic_notes_json": d.critic_notes_json,
+        "status": d.status,
+        "before_score": d.before_score,
+        "after_score": d.after_score,
+        "pdf_ref": d.pdf_ref,
+        "docx_ref": d.docx_ref,
+        "created_at": _iso(d.created_at),
+    }
+
+
+async def upsert_cv_draft(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    job_id: uuid.UUID,
+    base_resume_version: uuid.UUID | None,
+    tailored_content_json: dict,
+    locked_snapshot_json: dict,
+    critic_notes_json: dict | None,
+    before_score: float | None,
+    status: str = "draft_ready",
+) -> models.CvDraft:
+    """One draft per (user, job); re-tailoring REPLACES the prior draft and resets it to
+    the review stage (clears the previous export + after-score)."""
+    existing = (
+        await session.execute(
+            select(models.CvDraft).where(
+                models.CvDraft.user_id == user_id, models.CvDraft.job_id == job_id
+            )
+        )
+    ).scalar_one_or_none()
+    d = existing or models.CvDraft(user_id=user_id, job_id=job_id)
+    d.base_resume_version = base_resume_version
+    d.tailored_content_json = tailored_content_json
+    d.locked_snapshot_json = locked_snapshot_json
+    d.critic_notes_json = critic_notes_json
+    d.before_score = before_score
+    d.status = status
+    d.after_score = None  # a fresh draft hasn't been re-qualified yet
+    d.pdf_ref = None
+    d.docx_ref = None
+    if existing is None:
+        session.add(d)
+    await session.flush()
+    return d
+
+
+async def get_cv_drafts(
+    session: AsyncSession, user_id: uuid.UUID, status: str | None = None
+) -> list[dict]:
+    stmt = select(models.CvDraft).where(models.CvDraft.user_id == user_id)
+    if status:
+        stmt = stmt.where(models.CvDraft.status == status)
+    stmt = stmt.order_by(models.CvDraft.created_at.desc())
+    return [cv_draft_to_dict(d) for d in (await session.execute(stmt)).scalars().all()]
+
+
+async def get_cv_draft(
+    session: AsyncSession, user_id: uuid.UUID, draft_id: uuid.UUID
+) -> models.CvDraft | None:
+    return (
+        await session.execute(
+            select(models.CvDraft).where(
+                models.CvDraft.user_id == user_id, models.CvDraft.id == draft_id
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def set_cv_draft_status(
+    session: AsyncSession, user_id: uuid.UUID, draft_ids: list[uuid.UUID], status: str
+) -> int:
+    """Bulk approve/reject (user-scoped). ``draft_ids`` empty means no-op. Returns count."""
+    if not draft_ids:
+        return 0
+    rows = (
+        await session.execute(
+            select(models.CvDraft).where(
+                models.CvDraft.user_id == user_id, models.CvDraft.id.in_(draft_ids)
+            )
+        )
+    ).scalars().all()
+    for d in rows:
+        d.status = status
+    if rows:
+        await session.flush()
+    return len(rows)
+
+
+async def set_cv_draft_export(
+    session: AsyncSession, user_id: uuid.UUID, draft_id: uuid.UUID,
+    pdf_ref: str | None, docx_ref: str | None,
+) -> models.CvDraft | None:
+    d = await get_cv_draft(session, user_id, draft_id)
+    if d is not None:
+        d.pdf_ref = pdf_ref
+        d.docx_ref = docx_ref
+        await session.flush()
+    return d
+
+
+async def set_cv_draft_after_score(
+    session: AsyncSession, user_id: uuid.UUID, draft_id: uuid.UUID, after_score: float
+) -> models.CvDraft | None:
+    d = await get_cv_draft(session, user_id, draft_id)
+    if d is not None:
+        d.after_score = after_score
+        await session.flush()
+    return d
+
+
+# --------------------------------------------------------------------------- #
 # Phase 7 — embeddings I/O (populate the pgvector columns; worker computes vectors)
 # --------------------------------------------------------------------------- #
 # kind -> (model, serializer). The embed text is built from the serialized row via

@@ -17,7 +17,7 @@ from jobpilot_core.db import session_scope
 from jobpilot_core.mcp_auth import UserContextMiddleware, require_user_id
 from jobpilot_core.resume_parse import parse_resume_bytes
 from jobpilot_core.settings import get_settings
-from jobpilot_core.storage import get_storage, resume_key
+from jobpilot_core.storage import cv_key, get_storage, resume_key, user_prefix
 from mcp.server.fastmcp import FastMCP
 
 settings = get_settings()
@@ -144,6 +144,38 @@ async def get_resume_version(resume_id: str) -> dict:
         d = repositories.resume_to_dict(resume)
         d["raw_text"] = resume.raw_text
         return {"resume": d}
+
+
+# --------------------------------------------------------------------------- #
+# Tailored CV files (Phase 6.5) — rendered PDF/DOCX bytes, stored UNDER the user's
+# storage prefix so delete_user_data (which deletes by that prefix) wipes them too.
+# resume-mcp owns storage, so CV file I/O lives here. Content is never logged.
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+async def put_cv_file(draft_id: str, fmt: str, file_b64: str) -> dict:
+    """Store a rendered tailored-CV file (fmt = pdf|docx). Returns the storage ref."""
+    uid = require_user_id()
+    if fmt not in ("pdf", "docx"):
+        return {"error": f"bad fmt {fmt!r} (expected pdf|docx)"}
+    data = base64.b64decode(file_b64)
+    key = cv_key(uid, draft_id, fmt)
+    ctype = "application/pdf" if fmt == "pdf" else (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    storage = get_storage(settings)
+    await asyncio.to_thread(storage.put_bytes, key, data, ctype)
+    return {"ref": key, "fmt": fmt, "bytes": len(data)}
+
+
+@mcp.tool()
+async def get_cv_file(ref: str) -> dict:
+    """Fetch a rendered tailored-CV file as base64. Scoped: the ref MUST live under the
+    caller's own storage prefix (a caller can never read another user's file)."""
+    uid = require_user_id()
+    if not ref or not ref.startswith(user_prefix(uid)):
+        return {"error": "not found"}
+    storage = get_storage(settings)
+    data = await asyncio.to_thread(storage.get_bytes, ref)
+    return {"file_b64": base64.b64encode(data).decode("ascii"), "bytes": len(data)}
 
 
 app = UserContextMiddleware(mcp.streamable_http_app(), settings)

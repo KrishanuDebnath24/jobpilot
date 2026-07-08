@@ -92,6 +92,15 @@ class Settings(BaseSettings):
     # Hard cap on tool-call rounds per chat turn (bounds an agent that loops on tools).
     concierge_max_tool_iterations: int = 8
 
+    # --- Phase 6.5 (Tailored CV + Critic). A Sonnet tier for user-facing document
+    #     quality; config-driven. The stable prefix (resume + rules + locked snapshot)
+    #     caches across the selection; the critic loop is capped for cost. ---
+    tailor_model: str = "claude-sonnet-5"
+    critic_model: str = "claude-sonnet-5"
+    tailor_max_tokens: int = 3000  # room for a full structured CV + change notes
+    critic_max_rounds: int = 2  # tailor→critic→refine loop cap (per job)
+    cv_tailor_max_jobs: int = 20  # bound a selection (spend guard)
+
     # --- Adzuna connector (free developer tier). Backend/sources-mcp env only. ---
     adzuna_app_id: str = ""
     adzuna_app_key: str = ""

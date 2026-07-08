@@ -95,6 +95,22 @@ class QueryRequest(BaseModel):
     session_id: str | None = None
 
 
+class CvTailorRequest(BaseModel):
+    """Phase 6.5: tailor a CV for each selected job."""
+    job_ids: list[str]
+
+
+class CvActionRequest(BaseModel):
+    """Phase 6.5: approve/reject drafts — a subset, or all draft_ready ones (``all``)."""
+    draft_ids: list[str] | None = None
+    all: bool = False
+
+
+class CvIdsRequest(BaseModel):
+    """Phase 6.5: export/re-qualify a subset of drafts (omit for all approved)."""
+    draft_ids: list[str] | None = None
+
+
 # --------------------------------------------------------------------------- #
 # System
 # --------------------------------------------------------------------------- #
@@ -471,6 +487,122 @@ async def download_resume_version(resume_id: str, current_user=Depends(get_curre
         resume.get("raw_text") or "",
         headers={"Content-Disposition": f'attachment; filename="resume-{resume_id[:8]}.txt"'},
     )
+
+
+# --------------------------------------------------------------------------- #
+# Tailored CVs (Phase 6.5) — tailor → review/approve → export → re-qualify
+# --------------------------------------------------------------------------- #
+async def _resolve_draft_ids(user_id, body: CvActionRequest) -> list[str]:
+    """Approve/reject targets: the given ids, or every draft_ready draft when ``all``."""
+    if body.draft_ids:
+        return body.draft_ids
+    if body.all:
+        drafts = (await mcp_client.db_mcp(user_id, "get_cv_drafts", {"status": "draft_ready"}))["drafts"]
+        return [d["id"] for d in drafts]
+    return []
+
+
+@app.post("/cv/tailor", tags=["cv"], status_code=status.HTTP_202_ACCEPTED)
+async def cv_tailor(body: CvTailorRequest, current_user=Depends(get_current_user)) -> dict:
+    """Queue tailoring for the selected jobs (Tailor + Critic, locked-safe). Only the
+    user's selected jobs are tailored — never the whole pool."""
+    from .tasks import cv_tailor as task
+
+    t = task.delay(str(current_user.id), body.job_ids)
+    return {"task_id": t.id, "status": "queued", "job_count": len(body.job_ids)}
+
+
+@app.get("/cv/drafts", tags=["cv"])
+async def cv_drafts(status: str | None = None, current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.db_mcp(current_user.id, "get_cv_drafts", {"status": status})
+
+
+@app.get("/cv/drafts/{draft_id}", tags=["cv"])
+async def cv_draft(draft_id: str, current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.db_mcp(current_user.id, "get_cv_draft", {"draft_id": draft_id})
+
+
+@app.post("/cv/approve", tags=["cv"])
+async def cv_approve(body: CvActionRequest, current_user=Depends(get_current_user)) -> dict:
+    ids = await _resolve_draft_ids(current_user.id, body)
+    return await mcp_client.db_mcp(
+        current_user.id, "set_cv_draft_status", {"draft_ids": ids, "status": "approved"})
+
+
+@app.post("/cv/reject", tags=["cv"])
+async def cv_reject(body: CvActionRequest, current_user=Depends(get_current_user)) -> dict:
+    ids = await _resolve_draft_ids(current_user.id, body)
+    return await mcp_client.db_mcp(
+        current_user.id, "set_cv_draft_status", {"draft_ids": ids, "status": "rejected"})
+
+
+@app.post("/cv/export", tags=["cv"], status_code=status.HTTP_202_ACCEPTED)
+async def cv_export(body: CvIdsRequest, current_user=Depends(get_current_user)) -> dict:
+    """Render approved drafts to PDF+DOCX (Irish/ATS-safe). Only approved drafts export."""
+    from .tasks import cv_export as task
+
+    t = task.delay(str(current_user.id), body.draft_ids)
+    return {"task_id": t.id, "status": "queued"}
+
+
+@app.post("/cv/requalify", tags=["cv"], status_code=status.HTTP_202_ACCEPTED)
+async def cv_requalify(body: CvIdsRequest, current_user=Depends(get_current_user)) -> dict:
+    """Re-qualify tailored drafts against their jobs (batched); records after_score."""
+    from .tasks import cv_requalify as task
+
+    t = task.delay(str(current_user.id), body.draft_ids)
+    return {"task_id": t.id, "status": "queued"}
+
+
+@app.get("/cv/report", tags=["cv"])
+async def cv_report(current_user=Depends(get_current_user)) -> dict:
+    """Improvement report: before/after scores + deltas for drafts that were re-qualified.
+    Read-only summary for the UI/Concierge (grounded in the drafts' recorded scores)."""
+    drafts = (await mcp_client.db_mcp(current_user.id, "get_cv_drafts", {}))["drafts"]
+    jobs = (await mcp_client.db_mcp(current_user.id, "get_qualified_jobs", {"limit": 5000}))["jobs"]
+    by_id = {j["id"]: j for j in jobs}
+    rows, improved, unchanged, worse = [], 0, 0, 0
+    for d in drafts:
+        if d.get("after_score") is None:
+            continue
+        before, after = d.get("before_score"), d["after_score"]
+        delta = round(after - before, 4) if before is not None else None
+        if delta is not None:
+            improved += delta > 0.0001
+            worse += delta < -0.0001
+            unchanged += abs(delta) <= 0.0001
+        job = by_id.get(d["job_id"]) or {}
+        rows.append({"draft_id": d["id"], "job_id": d["job_id"], "job_title": job.get("title"),
+                     "company": job.get("company"), "before_score": before, "after_score": after,
+                     "delta": delta, "status": d["status"]})
+    rows.sort(key=lambda r: (r["delta"] if r["delta"] is not None else -1), reverse=True)
+    return {"report": rows, "improved": improved, "unchanged": unchanged, "worse": worse,
+            "total": len(rows)}
+
+
+@app.get("/cv/drafts/{draft_id}/download/{fmt}", tags=["cv"])
+async def cv_download(draft_id: str, fmt: str, current_user=Depends(get_current_user)):
+    """Download a rendered tailored CV (fmt = pdf|docx)."""
+    from fastapi.responses import Response
+
+    if fmt not in ("pdf", "docx"):
+        raise HTTPException(status_code=400, detail="fmt must be pdf|docx")
+    res = await mcp_client.db_mcp(current_user.id, "get_cv_draft", {"draft_id": draft_id})
+    draft = res.get("draft")
+    if not draft:
+        raise HTTPException(status_code=404, detail="draft not found")
+    ref = draft.get("pdf_ref") if fmt == "pdf" else draft.get("docx_ref")
+    if not ref:
+        raise HTTPException(status_code=404, detail="not exported yet — export first")
+    fetched = await mcp_client.resume_mcp(current_user.id, "get_cv_file", {"ref": ref})
+    if fetched.get("error") or not fetched.get("file_b64"):
+        raise HTTPException(status_code=404, detail="file not found")
+    data = base64.b64decode(fetched["file_b64"])
+    media = "application/pdf" if fmt == "pdf" else (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    return Response(
+        content=data, media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="cv-{draft_id[:8]}.{fmt}"'})
 
 
 # --------------------------------------------------------------------------- #

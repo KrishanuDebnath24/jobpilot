@@ -120,3 +120,10 @@ def resume_key(user_id, resume_id, filename: str) -> str:
 
 def user_prefix(user_id) -> str:
     return f"resumes/{user_id}/"
+
+
+def cv_key(user_id, draft_id, fmt: str) -> str:
+    """Rendered tailored-CV file key. Kept UNDER ``user_prefix`` so ``delete_user_data``
+    (which deletes by that prefix) wipes tailored CVs along with the resumes (Phase 6.5)."""
+    ext = "pdf" if fmt == "pdf" else "docx"
+    return f"resumes/{user_id}/cv/{draft_id}.{ext}"

@@ -203,6 +203,33 @@ class Suggestion(Base):
     created_at: Mapped[datetime] = _created()
 
 
+class CvDraft(Base):
+    """A tailored CV draft for one (user, job) — Phase 6.5. ``locked_snapshot_json``
+    captures the immutable facts (contact, employers, titles, dates, education) copied
+    from ``base_resume_version``; ``tailored_content_json`` is the honestly-tailored CV
+    (locked fields enforced == snapshot in code). One draft per (user, job): re-tailoring
+    replaces it. Rendered files (``pdf_ref``/``docx_ref``) live under the user's storage
+    prefix so erasure wipes them with everything else."""
+
+    __tablename__ = "cv_drafts"
+
+    id: Mapped[uuid.UUID] = _pk()
+    user_id: Mapped[uuid.UUID] = _user_fk()
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    base_resume_version: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    tailored_content_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    locked_snapshot_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    critic_notes_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="draft_ready")
+    before_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    after_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pdf_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    docx_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = _created()
+
+
 class PipelineRun(Base):
     __tablename__ = "pipeline_runs"
 
@@ -261,6 +288,7 @@ USER_OWNED_TABLES = [
     "chat_sessions",
     "agent_events",
     "pipeline_runs",
+    "cv_drafts",
     "suggestions",
     "analyses",
     "qualifications",

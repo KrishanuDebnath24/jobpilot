@@ -62,8 +62,15 @@ SYSTEM = (
     "guidance, never inserted. Never fabricate.\n"
     "\n"
     "SCOPE — you handle status, simple lookups, configuration, triggering stages, "
-    "gate approvals, and applying suggestions. You are not a research/Q&A agent; do "
-    "not attempt deep analysis over the whole dataset. Be concise and concrete."
+    "gate approvals, applying suggestions, and tailored CVs (tailoring selected jobs, "
+    "reviewing/approving drafts, exporting, and re-qualifying with an improvement "
+    "report). You are not a research/Q&A agent; do not attempt deep analysis over the "
+    "whole dataset. Be concise and concrete.\n"
+    "\n"
+    "TAILORED CVs stay honest: tailoring only rewords the candidate's REAL experience in "
+    "a job's language and never changes locked facts (employers, titles, dates, "
+    "education, contact) or invents skills — enforced in code. A re-qualification lift "
+    "reflects better presentation of true content, never gaming."
 )
 
 
@@ -126,6 +133,32 @@ TOOLS: list[dict] = [
           "Write a NEW resume version from accepted suggestions. CONSEQUENTIAL — confirm first. "
           "confirmed_skills lists skills the user has explicitly confirmed they hold (only those are added).",
           {"confirmed_skills": {"type": "array", "items": {"type": "string"}}}),
+    _tool("tailor_cvs",
+          "Tailor a CV for each SELECTED job (honest: rewords real experience to the job's "
+          "keywords, locked facts unchanged, no invented skills). CONSEQUENTIAL (paid) — confirm first. "
+          "job_ids are the jobs the user chose to improve.",
+          {"job_ids": {"type": "array", "items": {"type": "string"}}}, ["job_ids"]),
+    _tool("list_cv_drafts",
+          "List the user's tailored CV drafts (draft_ready|approved|rejected) with critic notes "
+          "and before/after scores.",
+          {"status": {"type": "string", "description": "draft_ready|approved|rejected"}}),
+    _tool("approve_cv_drafts",
+          "Approve tailored drafts for export. Pass draft_ids, or all=true for every draft_ready one "
+          "('accept all'). Not a paid action.",
+          {"draft_ids": {"type": "array", "items": {"type": "string"}}, "all": {"type": "boolean"}}),
+    _tool("reject_cv_drafts",
+          "Reject tailored drafts (they never export). Pass draft_ids, or all=true. Not a paid action.",
+          {"draft_ids": {"type": "array", "items": {"type": "string"}}, "all": {"type": "boolean"}}),
+    _tool("export_cvs",
+          "Render APPROVED drafts to Irish-format, ATS-safe PDF+DOCX. Deterministic (no tokens). "
+          "Omit draft_ids for all approved.",
+          {"draft_ids": {"type": "array", "items": {"type": "string"}}}),
+    _tool("requalify_cvs",
+          "Re-qualify tailored drafts against their jobs and record before/after scores. "
+          "CONSEQUENTIAL (paid) — confirm first. Omit draft_ids for all approved.",
+          {"draft_ids": {"type": "array", "items": {"type": "string"}}}),
+    _tool("cv_improvement_report",
+          "Report how the tailored CVs scored: per-job before→after deltas and how many improved.", {}),
     _tool("delete_user_data",
           "Erase ALL of the user's data (GDPR). DESTRUCTIVE — requires an explicit, unambiguous yes.", {}),
 ]
@@ -134,7 +167,8 @@ TOOL_NAMES = frozenset(t["name"] for t in TOOLS)
 
 # Actions that spend money or are otherwise consequential → confirm in-conversation.
 CONSEQUENTIAL: frozenset[str] = frozenset(
-    {"run_pipeline", "trigger_stage", "update_qualifier_config", "apply_resume", "delete_user_data"}
+    {"run_pipeline", "trigger_stage", "update_qualifier_config", "apply_resume",
+     "tailor_cvs", "requalify_cvs", "delete_user_data"}
 )
 # Destructive actions require confirmation regardless of any gate/config setting.
 DESTRUCTIVE: frozenset[str] = frozenset({"delete_user_data"})
@@ -241,6 +275,11 @@ def confirmation_prompt(tool_name: str, args: dict) -> str:
         return "Change the qualifier scoring config? Existing jobs keep their scores until re-qualified."
     if tool_name == "apply_resume":
         return "Apply the accepted suggestions to your resume as a new version?"
+    if tool_name == "tailor_cvs":
+        n = len((args or {}).get("job_ids") or [])
+        return f"Tailor a CV for {n} selected job(s)? That's a paid run."
+    if tool_name == "requalify_cvs":
+        return "Re-qualify the tailored CVs against their jobs? That's a paid run."
     if tool_name == "delete_user_data":
         return "Permanently erase ALL of your data? This cannot be undone."
     return f"Proceed with {tool_name}?"

@@ -10,6 +10,7 @@ import Suggestions from "./Suggestions";
 import Chat from "./Chat";
 import Ask from "./Ask";
 import Gates from "./Gates";
+import TailoredCVs from "./TailoredCVs";
 
 type Decision = "all" | "qualified" | "disqualified" | "unscored";
 
@@ -178,6 +179,11 @@ export default function Dashboard() {
       <Suggestions
         selectedJobIds={[...selected]}
         qualifiedCount={qualifiedCount}
+        jobTitleById={(id) => jobs.find((j) => j.id === id)?.title ?? "Job"}
+      />
+
+      <TailoredCVs
+        selectedJobIds={[...selected]}
         jobTitleById={(id) => jobs.find((j) => j.id === id)?.title ?? "Job"}
       />
     </main>

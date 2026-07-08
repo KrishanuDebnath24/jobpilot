@@ -2,6 +2,8 @@ import type {
   ApplyPreview,
   ChatMessage,
   ChatTurn,
+  CvDraft,
+  CvReport,
   GateConfig,
   Job,
   PendingGate,
@@ -179,6 +181,54 @@ export async function downloadResumeVersion(id: string): Promise<void> {
   const a = document.createElement("a");
   a.href = url;
   a.download = `resume-${id.slice(0, 8)}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// --- Phase 6.5: Tailored CVs ---
+export const tailorCvs = (job_ids: string[]) =>
+  request<{ task_id: string; job_count: number }>("/cv/tailor", {
+    method: "POST",
+    body: JSON.stringify({ job_ids }),
+  });
+export const getCvDrafts = (status?: string) =>
+  request<{ drafts: CvDraft[] }>(`/cv/drafts${status ? `?status=${status}` : ""}`).then(
+    (r) => r.drafts,
+  );
+export const approveCvDrafts = (draft_ids?: string[], all = false) =>
+  request<{ updated: number }>("/cv/approve", {
+    method: "POST",
+    body: JSON.stringify({ draft_ids: draft_ids ?? null, all }),
+  });
+export const rejectCvDrafts = (draft_ids?: string[], all = false) =>
+  request<{ updated: number }>("/cv/reject", {
+    method: "POST",
+    body: JSON.stringify({ draft_ids: draft_ids ?? null, all }),
+  });
+export const exportCvs = (draft_ids?: string[]) =>
+  request<{ task_id: string }>("/cv/export", {
+    method: "POST",
+    body: JSON.stringify({ draft_ids: draft_ids ?? null }),
+  });
+export const requalifyCvs = (draft_ids?: string[]) =>
+  request<{ task_id: string }>("/cv/requalify", {
+    method: "POST",
+    body: JSON.stringify({ draft_ids: draft_ids ?? null }),
+  });
+export const getCvReport = () => request<CvReport>("/cv/report");
+
+/** Download a rendered tailored CV (pdf|docx), sending the auth header. */
+export async function downloadCv(draftId: string, fmt: "pdf" | "docx"): Promise<void> {
+  const res = await fetch(`${API_URL}/cv/drafts/${draftId}/download/${fmt}`, {
+    headers: { Authorization: `Bearer ${getToken() ?? ""}` },
+    cache: "no-store",
+  });
+  if (!res.ok) throw new ApiError(res.status, `download failed (${res.status})`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `cv-${draftId.slice(0, 8)}.${fmt}`;
   a.click();
   URL.revokeObjectURL(url);
 }
