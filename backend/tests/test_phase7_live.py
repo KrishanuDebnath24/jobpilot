@@ -214,6 +214,48 @@ async def test_live_semantic_search(live_stack):
 
 
 # --------------------------------------------------------------------------- #
+# Gate #2 (Phase 6.5 overlap) — a tailored-CV "which improved most?" is an EXACT
+# SORT over real before/after scores, answered by the structured tool, NEVER RAG.
+# --------------------------------------------------------------------------- #
+@requires_live
+async def test_live_cv_draft_delta_is_exact_not_rag(live_stack):
+    uid = await _mk_user()
+    try:
+        jobs = await _seed(uid)
+        by_title = {j.title: j for j in jobs}
+        # tailor two drafts: Backend 0.55→0.82 (+0.27, the winner); Platform 0.60→0.58 (−0.02)
+        async with session_scope() as s:
+            db_ = await repositories.upsert_cv_draft(
+                s, uid, by_title["Senior Backend Engineer"].id, None, {"skills": []}, {}, None, 0.55)
+            dp_ = await repositories.upsert_cv_draft(
+                s, uid, by_title["Platform Engineer"].id, None, {"skills": []}, {}, None, 0.60)
+            dbid, dpid = db_.id, dp_.id
+        async with session_scope() as s:
+            await repositories.set_cv_draft_after_score(s, uid, dbid, 0.82)
+            await repositories.set_cv_draft_after_score(s, uid, dpid, 0.58)
+        sid = await _mk_session(live_stack["db"], uid)
+
+        # (a) the headline question -> structured cv_drafts sort, not a similarity search
+        turn = await _ask(uid, sid, "Which of my tailored CVs improved my qualification score the most?")
+        assert _fired(turn, "list_cv_drafts"), turn["events"]
+        assert not _fired(turn, "semantic_search_jobs"), "a CV-score delta must never go through RAG"
+        # the winner matches a direct DB query, and is named in the grounded answer
+        async with session_scope() as s:
+            drafts = await repositories.get_cv_drafts(s, uid)
+        best = max(drafts, key=lambda d: (d["after_score"] or 0) - (d["before_score"] or 0))
+        assert best["job_id"] == str(by_title["Senior Backend Engineer"].id)
+        low = turn["answer"].lower()
+        assert "backend" in low or "acme" in low, turn["answer"]
+
+        # (b) the fuzzy-word trap: "did tailoring help" SOUNDS semantic but is still an exact sort
+        turn2 = await _ask(uid, sid, "Did tailoring actually help any of my CVs?")
+        assert _fired(turn2, "list_cv_drafts"), turn2["events"]
+        assert not _fired(turn2, "semantic_search_jobs"), turn2["events"]
+    finally:
+        await _cleanup(uid)
+
+
+# --------------------------------------------------------------------------- #
 # Bar 4 — read-only: an action request is redirected to the Concierge
 # --------------------------------------------------------------------------- #
 @requires_live

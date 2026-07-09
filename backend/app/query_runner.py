@@ -73,6 +73,8 @@ class QueryExecutor:
             return await self._work_status(), False
         if name == "list_qualified_jobs":
             return await self._list_qualified(args), True
+        if name == "list_cv_drafts":
+            return await self._list_cv_drafts(args), True
         if name in query_agent.SEMANTIC_TOOLS:
             return await self._semantic(name, args), is_data
 
@@ -103,6 +105,51 @@ class QueryExecutor:
             jobs = [j for j in jobs if (j.get("qualification") or {}).get("decision") == decision]
         return {"jobs": jobs[:limit]}
 
+    async def _list_cv_drafts(self, args: dict) -> dict:
+        """Tailored-CV drafts (Phase 6.5) with before/after scores and the EXACT score
+        DELTA (after − before), sorted by delta. 'Which of my CVs improved the most?' is
+        this sort — never a similarity search. A read-only pull of the same numbers the
+        Concierge pushes after a re-qualify; the Query agent never writes. Mirrors the
+        Concierge's delta computation (round 4dp, ±0.0001 improved/worse threshold), but
+        keeps not-yet-requalified drafts (delta null, sorted last) so status questions
+        ('how many are waiting for review?') are answerable too."""
+        status = args.get("status")
+        sort = (args.get("sort") or "delta_desc").lower()
+        limit = int(args.get("limit") or 50)
+        res = await self._call(self.user_id, "db", "get_cv_drafts",
+                               {"status": status} if status else {})
+        drafts = res.get("drafts", []) if isinstance(res, dict) else []
+        jobs_res = await self._call(self.user_id, "db", "get_qualified_jobs", {"limit": 5000})
+        jobs = jobs_res.get("jobs", []) if isinstance(jobs_res, dict) else []
+        by_id = {j.get("id"): j for j in jobs if isinstance(j, dict)}
+
+        rows: list[dict] = []
+        improved = worse = unchanged = requalified = 0
+        by_status: dict[str, int] = {}
+        for d in drafts:
+            st = d.get("status")
+            by_status[st] = by_status.get(st, 0) + 1
+            before, after = d.get("before_score"), d.get("after_score")
+            delta = round(after - before, 4) if (before is not None and after is not None) else None
+            if after is not None:
+                requalified += 1
+            if delta is not None:
+                improved += delta > 0.0001
+                worse += delta < -0.0001
+                unchanged += abs(delta) <= 0.0001
+            job = by_id.get(d.get("job_id")) or {}
+            rows.append({"job_id": d.get("job_id"), "title": job.get("title"),
+                         "company": job.get("company"), "url": job.get("url"),
+                         "status": st, "before_score": before, "after_score": after,
+                         "delta": delta})
+        # EXACT sort: real deltas first (desc unless delta_asc), not-yet-requalified last
+        scored = [r for r in rows if r["delta"] is not None]
+        unscored = [r for r in rows if r["delta"] is None]
+        scored.sort(key=lambda r: r["delta"], reverse=(sort != "delta_asc"))
+        summary = {"total": len(rows), "requalified": requalified, "improved": improved,
+                   "worse": worse, "unchanged": unchanged, "by_status": by_status}
+        return {"drafts": (scored + unscored)[:limit], "summary": summary}
+
     async def _work_status(self) -> dict:
         """Live pipeline state (pipeline-mcp) + the last run per stage (db-mcp). Trusted
         structural facts — the ONLY grounding for status questions."""
@@ -128,6 +175,12 @@ def _citations_from(name: str, result: dict, sink: dict) -> None:
                 "type": "job", "id": job["id"], "title": job.get("title"),
                 "company": job.get("company"), "url": job.get("url"),
                 "similarity": job.get("similarity"),
+            }
+    for draft in result.get("drafts", []) or []:  # cv_drafts cite their target job
+        if isinstance(draft, dict) and draft.get("job_id"):
+            sink[("job", draft["job_id"])] = {
+                "type": "job", "id": draft["job_id"], "title": draft.get("title"),
+                "company": draft.get("company"), "url": draft.get("url"),
             }
     for stage, run in (result.get("latest_stage_runs") or {}).items():
         if isinstance(run, dict):

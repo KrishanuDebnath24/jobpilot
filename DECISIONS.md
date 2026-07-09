@@ -645,3 +645,40 @@ Running log of non-obvious engineering choices. One line + rationale each.
   deterministic guarantees (locked validation catches every drift + fabrication; enforce
   makes a tampered draft honest; A4 machine-readable render; executor routing; draft
   lifecycle + erasure).
+
+## Phase 7 Addendum — Tailored-CV delta coverage (gate-closing)
+
+- **Build-order gap, now closed.** Phase 7 (`402e1a0`) was committed **before** Phase 6.5
+  (`87793d0`) introduced `cv_drafts`, so the original Query agent couldn't answer the
+  tailored-CV before/after questions its own gate (criterion #2) requires — an audit found
+  it. This addendum adds that coverage; nothing else in Phase 7 changed.
+- **CV-score questions are an EXACT SORT, never RAG.** "Which of my CVs improved the most?"
+  is `ORDER BY (after_score − before_score) DESC` over `cv_drafts` — the cardinal rule of
+  the phase. A new **read-only** `list_cv_drafts` tool (in `jobpilot_core/query_agent.py`)
+  wraps db-mcp's existing `get_cv_drafts`/`get_qualified_jobs` reads: it returns each draft
+  with `before_score`, `after_score`, the `delta`, status, and its target job (title @
+  company for citations), sorted by delta (drafts not yet re-qualified have `delta=null` and
+  sort last), plus a summary (`total/requalified/improved/worse/unchanged` + counts by
+  status). The runner computation mirrors the Concierge's `cv_improvement_report` (round
+  4dp, ±0.0001 improved/worse threshold) — the **Query agent pulls the same numbers the
+  Concierge pushes after a re-qualify, but with no write access.**
+- **The fuzzy-word trap is handled explicitly.** "improved / best / worst / did tailoring
+  help" *sound* semantic but are exact sorts; a dedicated system-prompt bullet routes them
+  to `list_cv_drafts`, never to semantic search. Verified live: both the headline question
+  and the fuzzy "did tailoring help any of my CVs?" fire `list_cv_drafts` and **not**
+  `semantic_search_jobs`, and the winner matches a direct `cv_drafts` query.
+- **Read-only invariant intact.** `list_cv_drafts` is a read wrapping reads — no write path
+  added; it's in `DATA_TOOLS` (untrusted job titles wrapped as `<data>`) and NOT in
+  `SEMANTIC_TOOLS`. `user_id` is bound from the session and stripped from args; a DB test
+  proves user B sees none of user A's drafts. The read-only disjointness test still holds.
+- **Docs corrected.** `.env.example` gained the Phase 7 embedding/query tunables
+  (`EMBEDDING_BACKEND` = local sentence-transformers default, `EMBEDDING_MODEL`,
+  `EMBEDDING_BATCH_SIZE`, `EMBEDDING_MAX_CHARS`, `QUERY_MODEL`, `QUERY_MAX_TOKENS`,
+  `QUERY_MAX_TOOL_ITERATIONS`, `QUERY_SEMANTIC_LIMIT`), and its stale "this phase makes NO
+  LLM calls" header + "population deferred to Phase 3" embedding comment were fixed.
+- **7e streaming deviation (accepted).** The work order's 7e says "stream answers"; the
+  `Ask.tsx` panel instead does a single `POST /query/ask` and renders the full grounded,
+  cited answer after a spinner. Accepted as-is (like the local-embedder deviation): answers
+  are short (Haiku, capped tokens) so buffering is imperceptible, and citations/links render
+  identically. Token-by-token streaming is a self-contained future enhancement, deliberately
+  kept out of this gate-closing change.

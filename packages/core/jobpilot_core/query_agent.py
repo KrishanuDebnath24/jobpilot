@@ -36,6 +36,12 @@ SYSTEM = (
     "the structured tools (count_jobs, count_qualifications, job_stats). NEVER answer a "
     "count or total from a similarity search, and NEVER estimate or guess a number — get "
     "it from an exact tool.\n"
+    "• TAILORED-CV questions (which of my CVs improved / helped / got worse, by how much, "
+    "the before/after qualification score, how many drafts are waiting for review) → use "
+    "list_cv_drafts. 'Which CV improved the most?' is an EXACT SORT over real before/after "
+    "scores, NOT a similarity search — words like 'improved', 'best', 'worst', or 'did "
+    "tailoring help' do NOT make it fuzzy. Never route a CV-score question to semantic "
+    "search.\n"
     "• FUZZY questions (jobs 'about' / 'similar to' / 'that mention' a topic, find "
     "relevant roles) → use the semantic tools (semantic_search_jobs, "
     "semantic_search_analyses).\n"
@@ -107,6 +113,18 @@ TOOLS: list[dict] = [
           {"decision": {"type": "string", "description": "qualified|disqualified"},
            "limit": {"type": "integer"}}),
     _tool("get_suggestions", "List the user's resume suggestions (proposed/accepted/dismissed).", {}),
+    _tool("list_cv_drafts",
+          "EXACT list of the user's tailored CV drafts (Phase 6.5) with each draft's "
+          "before_score, after_score, and the score DELTA (after − before), the target "
+          "job, and status (draft_ready|approved|rejected) — plus a summary "
+          "(total/requalified/improved/worse/unchanged + counts by status). Use for ANY "
+          "tailored-CV question: 'which of my CVs improved the most/least?', 'did tailoring "
+          "help?', 'which got worse?', 'how many CVs are waiting for review?'. This is an "
+          "EXACT SORT over real numbers — NEVER a similarity search. Sorted by delta desc "
+          "by default (drafts not yet re-qualified have delta null and sort last).",
+          {"status": {"type": "string", "description": "draft_ready|approved|rejected"},
+           "sort": {"type": "string", "description": "delta_desc (default) | delta_asc"},
+           "limit": {"type": "integer"}}),
     _tool("get_search_config", "Read the user's Scout search config (roles, locations, keywords, sources).", {}),
     _tool("get_qualifier_config", "Read the user's Qualifier config (weights, threshold, must/nice-to-have).", {}),
     # --- semantic (FUZZY) ---
@@ -133,7 +151,8 @@ SEMANTIC_TOOLS = frozenset({"semantic_search_jobs", "semantic_search_analyses"})
 # Which tool results are untrusted retrieved CONTENT (wrapped as <data>) vs trusted
 # structural facts (counts, status). Job/analysis/suggestion text is content.
 DATA_TOOLS = frozenset(
-    {"semantic_search_jobs", "semantic_search_analyses", "list_qualified_jobs", "get_suggestions"}
+    {"semantic_search_jobs", "semantic_search_analyses", "list_qualified_jobs",
+     "get_suggestions", "list_cv_drafts"}
 )
 
 

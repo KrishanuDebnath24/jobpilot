@@ -130,8 +130,18 @@ def _executor_with_capture():
         if tool == "count_jobs":
             return {"count": 7}
         if tool == "get_qualified_jobs":
-            return {"jobs": [{"id": "a", "qualification": {"decision": "qualified"}},
-                             {"id": "b", "qualification": {"decision": "disqualified"}}]}
+            return {"jobs": [
+                {"id": "a", "title": "Backend", "company": "Acme", "url": "ua",
+                 "qualification": {"decision": "qualified"}},
+                {"id": "b", "title": "Frontend", "company": "Beta", "url": "ub",
+                 "qualification": {"decision": "disqualified"}},
+                {"id": "c", "title": "Platform", "company": "Gamma", "url": "uc",
+                 "qualification": {"decision": "disqualified"}}]}
+        if tool == "get_cv_drafts":
+            return {"drafts": [
+                {"id": "d1", "job_id": "a", "status": "approved", "before_score": 0.50, "after_score": 0.75},
+                {"id": "d2", "job_id": "b", "status": "approved", "before_score": 0.60, "after_score": 0.55},
+                {"id": "d3", "job_id": "c", "status": "draft_ready", "before_score": 0.40, "after_score": None}]}
         return {}
 
     return QueryExecutor(uuid.uuid4(), call=fake_call), calls
@@ -172,6 +182,53 @@ async def test_executor_list_qualified_filters_by_decision():
     ex, _ = _executor_with_capture()
     result, is_data = await ex.execute("list_qualified_jobs", {"decision": "qualified"})
     assert [j["id"] for j in result["jobs"]] == ["a"] and is_data
+
+
+# --------------------------------------------------------------------------- #
+# Tailored-CV delta questions (7b/7c, gate #2) — an EXACT SORT over real scores,
+# never RAG. The fuzzy-sounding "which improved the most?" is this, not similarity.
+# --------------------------------------------------------------------------- #
+def test_list_cv_drafts_is_a_read_only_exact_tool():
+    """The CV-score tool is present, exact (not semantic), and its result is wrapped as
+    <data> (untrusted job titles); it introduces no write path."""
+    assert "list_cv_drafts" in query_agent.TOOL_NAMES
+    assert "list_cv_drafts" not in query_agent.SEMANTIC_TOOLS  # exact sort, not RAG
+    assert "list_cv_drafts" in query_agent.DATA_TOOLS
+    assert query_agent.TOOL_NAMES.isdisjoint(CONCIERGE_TOOLS & {  # still no write tool
+        "tailor_cvs", "requalify_cvs", "approve_cv_drafts", "reject_cv_drafts", "export_cvs"})
+    # the router is told to send CV-score questions to the structured tool, not similarity
+    sys = query_agent.SYSTEM.lower()
+    assert "list_cv_drafts" in sys and "exact sort" in sys and "not a similarity" in sys
+
+
+async def test_executor_list_cv_drafts_sorts_by_delta_and_summarizes():
+    ex, _ = _executor_with_capture()
+    result, is_data = await ex.execute("list_cv_drafts", {})
+    assert is_data  # untrusted job titles wrapped as <data>
+    drafts = result["drafts"]
+    # sorted by delta desc: improved (+0.25) → worse (−0.05) → not-yet-requalified (null) last
+    assert [d["job_id"] for d in drafts] == ["a", "b", "c"]
+    assert drafts[0]["delta"] == 0.25 and drafts[1]["delta"] == -0.05 and drafts[2]["delta"] is None
+    assert drafts[0]["title"] == "Backend"  # enriched from the job for citation links
+    s = result["summary"]
+    assert s == {"total": 3, "requalified": 2, "improved": 1, "worse": 1, "unchanged": 0,
+                 "by_status": {"approved": 2, "draft_ready": 1}}
+    # delta_asc flips the scored ordering (worst first); nulls still last
+    asc, _ = await ex.execute("list_cv_drafts", {"sort": "delta_asc"})
+    scored = [d for d in asc["drafts"] if d["delta"] is not None]
+    assert scored[0]["job_id"] == "b" and asc["drafts"][-1]["delta"] is None
+
+
+def test_citations_from_cv_drafts_link_the_target_job():
+    from app.query_runner import _citations_from
+
+    sink: dict = {}
+    _citations_from("list_cv_drafts",
+                    {"drafts": [{"job_id": "j1", "title": "Backend", "company": "Acme", "url": "u"}]},
+                    sink)
+    assert ("job", "j1") in sink
+    assert sink[("job", "j1")] == {"type": "job", "id": "j1", "title": "Backend",
+                                   "company": "Acme", "url": "u"}
 
 
 # --------------------------------------------------------------------------- #
@@ -275,6 +332,51 @@ async def test_exact_counts_and_stats_are_computed_in_sql():
     finally:
         async with session_scope() as s:
             await repositories.delete_user_cascade(s, uid)
+
+
+@requires_db
+async def test_list_cv_drafts_delta_sort_and_scoping_on_real_rows():
+    """Seed real cv_drafts with known before/after scores and drive the Query executor
+    through a repo-backed call: the delta sort is exact, and user B sees NONE of user A's
+    drafts (scoping enforced at the DB, not assumed)."""
+    from app.query_runner import QueryExecutor
+    from jobpilot_core.db import session_scope
+
+    async def repo_call(user_id, service, tool, args):
+        async with session_scope() as s:
+            if tool == "get_cv_drafts":
+                return {"drafts": await repositories.get_cv_drafts(s, user_id, status=args.get("status"))}
+            if tool == "get_qualified_jobs":
+                return {"jobs": await repositories.get_qualified_jobs(s, user_id, limit=args.get("limit", 1000))}
+        return {}
+
+    async with session_scope() as s:
+        uid_a = await _mk_user(s)
+        uid_b = await _mk_user(s)
+        jobs = await _seed_two_jobs(s, uid_a)
+        jid0, jid1 = jobs[0].id, jobs[1].id
+    try:
+        async with session_scope() as s:  # job0: 0.5→0.8 (+0.3); job1: 0.6→0.5 (−0.1)
+            d0 = await repositories.upsert_cv_draft(s, uid_a, jid0, None, {"skills": []}, {}, None, 0.5)
+            d1 = await repositories.upsert_cv_draft(s, uid_a, jid1, None, {"skills": []}, {}, None, 0.6)
+            d0id, d1id = d0.id, d1.id
+        async with session_scope() as s:
+            await repositories.set_cv_draft_after_score(s, uid_a, d0id, 0.8)
+            await repositories.set_cv_draft_after_score(s, uid_a, d1id, 0.5)
+
+        res_a, is_data = await QueryExecutor(uid_a, call=repo_call).execute("list_cv_drafts", {})
+        assert is_data
+        assert [d["delta"] for d in res_a["drafts"]] == [0.3, -0.1]  # exact, sorted desc
+        assert res_a["drafts"][0]["job_id"] == str(jid0)
+        assert res_a["drafts"][0]["title"]  # enriched from the target job
+        assert res_a["summary"]["improved"] == 1 and res_a["summary"]["worse"] == 1
+
+        res_b, _ = await QueryExecutor(uid_b, call=repo_call).execute("list_cv_drafts", {})
+        assert res_b["drafts"] == [] and res_b["summary"]["total"] == 0  # scoping: B sees none of A's
+    finally:
+        async with session_scope() as s:
+            await repositories.delete_user_cascade(s, uid_a)
+            await repositories.delete_user_cascade(s, uid_b)
 
 
 @requires_db

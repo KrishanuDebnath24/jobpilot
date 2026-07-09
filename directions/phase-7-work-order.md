@@ -2,7 +2,7 @@
 
 > Hand this to Claude Code. It expands Phase 7 of the master prompt. Same discipline: sub-steps **in order**, reproduce each **show me**, **stop at the gate**, log choices in `DECISIONS.md`, commit at the gate.
 >
-> **Depends on:** the pipeline exists end to end (jobs, qualifications, analyses, suggestions, `pipeline_runs`, `agent_events`) and Phase 1's pgvector columns are in place. This is where **embeddings finally get populated** — they've been NULL since Phase 1 by design.
+> **Depends on:** the pipeline exists end to end (jobs, qualifications, analyses, suggestions, **`cv_drafts` from Phase 6.5**, `pipeline_runs`, `agent_events`) and Phase 1's pgvector columns are in place. This is where **embeddings finally get populated** — they've been NULL since Phase 1 by design. Because 6.5 now exists, the Query agent must also answer about **tailored CVs and their before/after qualification scores** — a big new class of (mostly exact) questions.
 >
 > **The cardinal rule of this phase:** *don't RAG a question that has an exact answer.* "How many jobs qualified this week?" is a **COUNT**, not a similarity search. An agent that retrieves-and-guesses at numbers is the classic broken data-Q&A tool. Route by question type: exact → structured query, fuzzy → embeddings, status → live status.
 
@@ -10,7 +10,7 @@
 
 ## Decisions locked for this phase (don't re-litigate)
 
-- **Hybrid retrieval, routed by question type.** Three tool families: **structured** (counts/filters/aggregates via `db-mcp` — *exact*), **semantic** (pgvector similarity over embedded jobs/analyses — *fuzzy*), **status** (pipeline/agent run state via `pipeline-mcp` — *live*). The agent picks the right one. Aggregates and counts **never** go through RAG.
+- **Hybrid retrieval, routed by question type.** Three tool families: **structured** (counts/filters/aggregates via `db-mcp`, **including `cv_drafts` status and before/after qualification-score deltas from Phase 6.5** — *exact*), **semantic** (pgvector similarity over embedded jobs/analyses — *fuzzy*), **status** (pipeline/agent run state via `pipeline-mcp` — *live*). The agent picks the right one. Aggregates, counts, and score deltas **never** go through RAG — a "which CV improved most?" is a sort over exact numbers, not a similarity search.
 - **Read-only — no action tools.** The Query agent answers; it never triggers, configures, edits, or deletes. Action requests ("re-run the scout") are **redirected to the Concierge** (Phase 6). This shrinks the risk surface dramatically versus the Concierge — lean into it.
 - **Grounded or "I don't have that."** Every answer is grounded in retrieved data and **cites what it drew from** (which jobs/runs). If the data doesn't contain the answer, the agent says so — it does **not** fabricate. Numbers come from exact queries, not from narrative.
 - **Embeddings via a pluggable `Embedder`.** Default **Voyage** (cheap API, no heavy dep; needs `VOYAGE_API_KEY`); a **local model** (sentence-transformers) is the zero-API-cost alternative at the cost of a heavy `torch` dependency — choose and document. Embed **async** (don't block writes): backfill existing rows once, then embed-on-write. Store in the Phase 1 pgvector columns.
@@ -27,12 +27,12 @@
 - **Show me:** existing rows are embedded (vector columns populated); a newly-persisted job gets an embedding without blocking the write; embedding cost/latency is logged.
 
 ### 7b — Retrieval toolset (structured + semantic + status)
-- Build read-only tools: **structured** queries/counts/aggregates (`db-mcp`), **semantic** similarity search over embedded jobs/analyses (pgvector), **status** reads (`pipeline-mcp` — current stage, last-run times, pending gates, counts).
-- **Show me:** a structured count returns an **exact** number; a semantic search returns relevant jobs by similarity; a status read returns current pipeline state — each via its correct tool.
+- Build read-only tools: **structured** queries/counts/aggregates (`db-mcp`) over jobs, qualifications, analyses, suggestions, **and `cv_drafts` (status, before/after scores, per-job deltas)**; **semantic** similarity search over embedded jobs/analyses (pgvector); **status** reads (`pipeline-mcp` — current stage incl. **re-qualification runs**, last-run times, pending gates, counts).
+- **Show me:** a structured count returns an **exact** number (e.g. "how many of my tailored CVs improved my score?" → an exact delta-based count); a semantic search returns relevant jobs by similarity; a status read returns current pipeline state — each via its correct tool.
 
 ### 7c — Query agent (read-only, routing, grounded)
 - Build the agent (Haiku, config-driven): given a question, route to the right tool(s), synthesize a grounded answer that cites the data, and say "I don't have that" when the data lacks it. No action tools; action requests redirect to the Concierge. `user_id` scoped; retrieved content = data.
-- **Show me:** the agent answers (a) a data question via an **exact structured query** (not a hallucinated number), (b) a semantic question via similarity retrieval, (c) a status question ("is the scout running?") via live status — all correct; and it **redirects** an action request; and an unanswerable question gets an honest "I don't have that," not a fabrication.
+- **Show me:** the agent answers (a) a data question via an **exact structured query** (not a hallucinated number) — including a **tailored-CV question** like "which of my CVs improved the most?" answered from real `cv_drafts` before/after scores, (b) a semantic question via similarity retrieval, (c) a status question ("is the scout running?") via live status — all correct; and it **redirects** an action request; and an unanswerable question gets an honest "I don't have that," not a fabrication.
 
 ### 7d — Grounding / honesty / injection hardening
 - Answers cite sources (which jobs/runs). Counts come from exact queries (verifiably correct against the DB). Staleness noted ("as of the last scout run at …"). Injection: job text is data; **status answers are grounded in real pipeline state**, not in narrative from a job description.
@@ -48,7 +48,7 @@
 
 Green when **all** hold, then stop for approval before Phase 8:
 1. **The master bar:** it answers data questions **and** "is X running?" status questions correctly.
-2. **Exact questions use exact queries** (counts/aggregates verifiably correct vs the DB — no hallucinated numbers); semantic questions use embeddings; status questions use live status.
+2. **Exact questions use exact queries** (counts/aggregates — including **tailored-CV before/after score deltas** — verifiably correct vs the DB, no hallucinated numbers); semantic questions use embeddings; status questions use live status.
 3. Answers are **grounded and cited**, and the agent says **"I don't have that"** rather than fabricate.
 4. **Read-only:** no action tools; action requests redirect to the Concierge.
 5. Injection-hardened (job text = data; status grounded in real state) and **user-scoped** (only the user's own data).
@@ -65,5 +65,5 @@ Green when **all** hold, then stop for approval before Phase 8:
 - **Embeddings = a new small cost (Voyage key) or a heavy dep (local torch).** Choose and document; embed async so writes don't block; backfill once + embed-on-write; log cost.
 - **Keep embeddings in sync + erasable.** Update on write; **`delete_user_data` must wipe embeddings too** (they're derived personal data). Don't log query text or retrieved personal data.
 - **Model:** Haiku default (mechanical routing/synthesis), config-driven, promote only if needed; interactive → no batch; cache system prompt + tool defs; verify the current model ID.
-- **Hold the Concierge/Query boundary.** Query answers, Concierge acts — distinct privilege sets even if they share a UI.
+- **Hold the Concierge/Query boundary — including on CV scores.** Query answers, Concierge acts — distinct privilege sets even if they share a UI. Mind the overlap from 6.5: the **Concierge pushes the improvement report right after a re-qualify run** (action-adjacent), while the **Query agent answers those same delta questions on demand, any time later** (read-only pull). Both read the same `cv_drafts` scores; the Query agent still gets **no write access**.
 - **Commit at the gate**; log decisions (embedder choice, retrieval routing, Query model, Query-vs-Concierge UI, staleness handling).
