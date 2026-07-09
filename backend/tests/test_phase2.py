@@ -182,6 +182,64 @@ async def test_crawler_honors_robots_disallow():
 
 
 # --------------------------------------------------------------------------- #
+# Pure unit — crawler posting-link extraction + JSON-LD parse (no network/LLM)
+# --------------------------------------------------------------------------- #
+def test_crawler_extracts_posting_links():
+    """Posting URLs are pulled straight from /job/ links, absolutized, de-duped, and
+    apply/similar sub-paths are excluded."""
+    from sources_mcp.connectors.crawl import _extract_posting_links
+
+    base = "https://www.irishjobs.ie/jobs/software-developer/in-dublin"
+    page = """
+      <a href="/job/software-engineer/acme-job101">A</a>
+      <a href="/job/software-engineer/acme-job101?src=x">dup with query</a>
+      <a href="https://www.irishjobs.ie/job/data-eng/globex-job202">B</a>
+      <a href="/job/software-engineer/acme-job101/apply">apply (excluded)</a>
+      <a href="/jobs/software-developer/in-cork">search (excluded)</a>
+      <a href="/careeradvice/cv-tips">advice (excluded)</a>
+    """
+    links = _extract_posting_links(page, base)
+    assert links == [
+        "https://www.irishjobs.ie/job/software-engineer/acme-job101",
+        "https://www.irishjobs.ie/job/data-eng/globex-job202",
+    ]
+
+
+def test_crawler_parses_jobposting_jsonld():
+    """The full description + fields come from the schema.org JobPosting JSON-LD."""
+    from sources_mcp.connectors.crawl import _parse_jobposting_jsonld
+
+    page = """
+    <html><head>
+    <script type="application/ld+json">
+    {"@context":"https://schema.org","@type":"JobPosting",
+     "title":"Senior Backend Engineer",
+     "description":"<p>Build <b>APIs</b> in Python.</p><ul><li>5+ years</li></ul>",
+     "hiringOrganization":{"@type":"Organization","name":"Acme Ltd"},
+     "jobLocation":{"@type":"Place","address":{"@type":"PostalAddress",
+        "addressLocality":"Dublin, County Dublin","addressRegion":"Dublin",
+        "addressCountry":"IE"}},
+     "datePosted":"2026-07-01"}
+    </script></head><body>chrome</body></html>
+    """
+    data = _parse_jobposting_jsonld(page)
+    assert data is not None
+    assert data["title"] == "Senior Backend Engineer"
+    assert data["company"] == "Acme Ltd"
+    # Comma-token dedup: "Dublin, County Dublin" + region "Dublin" -> no repeat.
+    assert data["location"] == "Dublin, County Dublin, IE"
+    assert data["date_posted"] == "2026-07-01"
+    # HTML stripped to clean readable text, full body preserved.
+    assert data["description"] == "Build APIs in Python. 5+ years"
+
+
+def test_crawler_jsonld_absent_returns_none():
+    from sources_mcp.connectors.crawl import _parse_jobposting_jsonld
+
+    assert _parse_jobposting_jsonld("<html><body>no structured data</body></html>") is None
+
+
+# --------------------------------------------------------------------------- #
 # Addendum 2.2 — description completeness tagging (no network/LLM)
 # --------------------------------------------------------------------------- #
 def test_connector_tags_description_completeness():

@@ -7,8 +7,8 @@ source later is a new connector here — not a new pipeline.
 
 Connector output is **data, never instructions**: text from a listing (title,
 description, HTML) is only ever mapped into fields; it must not select tools or
-change control flow. The crawler's LLM step enforces this with extract-only,
-structured output.
+change control flow. The crawler reads the board's schema.org JSON-LD and maps its
+fields deterministically — the posting text is data, never a control signal.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ SOURCES: list[dict] = [
     {
         "name": "crawl",
         "source_type": "crawl",
-        "description": "Polite single-board crawler (robots + rate limit) with constrained Haiku extraction.",
+        "description": "Polite single-board crawler (robots + rate limit); reads each posting's full description from schema.org JSON-LD.",
     },
     {
         "name": "jooble",

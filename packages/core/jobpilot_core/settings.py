@@ -140,10 +140,13 @@ class Settings(BaseSettings):
         "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
     )
     crawler_board: str = "irishjobs"  # single Irish board (no public API)
-    crawler_max_pages: int = 3  # cap pages fetched per run -> caps extraction calls
+    crawler_max_pages: int = 3  # cap search-result pages fetched per run
+    # Cap how many individual posting pages we open per run to read the full
+    # description (politeness + time guard; each is one polite same-domain GET).
+    crawler_max_detail_fetches: int = 25
     crawler_min_delay_seconds: float = 2.0  # per-domain minimum delay between requests
     crawler_timeout_seconds: float = 20.0
-    crawler_max_text_chars: int = 12000  # cap page text sent to the LLM (spend guard)
+    crawler_max_text_chars: int = 12000  # cap description text kept per posting
 
     # --- Storage (S3 / MinIO) ---
     storage_backend: str = "s3"  # "s3" | "local"

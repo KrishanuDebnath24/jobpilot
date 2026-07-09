@@ -109,8 +109,9 @@ async def run_crawl(
     location: str = "dublin",
     max_pages: int | None = None,
 ) -> dict:
-    """Polite single-board crawl (robots + rate limit) with constrained Haiku
-    extraction -> jobs in the common raw shape (crawl). Reports LLM token usage."""
+    """Polite single-board crawl (robots + rate limit): collect posting links from the
+    search pages, then open each posting to read its full description from schema.org
+    JSON-LD -> jobs in the common raw shape (crawl). Deterministic; usage is zero."""
     require_user_id()
     jobs, usage = await crawl.run_crawl(
         settings, roles=roles, keywords=keywords, location=location, max_pages=max_pages
