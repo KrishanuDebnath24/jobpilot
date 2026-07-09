@@ -9,9 +9,19 @@ from __future__ import annotations
 import os
 
 from celery import Celery
+from celery.signals import worker_process_init
+from jobpilot_core import tracing
 from jobpilot_core.settings import get_settings
 
 settings = get_settings()
+
+
+@worker_process_init.connect
+def _init_worker_observability(**_kwargs) -> None:
+    """Phase 8a: init correlation logging + tracing per prefork child (so a
+    BatchSpanProcessor's exporter thread lives in the child, not across the fork)."""
+    tracing.configure_logging()
+    tracing.init_tracing(settings, service_name="jobpilot-worker")
 
 celery = Celery(
     "jobpilot",

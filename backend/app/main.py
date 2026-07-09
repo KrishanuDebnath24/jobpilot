@@ -12,7 +12,7 @@ import json
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from jobpilot_core import events, repositories
+from jobpilot_core import events, repositories, tracing
 from jobpilot_core.resume_parse import ALLOWED_MIME
 from jobpilot_core.security import create_access_token, verify_password
 from jobpilot_core.settings import Settings, get_settings
@@ -36,6 +36,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def _startup_observability() -> None:
+    """Phase 8a: correlation-id logging + OpenTelemetry tracing (local by default).
+    Idempotent; a no-op for tracing when the OTel SDK is absent or it's disabled."""
+    tracing.configure_logging()
+    tracing.init_tracing(settings, service_name="jobpilot-backend")
 
 
 # --------------------------------------------------------------------------- #

@@ -19,6 +19,12 @@ psycopg[binary,pool]==3.3.4
 # services do NOT need this — db-mcp only stores/searches the float vectors. If it isn't
 # installed, jobpilot_core.embeddings falls back to a deterministic hashing backend.
 sentence-transformers==3.3.1
+# Phase 8: OpenTelemetry tracing (local by default; OTLP/http exporter used only when an
+# endpoint is configured). Backend + worker images only — the MCP services stay dep-light,
+# and jobpilot_core.tracing no-ops if the SDK isn't importable.
+opentelemetry-sdk==1.29.0
+opentelemetry-api==1.29.0
+opentelemetry-exporter-otlp-proto-http==1.29.0
 
 # --- Tests / dev ---
 pytest==8.3.4

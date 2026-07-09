@@ -682,3 +682,41 @@ Running log of non-obvious engineering choices. One line + rationale each.
   are short (Haiku, capped tokens) so buffering is imperceptible, and citations/links render
   identically. Token-by-token streaming is a self-contained future enhancement, deliberately
   kept out of this gate-closing change.
+
+## Phase 8 — Hardening & Launch Readiness
+
+### 8a — Observability & tracing (OpenTelemetry, local)
+
+- **OpenTelemetry over a hosted trace service.** Chosen so **no trace data leaves the
+  box** unless pointed at a collector the operator runs — the right fit for JobPilot's
+  strict no-PII/GDPR posture (a hosted LLM-trace UI would be a third-party data-egress
+  surface). `jobpilot_core/tracing.py` is **local-first**: OTLP/http export when
+  `OTEL_EXPORTER_OTLP_ENDPOINT` is set, else console when `TRACING_CONSOLE_EXPORT=true`,
+  else spans are created but not exported (quiet dev — correlation still works).
+- **OTel is an optional import; tracing degrades to a no-op.** The SDK is added to the
+  **backend + worker images only**; `tracing.py` guards the import so the dependency-light
+  **MCP service images never need OTel** and `jobpilot_core` never hard-requires it (same
+  pattern as the embeddings/torch fallback). Disabled or SDK-absent → every helper no-ops.
+- **One choke point per layer, so every agent is covered for free.** LLM spans wrap the
+  single `jobpilot_core.llm` create/batch calls (so **every** agent — Scout/Qualify/
+  Analyzer/Enhancer/Concierge/Query/Tailor/Critic — emits per-call `model` + input/output/
+  cache-read/cache-write tokens + `batch` + est. cost without per-agent wiring); MCP spans
+  wrap `backend/app/mcp_client.call_tool`; stage spans come from a `@traced_stage`
+  decorator on the tracked runners (scout/qualify/analyze/enhance). In-process these nest
+  parent→child (stage → mcp → llm); across the Celery boundary they correlate by
+  `pipeline_id`.
+- **Correlation ids everywhere, no PII.** A contextvar carries `{user_id, pipeline_id,
+  stage}`; a `CorrelationFilter` injects them into every log line and spans attach them.
+  **Only ids / counts / model / cost / status become attributes** — string attributes are
+  truncated to 200 chars as a safety net, but the guarantee is call-site discipline (we
+  pass counts, never resume/CV/job/query content). MCP spans deliberately record the tool
+  name + service, **never the arguments** (which can hold content).
+- **Init is startup-scoped, fork-safe.** The backend inits on FastAPI startup; the worker
+  inits per prefork child via `worker_process_init` (so a `BatchSpanProcessor` export
+  thread lives in the child, not across the fork). Both idempotent.
+- **Show me / tests.** `test_phase8_tracing.py` drives an in-memory span exporter and
+  proves a **connected** stage→mcp→llm trace (shared trace id; mcp/llm are children of the
+  stage span), per-call token/cost on the llm span, correlation ids on spans + logs, the
+  string-truncation PII net, error-outcome recording, and the disabled/no-op path. A live
+  full-pipeline trace to a real collector is exercisable via `OTEL_EXPORTER_OTLP_ENDPOINT`;
+  the in-memory test is the deterministic guarantee.

@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from jobpilot_core import events
+from jobpilot_core import events, tracing
 from jobpilot_core.scout import normalize_raw, unique_contribution
 from jobpilot_core.settings import get_settings
 
@@ -133,6 +133,7 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
     return summary
 
 
+@tracing.traced_stage("scout")
 async def run_scout_tracked(
     user_id: uuid.UUID, config: dict | None = None, pipeline_id: uuid.UUID | str | None = None
 ) -> dict:

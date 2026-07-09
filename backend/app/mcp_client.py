@@ -11,6 +11,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from jobpilot_core import tracing
 from jobpilot_core.security import mint_mcp_context_token
 from jobpilot_core.settings import get_settings
 from mcp import ClientSession
@@ -61,14 +62,16 @@ async def call_tool(
     settings = get_settings()
     token = mint_mcp_context_token(user_id, settings)
     headers = {"Authorization": f"Bearer {token}"}
-    try:
-        async with streamablehttp_client(service_url, headers=headers) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.call_tool(tool, arguments or {})
-                return _extract(result)
-    except BaseExceptionGroup as eg:
-        raise RuntimeError(_flatten_exc(eg)) from eg
+    # Span carries only the tool name + service (never arguments — they can hold content).
+    with tracing.span("mcp.tool", tool=tool, service=service_url.rsplit("/", 2)[-2] if "/" in service_url else service_url):
+        try:
+            async with streamablehttp_client(service_url, headers=headers) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool, arguments or {})
+                    return _extract(result)
+        except BaseExceptionGroup as eg:
+            raise RuntimeError(_flatten_exc(eg)) from eg
 
 
 async def db_mcp(user_id: uuid.UUID, tool: str, arguments: dict | None = None) -> Any:

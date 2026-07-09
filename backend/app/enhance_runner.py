@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from jobpilot_core import analyzer, enhancer, events
+from jobpilot_core import analyzer, enhancer, events, tracing
 from jobpilot_core.llm import LLMUsage
 from jobpilot_core.settings import get_settings
 
@@ -121,6 +121,7 @@ async def run_enhance(
     return summary
 
 
+@tracing.traced_stage("enhance")
 async def run_enhance_tracked(
     user_id: uuid.UUID,
     job_ids: list[str] | None = None,

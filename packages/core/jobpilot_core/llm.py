@@ -16,6 +16,7 @@ from typing import Any
 
 from anthropic import AsyncAnthropic
 
+from . import tracing
 from .settings import Settings
 
 logger = logging.getLogger("jobpilot.llm")
@@ -146,14 +147,17 @@ async def complete_text(
     """Minimal text round-trip (used by the 2a health check)."""
     client = get_client(settings)
     mdl = _model(settings, model)
-    resp = await client.messages.create(
-        model=mdl,
-        max_tokens=min(max_tokens or 256, settings.llm_max_output_tokens),
-        system=system or "You are a terse assistant. Answer in as few words as possible.",
-        messages=[{"role": "user", "content": prompt}],
-    )
+    with tracing.span("llm.call", model=mdl, kind="text"):
+        resp = await client.messages.create(
+            model=mdl,
+            max_tokens=min(max_tokens or 256, settings.llm_max_output_tokens),
+            system=system or "You are a terse assistant. Answer in as few words as possible.",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        usage = _log(mdl, resp.usage)
+        tracing.annotate_current_llm(usage)
     text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
-    return LLMResult(data=text, text=text, usage=_log(mdl, resp.usage), stop_reason=resp.stop_reason)
+    return LLMResult(data=text, text=text, usage=usage, stop_reason=resp.stop_reason)
 
 
 def build_forced_tool_params(
@@ -237,8 +241,11 @@ async def extract_json(
         max_tokens=max_tokens or settings.llm_max_output_tokens,
         temperature=temperature,
     )
-    resp = await client.messages.create(**params)
-    return LLMResult(data=_tool_input(resp.content, tool_name), usage=_log(mdl, resp.usage),
+    with tracing.span("llm.call", model=mdl, kind="tool", tool=tool_name):
+        resp = await client.messages.create(**params)
+        usage = _log(mdl, resp.usage)
+        tracing.annotate_current_llm(usage)
+    return LLMResult(data=_tool_input(resp.content, tool_name), usage=usage,
                      stop_reason=resp.stop_reason)
 
 
@@ -251,7 +258,8 @@ async def submit_batch(settings: Settings, requests: list[dict]) -> str:
     """Create a batch from ``[{"custom_id": str, "params": {...}}]`` and return its id.
     ``params`` is a full Messages-API param dict (from ``build_forced_tool_params``)."""
     client = get_client(settings)
-    batch = await client.messages.batches.create(requests=requests)
+    with tracing.span("llm.batch.submit", count=len(requests)):
+        batch = await client.messages.batches.create(requests=requests)
     logger.info("llm.batch.submitted id=%s count=%d", batch.id, len(requests))
     return batch.id
 
@@ -271,22 +279,24 @@ async def collect_batch_results(
     client = get_client(settings)
     out: dict[str, Any] = {}
     usage = LLMUsage(model=model, batch=True)
-    async for result in await client.messages.batches.results(batch_id):
-        rtype = result.result.type
-        if rtype != "succeeded":
-            logger.warning("llm.batch.result custom_id=%s type=%s (skipped)", result.custom_id, rtype)
-            continue
-        msg = result.result.message
-        u = msg.usage
-        usage.add(
-            getattr(u, "input_tokens", 0) or 0,
-            getattr(u, "output_tokens", 0) or 0,
-            cache_read=getattr(u, "cache_read_input_tokens", 0) or 0,
-            cache_creation=getattr(u, "cache_creation_input_tokens", 0) or 0,
-        )
-        data = _tool_input(msg.content, tool_name)
-        if data is not None:
-            out[result.custom_id] = data
+    with tracing.span("llm.batch.collect", model=model, batch=True) as sp:
+        async for result in await client.messages.batches.results(batch_id):
+            rtype = result.result.type
+            if rtype != "succeeded":
+                logger.warning("llm.batch.result custom_id=%s type=%s (skipped)", result.custom_id, rtype)
+                continue
+            msg = result.result.message
+            u = msg.usage
+            usage.add(
+                getattr(u, "input_tokens", 0) or 0,
+                getattr(u, "output_tokens", 0) or 0,
+                cache_read=getattr(u, "cache_read_input_tokens", 0) or 0,
+                cache_creation=getattr(u, "cache_creation_input_tokens", 0) or 0,
+            )
+            data = _tool_input(msg.content, tool_name)
+            if data is not None:
+                out[result.custom_id] = data
+        sp.record_llm(usage).set(succeeded=len(out))
     logger.info("llm.batch.collected id=%s succeeded=%d est_cost_usd=%.6f",
                 batch_id, len(out), usage.cost_usd)
     return out, usage

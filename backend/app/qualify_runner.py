@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from jobpilot_core import events
+from jobpilot_core import events, tracing
 from jobpilot_core.qualifier import combine, refine_with_llm, score_deterministic
 from jobpilot_core.settings import get_settings
 
@@ -129,6 +129,7 @@ async def run_qualify(
     return summary
 
 
+@tracing.traced_stage("qualify")
 async def run_qualify_tracked(
     user_id: uuid.UUID, requalify_all: bool = False, pipeline_id: uuid.UUID | str | None = None
 ) -> dict:

@@ -15,7 +15,7 @@ import logging
 import time
 import uuid
 
-from jobpilot_core import analyzer, events
+from jobpilot_core import analyzer, events, tracing
 from jobpilot_core.llm import (
     LLMUsage,
     collect_batch_results,
@@ -162,6 +162,7 @@ async def run_analyze(
     return summary
 
 
+@tracing.traced_stage("analyze")
 async def run_analyze_tracked(
     user_id: uuid.UUID,
     job_ids: list[str] | None = None,

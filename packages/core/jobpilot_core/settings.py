@@ -178,6 +178,16 @@ class Settings(BaseSettings):
     query_max_tool_iterations: int = 6
     query_semantic_limit: int = 8  # rows returned by a semantic similarity search
 
+    # --- Phase 8 (observability). OpenTelemetry, LOCAL by default: traces export to an
+    #     OTLP collector you run (set otel_exporter_otlp_endpoint), else console when
+    #     tracing_console_export is on, else spans are created but not exported (quiet
+    #     dev). No PII ever on spans — ids/counts/model/cost only. ---
+    tracing_enabled: bool = True
+    tracing_console_export: bool = False
+    otel_exporter_otlp_endpoint: str = ""  # e.g. http://otel-collector:4318/v1/traces
+    # Soft per-user LLM spend alert threshold (USD/day); the cost report flags breaches.
+    cost_alert_daily_usd: float = 5.0
+
     def effective_mcp_secret(self) -> str:
         return self.mcp_shared_secret or self.jwt_secret
 
