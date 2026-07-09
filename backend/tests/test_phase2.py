@@ -240,6 +240,75 @@ def test_crawler_jsonld_absent_returns_none():
 
 
 # --------------------------------------------------------------------------- #
+# Pure unit — profile-aware search term derivation (Step 1; no network/LLM)
+# --------------------------------------------------------------------------- #
+def test_derive_search_terms_from_resume():
+    from jobpilot_core.profile_search import derive_search_terms
+
+    resume = {
+        "contact": {"location": "Dublin, Ireland"},
+        "skills": ["Python", "Kubernetes", "AWS", "Python"],  # dupe collapses
+        "experience": [
+            {"title": "Senior Software Engineer, Acme Corp (2020-2024)"},
+            {"title": "Backend Developer | Globex"},
+            {"title": "Managed the on-call rotation"},  # not a title -> dropped
+        ],
+    }
+    d = derive_search_terms(resume)
+    assert d["roles"] == ["Senior Software Engineer", "Backend Developer"]
+    assert d["keywords"] == ["Python", "Kubernetes", "AWS"]
+    assert d["locations"] == ["Dublin, Ireland"]
+    assert d["seniority"] == "senior"
+
+
+def test_derive_search_terms_empty_resume():
+    from jobpilot_core.profile_search import derive_search_terms
+
+    d = derive_search_terms(None)
+    assert d == {"roles": [], "keywords": [], "locations": [], "seniority": None}
+
+
+def test_merge_search_terms_config_leads_profile_extends():
+    from jobpilot_core.profile_search import merge_search_terms
+
+    config = {"roles": ["Platform Engineer"], "keywords": ["Go"], "locations": ["Cork"]}
+    derived = {"roles": ["Backend Developer", "Platform Engineer"], "keywords": ["Go", "Python"]}
+    merged = merge_search_terms(config, derived)
+    assert merged["roles"] == ["Platform Engineer", "Backend Developer"]  # config first, deduped
+    assert merged["keywords"] == ["Go", "Python"]
+    assert merged["locations"] == ["Cork"]  # explicit config location kept, not diluted
+
+
+# --------------------------------------------------------------------------- #
+# Pure unit — Greenhouse slug harvest + board merge (Step 2; no network)
+# --------------------------------------------------------------------------- #
+def test_extract_greenhouse_slugs():
+    from jobpilot_core.ats_boards import extract_greenhouse_slugs
+
+    urls = [
+        "https://boards.greenhouse.io/intercom/jobs/12345",
+        "https://job-boards.greenhouse.io/stripe/jobs/999",
+        "https://boards.greenhouse.io/embed/job_board?for=datadog&token=1",
+        "https://www.adzuna.co.uk/jobs/land/ad/123",  # not greenhouse -> ignored
+        None,
+    ]
+    assert extract_greenhouse_slugs(urls) == {"intercom", "stripe", "datadog"}
+
+
+def test_merge_boards_unions_and_caps():
+    from jobpilot_core.ats_boards import DEFAULT_GREENHOUSE_BOARDS, merge_boards
+
+    boards = merge_boards(["MyCo", "intercom"], {"newco", "stripe"}, cap=40)
+    assert boards[0] == "myco"  # configured first, lowercased
+    assert "intercom" in boards and "stripe" in boards and "newco" in boards
+    assert len(boards) == len(set(boards))  # de-duped
+    # Defaults are folded in.
+    assert set(DEFAULT_GREENHOUSE_BOARDS).issubset(set(boards))
+    # Cap is honored.
+    assert len(merge_boards([f"c{i}" for i in range(100)], set(), cap=10)) == 10
+
+
+# --------------------------------------------------------------------------- #
 # Addendum 2.2 — description completeness tagging (no network/LLM)
 # --------------------------------------------------------------------------- #
 def test_connector_tags_description_completeness():

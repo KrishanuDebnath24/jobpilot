@@ -13,12 +13,49 @@ import logging
 import uuid
 
 from jobpilot_core import events, tracing
+from jobpilot_core.ats_boards import extract_greenhouse_slugs, merge_boards
+from jobpilot_core.profile_search import derive_search_terms, merge_search_terms
 from jobpilot_core.scout import normalize_raw, unique_contribution
 from jobpilot_core.settings import get_settings
 
 from . import mcp_client
 
 logger = logging.getLogger("jobpilot.scout")
+
+
+async def _effective_terms(user_id: uuid.UUID, config: dict) -> tuple[dict, dict | None]:
+    """Merge the user's resume-derived search terms into the configured ones (Step 1).
+
+    Returns ``(effective_terms, derived_or_none)``. Never fatal: a missing resume or a
+    resume-mcp hiccup falls back to the configured terms unchanged."""
+    settings = get_settings()
+    base = {
+        "roles": config.get("roles") or [],
+        "keywords": config.get("keywords") or [],
+        "locations": config.get("locations") or [],
+    }
+    if not settings.scout_profile_search:
+        return base, None
+    try:
+        wrap = (await mcp_client.resume_mcp(user_id, "get_structured_resume", {})).get("resume")
+        resume = wrap.get("structured") if wrap else None
+    except Exception as exc:  # noqa: BLE001 - profile enrichment must never fail scout
+        logger.warning("scout.profile: resume fetch failed, using configured terms: %s", exc)
+        resume = None
+    if not resume:
+        return base, None
+    derived = derive_search_terms(
+        resume,
+        max_roles=settings.scout_profile_max_roles,
+        max_keywords=settings.scout_profile_max_keywords,
+    )
+    merged = merge_search_terms(
+        config, derived,
+        max_roles=settings.scout_profile_max_roles,
+        max_keywords=settings.scout_profile_max_keywords,
+    )
+    logger.info("scout.profile derived roles=%s keywords=%s", derived["roles"], derived["keywords"])
+    return merged, derived
 
 
 async def _emit(user_id: uuid.UUID, event: dict) -> None:
@@ -63,11 +100,13 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
     if config is None:
         config = (await mcp_client.config_mcp(user_id, "get_search_config", {}))["config"]
 
+    settings = get_settings()
     sources = config.get("sources") or []
-    roles = config.get("roles") or []
-    locations = config.get("locations") or []
-    keywords = config.get("keywords") or []
     target_employers = config.get("target_employers") or []
+
+    # Step 1: search terms = configured terms unioned with resume-derived ones.
+    terms, derived = await _effective_terms(user_id, config)
+    roles, keywords, locations = terms["roles"], terms["keywords"], terms["locations"]
 
     raw_jobs: list[dict] = []
     by_connector: dict[str, int] = {}
@@ -81,22 +120,22 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
             raw_jobs, by_connector, errors, usage,
         )
 
-    if "greenhouse" in sources:
-        for company in target_employers:
-            await _run_connector(
-                user_id, f"greenhouse:{company}", "fetch_greenhouse",
-                {"company": company, "roles": roles, "locations": locations, "keywords": keywords},
-                raw_jobs, by_connector, errors, usage,
-            )
-
     # Aggregators give Republic-of-Ireland coverage (Adzuna can't). Free ones are on
-    # by default; JSearch is metered and only runs when explicitly in `sources`.
+    # by default; JSearch is metered and only runs when explicitly in `sources`. Run
+    # them (and the crawler) BEFORE Greenhouse so we can harvest ATS slugs from their
+    # apply links and fold those boards into the Greenhouse fan-out below (Step 2).
+    #
+    # Free-text engines index by role and collapse on a long AND query, so we query
+    # them with the SINGLE primary role only — appending the skill list (or even a
+    # second role) empties the result set. Verified live: one role ~50 jobs vs 0 with
+    # the full skill list. Skills still enrich Adzuna, Greenhouse, and the qualifier.
     roi_location = (locations or ["Dublin, Ireland"])[0]
+    primary_role = roles[:1] or keywords[:1]
     for name in ("jooble", "careerjet", "jsearch"):
         if name in sources:
             await _run_connector(
                 user_id, name, f"search_{name}",
-                {"roles": roles, "keywords": keywords, "location": roi_location},
+                {"roles": primary_role, "keywords": [], "location": roi_location},
                 raw_jobs, by_connector, errors, usage,
             )
 
@@ -106,6 +145,24 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
             {"roles": roles, "keywords": keywords, "location": (locations or ["dublin"])[0]},
             raw_jobs, by_connector, errors, usage,
         )
+
+    # Step 2: Greenhouse over configured employers + curated Ireland defaults + slugs
+    # harvested from the apply links of everything fetched so far. Per-board 404s are
+    # recorded, never fatal; the whole list is capped for politeness.
+    greenhouse_boards: list[str] = []
+    if "greenhouse" in sources:
+        harvested = extract_greenhouse_slugs(rj.get("url") for rj in raw_jobs)
+        greenhouse_boards = merge_boards(
+            target_employers, harvested, cap=settings.scout_max_greenhouse_boards
+        )
+        if harvested:
+            logger.info("scout.greenhouse harvested slugs=%s", sorted(harvested))
+        for company in greenhouse_boards:
+            await _run_connector(
+                user_id, f"greenhouse:{company}", "fetch_greenhouse",
+                {"company": company, "roles": roles, "locations": locations, "keywords": keywords},
+                raw_jobs, by_connector, errors, usage,
+            )
 
     # --- shared tail: deterministic normalize + dedupe, then persist via db-mcp ---
     before = await _count_jobs(user_id)
@@ -128,6 +185,9 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
         "unique_by_connector": unique_by_connector,
         "errors": errors,
         "llm_usage": {**usage, "estimated_cost_usd": round(usage["estimated_cost_usd"], 6)},
+        # Transparency: what the profile derived and how many boards we polled.
+        "profile_terms": derived,
+        "greenhouse_boards": len(greenhouse_boards),
     }
     logger.info("scout.summary %s", summary)
     return summary

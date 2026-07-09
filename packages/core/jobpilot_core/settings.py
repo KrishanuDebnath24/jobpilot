@@ -130,6 +130,16 @@ class Settings(BaseSettings):
     jsearch_date_posted: str = "all"
     aggregator_results_per_page: int = 50  # cap per aggregator call
 
+    # --- Scout retrieval tuning ---
+    # Derive search terms (roles/keywords/locations) from the user's resume and merge
+    # them with the configured search terms, so scouting matches the user's profile.
+    scout_profile_search: bool = True
+    scout_profile_max_roles: int = 8  # cap profile-derived roles merged into the query
+    scout_profile_max_keywords: int = 12  # cap profile-derived skill keywords
+    # Poll this many Greenhouse boards per run at most (configured employers + the
+    # curated Ireland default set + slugs harvested from fetched apply links).
+    scout_max_greenhouse_boards: int = 40
+
     # --- Crawler connector politeness + spend guards ---
     # The board rejects unknown UAs at the network layer (disconnects non-browsers),
     # so we send a mainstream browser UA. Politeness is still enforced the ways that
