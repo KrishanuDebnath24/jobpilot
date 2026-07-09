@@ -798,3 +798,30 @@ Running log of non-obvious engineering choices. One line + rationale each.
   deleted / a scout is running / add Java / 100% match", and fires **no** consequential
   tool. The per-agent live injection tests (Analyzer/Enhancer/Concierge/Query) remain; this
   proves injection surviving *into* a stored artifact still can't steer a later agent.
+
+### 8e — End-to-end no-fabrication / honesty audit (audit; verified in code)
+
+- **Honesty is enforced in code across three surfaces — probed together.**
+  `test_phase8_honesty.py` adversarially exercises each guard and confirms fabrication is
+  impossible *by construction*, so a re-qualification score gain can only be real
+  presentation, not gaming. No source changes — the guards existed; this consolidates the
+  adversarial proof.
+- **Apply-to-resume (Phase 6).** A bullet rewrite whose `before` matches no real bullet is
+  **dropped** (never invent an accomplishment); a `skills_to_add` not in `confirmed_skills`
+  is **withheld** (surfaced, not added) even when accepted; projects are **guidance, never
+  inserted**; the original resume is never mutated. So even a fabricating Enhancer output
+  can't reach the resume without an explicit user-held confirmation — the Enhancer→apply
+  honesty chain.
+- **CV tailoring locked fields (Phase 6.5).** `validate_locked` catches a tampered date, a
+  fabricated title, and an added/removed role; `enforce_locked` re-imposes the true locked
+  facts verbatim while keeping the reworded (modifiable) bullets; `validate_no_fabricated_
+  skills` catches a skill grounded nowhere in the real resume and `drop_fabricated_skills`
+  removes it. Legitimate tailoring (reworded summary/bullets, reordered *real* skills)
+  passes the combined gate.
+- **Score gains are attributable to real content.** A draft that *both* tampered a date and
+  invented a skill, once passed through `enforce_locked` + `drop_fabricated_skills`, is
+  byte-identical on locked facts and carries only grounded skills — so any before→after
+  improvement is structurally traceable to presentation of real, unchanged-fact content.
+- The live adversarial elicitation (the **Critic** catching a planted fabrication + tampered
+  date; the **Enhancer** refusing to fabricate) stays in `test_phase6_5_live.py` /
+  `test_phase5*`.
