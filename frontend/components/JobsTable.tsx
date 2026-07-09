@@ -92,18 +92,34 @@ function JobDetail({ job }: { job: Job }) {
               </div>
             )}
           </div>
-
-          {job.url && (
-            <a
-              href={job.url}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-block text-sm text-neutral-400 underline decoration-neutral-700 underline-offset-4 hover:text-neutral-200"
-            >
-              View posting ↗
-            </a>
-          )}
         </>
+      )}
+
+      {job.description && (
+        <div className="space-y-1.5">
+          <h4 className="text-xs font-medium uppercase tracking-wide text-neutral-500">
+            Job description
+            {job.description_completeness === "snippet" && (
+              <span className="ml-2 font-normal normal-case text-amber-300/80">
+                · snippet only — source did not provide the full text
+              </span>
+            )}
+          </h4>
+          <div className="max-h-80 overflow-y-auto whitespace-pre-wrap rounded-lg border border-neutral-800/70 bg-neutral-900/40 px-3 py-2 text-sm leading-relaxed text-neutral-300">
+            {job.description}
+          </div>
+        </div>
+      )}
+
+      {job.url && (
+        <a
+          href={job.url}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-block text-sm text-neutral-400 underline decoration-neutral-700 underline-offset-4 hover:text-neutral-200"
+        >
+          View posting ↗
+        </a>
       )}
     </div>
   );

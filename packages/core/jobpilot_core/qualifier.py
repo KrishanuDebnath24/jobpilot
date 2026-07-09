@@ -289,11 +289,13 @@ def _resume_block(resume: dict) -> str:
 
 
 def _job_block(job: dict) -> str:
+    # Full description, untruncated — the refine pass must judge the same text the
+    # deterministic pass saw (and the UI shows). Postings are far below model limits.
     return (
         f"Title: {job.get('title') or ''}\n"
         f"Company: {job.get('company') or ''}\n"
         f"Location: {job.get('location') or ''}\n"
-        f"Description: {(job.get('description') or '')[:4000]}"
+        f"Description: {job.get('description') or ''}"
     )
 
 

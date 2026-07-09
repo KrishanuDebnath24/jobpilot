@@ -47,6 +47,7 @@ export type Job = {
   company: string | null;
   location: string | null;
   url: string | null;
+  description: string | null;
   source: string | null;
   source_type: string | null;
   connector: string | null;
