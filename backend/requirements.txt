@@ -29,5 +29,6 @@ opentelemetry-exporter-otlp-proto-http==1.29.0
 # --- Tests / dev ---
 pytest==8.3.4
 pytest-asyncio==0.25.0
+pytest-cov==6.0.0
 httpx==0.28.1
 reportlab==4.2.5

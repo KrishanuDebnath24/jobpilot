@@ -873,3 +873,28 @@ Running log of non-obvious engineering choices. One line + rationale each.
 - **Deps pinned.** Backend `requirements.txt` is fully `==`-pinned (incl. the Phase-8 OTel
   trio); the frontend resolves from the committed lock. `npm audit` runs clean against the
   lock (5 advisories enumerated above, all documented-as-accepted).
+
+### 8h — Test coverage, full E2E, and deploy runbook
+
+- **Full E2E as a deterministic spine (CI-safe, no key/DB/network).** `test_phase8_e2e.py`
+  composes the **real** pipeline functions across the whole flow — onboard → scout
+  (`normalize_raw`) → qualify (`score_deterministic`) → analyze (`aggregate`) →
+  enhance/apply (`apply_suggestions`) → tailor (`validate_tailored`/`enforce_locked`/
+  `drop_fabricated_skills`) → export (`render_pdf` + `pdf_text`, machine-readable) →
+  re-qualify → query (the before/after delta is answerable) — asserting the data contracts
+  hold at every hop. The LLM refinements (Haiku/Sonnet passes) and the persistence layer
+  are the **live + DB** smokes (`test_phase*_live.py`); this spine is what must never break
+  and runs anywhere. Choosing the deterministic spine over a fully-mocked runner E2E avoids
+  brittle multi-agent client fakes while still proving the whole chain composes.
+- **Coverage target: ≥75% on `jobpilot_core` from the deterministic suite** — currently
+  **79%**. The CI-safe number deliberately excludes the LLM-only modules (`tailor.py`,
+  `critic.py`, `resume_parse` binary paths) which are exercised by the key-gated live tests,
+  not the offline run. Gate it in CI with
+  `pytest --cov=jobpilot_core --cov-fail-under=75` (kept out of the default addopts so
+  normal runs stay fast).
+- **Deploy runbook (`RUNBOOK.md`).** Full launch-ready ops guide: the 14-service bring-up
+  order + why (two-worker control/data split, singleton `beat`), env/secrets + secret
+  hygiene, migrations (forward-only in prod), health/readiness gates, an end-to-end smoke,
+  horizontal scaling notes, **backup/restore for Postgres *and* object storage together**
+  (dangling-ref hazard called out), rollback (code-first, schema via backup), and the
+  operational escape hatches (`RATE_LIMIT_ENABLED`/`TRACING_ENABLED`, stale-pipeline reaper).
