@@ -188,6 +188,15 @@ class Settings(BaseSettings):
     # Soft per-user LLM spend alert threshold (USD/day); the cost report flags breaches.
     cost_alert_daily_usd: float = 5.0
 
+    # --- Phase 8c (rate limiting). Per-user limits on the expensive/triggering endpoints
+    #     (fixed-window over Redis); auth login is limited per-IP against brute force.
+    #     Fail-open: a Redis hiccup must never lock a user out. ---
+    rate_limit_enabled: bool = True
+    rate_limit_window_seconds: int = 60
+    rate_limit_trigger_per_min: int = 10   # scout/qualify/analyze/enhance/pipeline/cv.*/embeddings
+    rate_limit_chat_per_min: int = 20      # query/ask + concierge chat (interactive LLM)
+    rate_limit_auth_per_min: int = 10      # login attempts per IP (brute-force guard)
+
     def effective_mcp_secret(self) -> str:
         return self.mcp_shared_secret or self.jwt_secret
 

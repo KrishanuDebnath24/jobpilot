@@ -746,3 +746,28 @@ Running log of non-obvious engineering choices. One line + rationale each.
   `naive` vs actual, the batch/cache-discount confirmation, the daily-threshold alert
   firing on the right day, umbrella/usageless rows contributing zero, and a DB round-trip
   (real `pipeline_runs` output_ref → `get_pipeline_runs` → aggregate). Frontend typechecks.
+
+### 8c — Rate limiting & abuse protection
+
+- **Fixed-window counter over Redis (the broker we already run) — no new dependency.**
+  `backend/app/ratelimit.py` `INCR`s a `rl:{scope}:{identity}:{window}` key and `EXPIRE`s
+  it on first hit; over the limit → **429 with `Retry-After`**. Applied as FastAPI
+  dependencies (`user_rate_limit` / `ip_rate_limit`) so they run *before* the handler and
+  add no work to the request body.
+- **Scoped by cost.** Three classes: **trigger** (10/min/user) on the paid pipeline work —
+  `/scout/run`, `/qualify/run`, `/pipeline/run`, `/pipeline/stage/*`, `/analyze/run`,
+  `/enhance/run`, `/cv/{tailor,export,requalify}`, `/embeddings/backfill`; **chat** (20/min/
+  user) on `/query/ask` + `/chat/**/message`; **auth** (10/min/**IP**) on `/auth/login`
+  against brute force. Limits are read live from settings (getters), so a change needs no
+  re-import.
+- **Fail-open, by design.** A Redis error makes the check **allow** the request (logged) —
+  an outage must never lock legitimate users out. The account-level Console cap, the code
+  caps (crawler/batch/critic/Adzuna/`qualify_max_jobs`), and the DB **one-active-pipeline
+  per user** guard remain as independent backstops, so a runaway loop still can't stack
+  pipeline runs even if rate limiting is degraded.
+- **No PII.** Rate-limit logs carry the scope only (not the identity/content); the Redis
+  key holds a user id or IP, never request data.
+- **Show me / tests.** `test_phase8_ratelimit.py`: the counter throttles the (N+1)th call,
+  per-identity isolation, **fail-open** on a broken Redis, the user dependency raising 429
+  over limit, and an HTTP 429 (with `Retry-After` + a clear message) through a minimal app.
+  Injected fake Redis → deterministic, offline, CI-safe.

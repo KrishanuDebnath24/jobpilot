@@ -23,6 +23,7 @@ from . import mcp_client
 from .auth import get_current_user
 from .config import APP_NAME, VERSION
 from .db import get_db
+from .ratelimit import ip_rate_limit, user_rate_limit
 from .readiness import check_db, check_redis
 
 settings = get_settings()
@@ -44,6 +45,14 @@ async def _startup_observability() -> None:
     Idempotent; a no-op for tracing when the OTel SDK is absent or it's disabled."""
     tracing.configure_logging()
     tracing.init_tracing(settings, service_name="jobpilot-backend")
+
+
+# Phase 8c: rate-limit dependencies. Limits are read live from settings (getters), so a
+# config change takes effect without re-import. Triggers (paid pipeline work) are stricter
+# than interactive chat; auth login is per-IP against brute force.
+_rl_trigger = Depends(user_rate_limit("trigger", lambda: get_settings().rate_limit_trigger_per_min))
+_rl_chat = Depends(user_rate_limit("chat", lambda: get_settings().rate_limit_chat_per_min))
+_rl_auth = Depends(ip_rate_limit("auth", lambda: get_settings().rate_limit_auth_per_min))
 
 
 # --------------------------------------------------------------------------- #
@@ -143,7 +152,7 @@ async def ready(settings: Settings = Depends(get_settings)) -> JSONResponse:
 # --------------------------------------------------------------------------- #
 # Auth
 # --------------------------------------------------------------------------- #
-@app.post("/auth/login", response_model=TokenResponse, tags=["auth"])
+@app.post("/auth/login", response_model=TokenResponse, tags=["auth"], dependencies=[_rl_auth])
 async def login(
     body: LoginRequest,
     settings: Settings = Depends(get_settings),
@@ -231,7 +240,7 @@ async def list_jobs(current_user=Depends(get_current_user)) -> dict:
 # --------------------------------------------------------------------------- #
 # Scout (background job via Celery; run tracking through db-mcp)
 # --------------------------------------------------------------------------- #
-@app.post("/scout/run", tags=["scout"], status_code=status.HTTP_202_ACCEPTED)
+@app.post("/scout/run", tags=["scout"], status_code=status.HTTP_202_ACCEPTED, dependencies=[_rl_trigger])
 async def trigger_scout(current_user=Depends(get_current_user)) -> dict:
     """Queue a Scout run for the current user. Returns immediately with a task id;
     the fan-out executes in the Celery worker and records a pipeline_runs row."""
@@ -249,7 +258,7 @@ async def list_scout_runs(current_user=Depends(get_current_user)) -> dict:
 # --------------------------------------------------------------------------- #
 # Qualifier (background stage; run tracking through db-mcp)
 # --------------------------------------------------------------------------- #
-@app.post("/qualify/run", tags=["qualify"], status_code=status.HTTP_202_ACCEPTED)
+@app.post("/qualify/run", tags=["qualify"], status_code=status.HTTP_202_ACCEPTED, dependencies=[_rl_trigger])
 async def trigger_qualify(
     requalify_all: bool = False, current_user=Depends(get_current_user)
 ) -> dict:
@@ -268,7 +277,7 @@ async def list_qualify_runs(current_user=Depends(get_current_user)) -> dict:
 # --------------------------------------------------------------------------- #
 # Pipeline orchestrator (autonomous Scout→Qualify, through pipeline-mcp)
 # --------------------------------------------------------------------------- #
-@app.post("/pipeline/run", tags=["pipeline"], status_code=status.HTTP_202_ACCEPTED)
+@app.post("/pipeline/run", tags=["pipeline"], status_code=status.HTTP_202_ACCEPTED, dependencies=[_rl_trigger])
 async def run_pipeline(current_user=Depends(get_current_user)) -> dict:
     """Kick off an autonomous Scout→Qualify pipeline. One active run per user; a
     second concurrent trigger is rejected with the active pipeline id."""
@@ -281,7 +290,7 @@ async def pipeline_status(current_user=Depends(get_current_user)) -> dict:
     return await mcp_client.pipeline_mcp(current_user.id, "get_pipeline_status", {})
 
 
-@app.post("/pipeline/stage/{stage}", tags=["pipeline"], status_code=status.HTTP_202_ACCEPTED)
+@app.post("/pipeline/stage/{stage}", tags=["pipeline"], status_code=status.HTTP_202_ACCEPTED, dependencies=[_rl_trigger])
 async def run_stage(stage: str, current_user=Depends(get_current_user)) -> dict:
     """Run a single stage standalone (rejected while a full pipeline is active)."""
     return await mcp_client.pipeline_mcp(current_user.id, "trigger_stage", {"stage": stage})
@@ -338,7 +347,7 @@ async def dashboard_jobs(current_user=Depends(get_current_user)) -> dict:
 # --------------------------------------------------------------------------- #
 # Analyzer + Enhancer (Phase 5) — on-demand, over a scope (selected | all qualified)
 # --------------------------------------------------------------------------- #
-@app.post("/analyze/run", tags=["analyze"], status_code=status.HTTP_202_ACCEPTED)
+@app.post("/analyze/run", tags=["analyze"], status_code=status.HTTP_202_ACCEPTED, dependencies=[_rl_trigger])
 async def trigger_analyze(body: ScopeRequest, current_user=Depends(get_current_user)) -> dict:
     """Queue an Analyze run over the scope: structured extraction (cached sync or the
     Batch API) + deterministic aggregation. Returns a task id."""
@@ -348,7 +357,7 @@ async def trigger_analyze(body: ScopeRequest, current_user=Depends(get_current_u
     return {"task_id": task.id, "status": "queued"}
 
 
-@app.post("/enhance/run", tags=["enhance"], status_code=status.HTTP_202_ACCEPTED)
+@app.post("/enhance/run", tags=["enhance"], status_code=status.HTTP_202_ACCEPTED, dependencies=[_rl_trigger])
 async def trigger_enhance(body: ScopeRequest, current_user=Depends(get_current_user)) -> dict:
     """Queue an Enhance run: grounded, non-fabricating suggestions from the analyses."""
     from .tasks import enhance_run
@@ -408,7 +417,7 @@ async def chat_messages(session_id: str, current_user=Depends(get_current_user))
         current_user.id, "get_messages", {"chat_session_id": session_id})
 
 
-@app.post("/chat/sessions/{session_id}/message", tags=["chat"])
+@app.post("/chat/sessions/{session_id}/message", tags=["chat"], dependencies=[_rl_chat])
 async def post_chat_message(
     session_id: str, body: ChatMessageRequest, current_user=Depends(get_current_user)
 ) -> dict:
@@ -510,7 +519,7 @@ async def _resolve_draft_ids(user_id, body: CvActionRequest) -> list[str]:
     return []
 
 
-@app.post("/cv/tailor", tags=["cv"], status_code=status.HTTP_202_ACCEPTED)
+@app.post("/cv/tailor", tags=["cv"], status_code=status.HTTP_202_ACCEPTED, dependencies=[_rl_trigger])
 async def cv_tailor(body: CvTailorRequest, current_user=Depends(get_current_user)) -> dict:
     """Queue tailoring for the selected jobs (Tailor + Critic, locked-safe). Only the
     user's selected jobs are tailored — never the whole pool."""
@@ -544,7 +553,7 @@ async def cv_reject(body: CvActionRequest, current_user=Depends(get_current_user
         current_user.id, "set_cv_draft_status", {"draft_ids": ids, "status": "rejected"})
 
 
-@app.post("/cv/export", tags=["cv"], status_code=status.HTTP_202_ACCEPTED)
+@app.post("/cv/export", tags=["cv"], status_code=status.HTTP_202_ACCEPTED, dependencies=[_rl_trigger])
 async def cv_export(body: CvIdsRequest, current_user=Depends(get_current_user)) -> dict:
     """Render approved drafts to PDF+DOCX (Irish/ATS-safe). Only approved drafts export."""
     from .tasks import cv_export as task
@@ -553,7 +562,7 @@ async def cv_export(body: CvIdsRequest, current_user=Depends(get_current_user)) 
     return {"task_id": t.id, "status": "queued"}
 
 
-@app.post("/cv/requalify", tags=["cv"], status_code=status.HTTP_202_ACCEPTED)
+@app.post("/cv/requalify", tags=["cv"], status_code=status.HTTP_202_ACCEPTED, dependencies=[_rl_trigger])
 async def cv_requalify(body: CvIdsRequest, current_user=Depends(get_current_user)) -> dict:
     """Re-qualify tailored drafts against their jobs (batched); records after_score."""
     from .tasks import cv_requalify as task
@@ -629,7 +638,7 @@ async def query_messages(session_id: str, current_user=Depends(get_current_user)
         current_user.id, "get_messages", {"chat_session_id": session_id})
 
 
-@app.post("/query/ask", tags=["query"])
+@app.post("/query/ask", tags=["query"], dependencies=[_rl_chat])
 async def query_ask(body: QueryRequest, current_user=Depends(get_current_user)) -> dict:
     """Answer one read-only question — routed to exact/semantic/status tools, grounded
     and cited. Creates a session if none is supplied. The Query agent has NO action
@@ -652,7 +661,7 @@ async def query_ask(body: QueryRequest, current_user=Depends(get_current_user)) 
 # --------------------------------------------------------------------------- #
 # Embeddings (Phase 7) — backfill + coverage. Population is async in the worker.
 # --------------------------------------------------------------------------- #
-@app.post("/embeddings/backfill", tags=["embeddings"], status_code=status.HTTP_202_ACCEPTED)
+@app.post("/embeddings/backfill", tags=["embeddings"], status_code=status.HTTP_202_ACCEPTED, dependencies=[_rl_trigger])
 async def backfill_embeddings(current_user=Depends(get_current_user)) -> dict:
     """Queue an embedding backfill for the current user (all kinds). Idempotent — only
     rows without an embedding are touched."""
