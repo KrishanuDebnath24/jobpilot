@@ -1,8 +1,11 @@
 # ---- deps ----
 FROM node:20-alpine AS deps
 WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+# Phase 8g: npm ci (not install) — reproducible builds from the committed cross-platform
+# lock. The lock is required; an out-of-sync/missing lock FAILS the build (no silent
+# fallback), which is the point of a launch-readiness pin.
+COPY package.json package-lock.json ./
+RUN npm ci
 
 # ---- build ----
 FROM node:20-alpine AS build

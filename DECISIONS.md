@@ -844,3 +844,32 @@ Running log of non-obvious engineering choices. One line + rationale each.
   wipes resumes *and* tailored-CV files together — no separate cleanup path to fall behind.
 - No source change — the erasure path already kept up with each new table/file; 8f is the
   consolidated proof against a fully-populated user (DB + real local storage).
+
+### 8g — Dependency & build hardening
+
+- **Next.js advisories: accepted residual risk, documented (not the Next 16 jump).** The
+  only `npm audit fix` is `next@16.2.10` — a **breaking** major that pulls **React 19**;
+  taking it late in a launch-readiness pass risks more than it fixes, so the account owner
+  **accepts the residual risk** and slots the upgrade as a fast-follow (decision confirmed
+  this phase). Applicability was assessed per advisory class, and **most don't apply to how
+  this app is built**:
+  - `next/image` / Image Optimizer (disk-cache growth, Image API DoS) — **N/A**, we use no
+    `next/image`.
+  - Middleware/proxy redirect cache-poisoning, i18n Pages-Router bypass, rewrite smuggling —
+    **N/A**, no middleware, no i18n, no rewrites/proxy.
+  - CSP-nonce XSS, `beforeInteractive` untrusted-script XSS, WebSocket-upgrade SSRF — **N/A**,
+    none of those features are used.
+  - `postcss` stringify XSS — **build-time only**, never shipped to the client runtime.
+  - **Residual applicable surface:** the React Server Components / App-Router DoS &
+    cache-poisoning class. **Mitigations:** the app is **behind auth**, **client-rendered**
+    (`"use client"`, token in `localStorage`), single-tenant/low-traffic, and serves no
+    untrusted RSC input; it also runs as the Next **standalone** server behind the platform.
+    Accepted until the Next 16 / React 19 upgrade lands.
+- **`npm ci` restored (unconditional).** The frontend Dockerfile now `COPY`s the committed
+  `package-lock.json` and runs **`npm ci`** — no `npm install` fallback — so a missing or
+  out-of-sync lock **fails the build** (reproducible installs from the cross-platform lock,
+  the lesson of the earlier lock-file saga). Verified by a **clean `node:20-alpine` Linux
+  Docker build** (npm ci + `next build`) succeeding end to end.
+- **Deps pinned.** Backend `requirements.txt` is fully `==`-pinned (incl. the Phase-8 OTel
+  trio); the frontend resolves from the committed lock. `npm audit` runs clean against the
+  lock (5 advisories enumerated above, all documented-as-accepted).
