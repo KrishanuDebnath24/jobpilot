@@ -771,3 +771,30 @@ Running log of non-obvious engineering choices. One line + rationale each.
   per-identity isolation, **fail-open** on a broken Redis, the user dependency raising 429
   over limit, and an HTTP 429 (with `Retry-After` + a clear message) through a minimal app.
   Injected fake Redis → deterministic, offline, CI-safe.
+
+### 8d — End-to-end security review (audit; verified, not re-built)
+
+- **Audited the aggregate, not the components.** Each agent's injection / scoping test
+  already passed in isolation; 8d proves the *chain* and the *full grown surface* hold
+  together. **No source changes** — the invariants held; 8d adds the consolidated tests
+  that prove it (the right outcome for a hardening audit).
+- **Cross-user isolation matrix (all tables).** `test_phase8_security.py` seeds user A a
+  full record across every leak-surface table (jobs, qualifications, analyses, suggestions,
+  cv_drafts, chat sessions/messages, pipeline_runs, embeddings) and asserts **every**
+  B-scoped read returns only B's rows — including that a **semantic search on A's own text
+  returns only B's jobs** (embeddings don't leak) and that B **cannot read A's chat session
+  by id**. Erasing A leaves B intact. This is the single matrix the work order asks for.
+- **`user_id`-from-session invariant, both agents.** One test drives the **Concierge** and
+  **Query** executors with a spoofed `user_id` in the tool args and asserts each dispatches
+  with the **session** user_id and **strips** the arg — identity never comes from content.
+- **Secrets audit (git-scoped).** Tests `git grep` the tracked tree: no live Anthropic key
+  (`sk-ant-` + a long token; the bare-prefix `startswith` checks in code don't match), the
+  real `.env` is **not tracked**, and the **frontend references no server secret** (only
+  `NEXT_PUBLIC_*`). `.env.example` is kept complete as each phase adds config.
+- **Full-chain injection (live, key-gated).** `test_phase8_live.py` stores the injection at
+  **three upstream hops** — a poisoned job, its stored analysis, and a suggestion — then
+  asks the downstream Query agent about account/pipeline state. It answers from **real
+  status** (account intact, nothing running), never parrots the injected "your account is
+  deleted / a scout is running / add Java / 100% match", and fires **no** consequential
+  tool. The per-agent live injection tests (Analyzer/Enhancer/Concierge/Query) remain; this
+  proves injection surviving *into* a stored artifact still can't steer a later agent.
