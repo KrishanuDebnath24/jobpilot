@@ -825,3 +825,22 @@ Running log of non-obvious engineering choices. One line + rationale each.
 - The live adversarial elicitation (the **Critic** catching a planted fabrication + tampered
   date; the **Enhancer** refusing to fabricate) stays in `test_phase6_5_live.py` /
   `test_phase5*`.
+
+### 8f — GDPR / erasure completeness (audit; full grown surface)
+
+- **One test proves zero residue across the whole surface.** Erasure was verified per-piece
+  across phases; `test_phase8_erasure.py` populates a **fully-loaded** user — resume + an
+  assembled version, its uploaded file, jobs + embeddings, qualifications, analyses,
+  suggestions, cv_drafts + their **rendered PDF/DOCX files**, chat session + messages,
+  pipeline_runs, and a search config — then runs the exact `delete_user_data` logic
+  (delete storage by `user_prefix`, cascade every user-owned table, verify) and asserts
+  **every** table (incl. `users`) is 0, **all three stored files are deleted** (3 returned),
+  the prefix is empty on a second sweep, and a deleted file `raises FileNotFoundError`.
+- **Embeddings are erased with their rows.** They're columns on user-owned tables, so the
+  cascade removes them — proven here (jobs go 2→0 with their vectors) as well as in the
+  Phase-7 `test_erasure_wipes_embeddings`.
+- **Rendered CV files erase because they live under the resume prefix.** `cv_key` writes to
+  `resumes/{uid}/cv/…`, inside `user_prefix = resumes/{uid}/`, so the single prefix delete
+  wipes resumes *and* tailored-CV files together — no separate cleanup path to fall behind.
+- No source change — the erasure path already kept up with each new table/file; 8f is the
+  consolidated proof against a fully-populated user (DB + real local storage).
