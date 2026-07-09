@@ -5,6 +5,22 @@ export type DimensionScores = {
   location?: number;
 };
 
+// Phase 8b: per-user LLM cost report (estimates from logged run usage).
+export type CostReport = {
+  total_cost_usd: number;
+  total_naive_cost_usd: number;
+  total_savings_usd: number;
+  savings_pct: number;
+  tokens: { input_tokens?: number; output_tokens?: number; cache_read_tokens?: number; cache_write_tokens?: number };
+  by_agent: Record<string, { cost_usd: number; runs: number; input_tokens: number; output_tokens: number }>;
+  by_day: Record<string, number>;
+  batch_discount_active: boolean;
+  cache_discount_active: boolean;
+  daily_threshold_usd: number;
+  alerts: { date: string; cost_usd: number }[];
+  over_threshold: boolean;
+};
+
 export type ReasonsJson = {
   dimension_scores?: DimensionScores;
   weighted_score?: number;

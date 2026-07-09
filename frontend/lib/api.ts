@@ -2,6 +2,7 @@ import type {
   ApplyPreview,
   ChatMessage,
   ChatTurn,
+  CostReport,
   CvDraft,
   CvReport,
   GateConfig,
@@ -232,6 +233,9 @@ export async function downloadCv(draftId: string, fmt: "pdf" | "docx"): Promise<
   a.click();
   URL.revokeObjectURL(url);
 }
+
+// --- Phase 8b: per-user LLM cost report ---
+export const getCostReport = () => request<CostReport>("/cost/report");
 
 // --- Phase 7: Query agent (read-only Q&A over data + work status) ---
 export const createQuerySession = () =>

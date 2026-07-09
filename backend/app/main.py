@@ -669,6 +669,28 @@ async def embeddings_coverage(current_user=Depends(get_current_user)) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Cost report (Phase 8b) — per-user LLM spend from the logged run usage
+# --------------------------------------------------------------------------- #
+@app.get("/cost/report", tags=["cost"])
+async def cost_report(limit: int = 500, current_user=Depends(get_current_user)) -> dict:
+    """Per-user LLM cost: total $, breakdown by agent + by day, token totals, the
+    batch/cache-discount confirmation, and a soft daily-threshold alert. Built from the
+    ``llm_usage`` the runners log onto ``pipeline_runs`` (estimates; billing is
+    authoritative). Read-only, user-scoped via the signed MCP context."""
+    from jobpilot_core import cost
+
+    runs = (await mcp_client.db_mcp(current_user.id, "get_pipeline_runs", {"limit": limit})).get("runs", [])
+    report = cost.aggregate_cost(runs, daily_threshold_usd=settings.cost_alert_daily_usd)
+    if report["over_threshold"]:  # the alert — fires on a threshold breach (no PII, ids/$ only)
+        import logging
+
+        logging.getLogger("jobpilot.cost").warning(
+            "cost.alert user over daily threshold days=%s threshold_usd=%s",
+            [a["date"] for a in report["alerts"]], settings.cost_alert_daily_usd)
+    return report
+
+
+# --------------------------------------------------------------------------- #
 # GDPR erasure (through db-mcp)
 # --------------------------------------------------------------------------- #
 @app.delete("/me/data", tags=["gdpr"])

@@ -11,6 +11,7 @@ import Chat from "./Chat";
 import Ask from "./Ask";
 import Gates from "./Gates";
 import TailoredCVs from "./TailoredCVs";
+import CostPanel from "./CostPanel";
 
 type Decision = "all" | "qualified" | "disqualified" | "unscored";
 
@@ -133,8 +134,9 @@ export default function Dashboard() {
         <Chat onChanged={loadJobs} />
         <Ask />
       </div>
-      <div className="mt-4">
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <Gates onChanged={loadJobs} />
+        <CostPanel />
       </div>
 
       {error && (

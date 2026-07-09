@@ -720,3 +720,29 @@ Running log of non-obvious engineering choices. One line + rationale each.
   string-truncation PII net, error-outcome recording, and the disabled/no-op path. A live
   full-pipeline trace to a real collector is exercisable via `OTEL_EXPORTER_OTLP_ENDPOINT`;
   the in-memory test is the deterministic guarantee.
+
+### 8b — Cost controls & per-user cost view
+
+- **Cost is aggregated from the usage we already log, not a new meter.** Every runner
+  persists its `LLMUsage.as_dict()` (tokens, cache-read/write, `batch`, `estimated_cost_usd`
+  **and** `naive_cost_usd`) into the run summary on `pipeline_runs.output_ref`. `jobpilot_
+  core/cost.py` (pure) rolls those rows into a per-user report: total $, **by agent/stage**
+  and **by day**, token totals, and a `batch_discount_active` / `cache_discount_active`
+  confirmation read straight from the data (so the discounts are *shown* active, not
+  assumed). The umbrella `stage='pipeline'` row is skipped so it never double-counts.
+- **Estimates, clearly labelled.** Costs are the same call-time `LLMUsage` math summed
+  across runs — **billing is authoritative**; `naive_cost_usd` (no cache/no batch) lets the
+  report quantify the batch+cache savings the Phase-5 strategy buys.
+- **Soft daily-threshold alert.** `COST_ALERT_DAILY_USD` (default $5/user/day) — a day whose
+  summed cost exceeds it lands in `alerts` + flips `over_threshold`; `GET /cost/report`
+  logs a `cost.alert` warning (ids/$ only, no PII) on a breach. This backs the account-level
+  Console cap + the code caps (crawler pages, batch size, critic rounds, Adzuna locations,
+  `qualify_max_jobs`) already in place — consolidated, not replaced.
+- **Read-only, user-scoped.** `GET /cost/report` reads the caller's runs via db-mcp
+  `get_pipeline_runs` (signed context) and aggregates; the dashboard's `CostPanel` renders
+  total, savings, a per-agent bar breakdown with run counts, token totals, and the
+  cache/batch/alert badges.
+- **Show me / tests.** `test_phase8_cost.py`: by-agent + by-day breakdown, savings from
+  `naive` vs actual, the batch/cache-discount confirmation, the daily-threshold alert
+  firing on the right day, umbrella/usageless rows contributing zero, and a DB round-trip
+  (real `pipeline_runs` output_ref → `get_pipeline_runs` → aggregate). Frontend typechecks.
