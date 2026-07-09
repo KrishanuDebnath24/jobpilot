@@ -15,7 +15,16 @@ from jobpilot_core.mcp_auth import UserContextMiddleware, require_user_id
 from jobpilot_core.settings import get_settings
 from mcp.server.fastmcp import FastMCP
 
-from .connectors import adzuna, careerjet, crawl, greenhouse, jooble, jsearch
+from .connectors import (
+    adzuna,
+    careerjet,
+    crawl,
+    greenhouse,
+    jooble,
+    jsearch,
+    lever,
+    smartrecruiters,
+)
 from .connectors.base import SOURCES
 
 settings = get_settings()
@@ -61,6 +70,38 @@ async def fetch_greenhouse(
     )
     connector = f"greenhouse:{company.strip().lower()}"
     return {"connector": connector, "count": len(jobs), "jobs": [j.model_dump() for j in jobs]}
+
+
+@mcp.tool()
+async def fetch_lever(
+    company: str,
+    roles: list[str] | None = None,
+    locations: list[str] | None = None,
+    keywords: list[str] | None = None,
+) -> dict:
+    """Lever board for one company -> jobs in the common raw shape (ATS, full text)."""
+    require_user_id()
+    jobs = await lever.fetch_lever(
+        settings, company=company, roles=roles, locations=locations, keywords=keywords
+    )
+    return {"connector": f"lever:{company.strip().lower()}", "count": len(jobs),
+            "jobs": [j.model_dump() for j in jobs]}
+
+
+@mcp.tool()
+async def fetch_smartrecruiters(
+    company: str,
+    roles: list[str] | None = None,
+    locations: list[str] | None = None,
+    keywords: list[str] | None = None,
+) -> dict:
+    """SmartRecruiters postings for one company -> jobs in the common raw shape (ATS)."""
+    require_user_id()
+    jobs = await smartrecruiters.fetch_smartrecruiters(
+        settings, company=company, roles=roles, locations=locations, keywords=keywords
+    )
+    return {"connector": f"smartrecruiters:{company.strip()}", "count": len(jobs),
+            "jobs": [j.model_dump() for j in jobs]}
 
 
 @mcp.tool()
