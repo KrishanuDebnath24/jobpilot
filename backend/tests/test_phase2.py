@@ -99,6 +99,66 @@ def test_dedupe_hash_is_deterministic():
     assert compute_dedupe_hash(*args) == compute_dedupe_hash(*args)
 
 
+# --------------------------------------------------------------------------- #
+# Level 1 cross-source hydration — canonicalize company/title so a snippet job
+# collapses onto its full-text twin (upsert precedence then hydrates the body).
+# --------------------------------------------------------------------------- #
+def test_hydration_company_legal_suffix_collapses():
+    """Same employer spelled with/without a legal suffix or trailing acronym collapses to
+    one dedupe_hash, so a full-text ATS row can overwrite an aggregator snippet."""
+    def h(company):
+        return compute_dedupe_hash(company, "Backend Engineer", "Dublin")
+
+    assert h("Stripe") == h("Stripe, Inc.") == h("Stripe Ltd") == h("Stripe Limited")
+    assert h("Medical Supply Co Ltd (MSC)") == h("Medical Supply Company")  # live-data shape
+    assert h("The Hershey Company") == h("Hershey")  # leading "The" + suffix
+    assert h("Ben & Jerry's") == h("Ben and Jerry's")  # &/and
+
+
+def test_hydration_title_decorations_collapse():
+    """Non-functional title decorations (employment mode, contract type, gender markers,
+    parentheticals) are stripped so the same role from two feeds collapses."""
+    def h(title):
+        return compute_dedupe_hash("Acme", title, "Dublin")
+
+    base = h("Backend Engineer")
+    assert h("Backend Engineer (Remote)") == base
+    assert h("Backend Engineer - Full-time") == base
+    assert h("Backend Engineer, Permanent") == base
+    assert h("Backend Engineer (m/f/d)") == base
+    assert h("Backend Engineer (f/m/x)") == base
+
+
+def test_hydration_false_merge_guards():
+    """Functional qualifiers must NEVER be stripped: distinct roles at the same employer
+    keep distinct hashes (no false merge)."""
+    def h(title):
+        return compute_dedupe_hash("Acme", title, "Dublin")
+
+    # discipline suffix kept -> distinct from each other AND from the bare role
+    assert h("Software Engineer, Frontend") != h("Software Engineer, Backend")
+    assert h("Software Engineer, Frontend") != h("Software Engineer")
+    assert h("Software Engineer (Frontend)") != h("Software Engineer (Backend)")
+    # a real functional segment that merely occupies the trailing slot is kept
+    assert h("Manager, Business Development") != h("Manager, Sales")
+    assert h("Data Engineer") != h("Data Scientist")
+    # hyphenated role words survive (no spaces around the hyphen), stay distinct
+    assert h("Full-Stack Engineer") != h("Backend Engineer")
+    # different companies never collapse
+    assert compute_dedupe_hash("Stripe", "Backend Engineer", "Dublin") != \
+        compute_dedupe_hash("Square", "Backend Engineer", "Dublin")
+
+
+def test_hydration_conservative_boundary_team_suffix_kept():
+    """DELIBERATE boundary: an arbitrary team/product proper-noun suffix is NOT stripped
+    (can't be told apart from ', Frontend' safely), so a ', <team>' aggregator title does
+    NOT collapse onto the bare ATS title. That residual is Level 2's job, not Level 1's."""
+    with_team = compute_dedupe_hash(
+        "State Street", "Senior QA Automation Engineer, Charles River Development", "Dublin")
+    bare = compute_dedupe_hash("State Street", "Senior QA Automation Engineer", "Dublin")
+    assert with_team != bare
+
+
 def test_source_precedence_ordering():
     # Direct sources outrank aggregators: ats > crawl > aggregator(api).
     assert source_rank("ats") > source_rank("crawl") > source_rank("api")
