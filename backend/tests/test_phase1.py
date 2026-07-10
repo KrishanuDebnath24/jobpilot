@@ -31,6 +31,9 @@ RESUME_LINES = [
     "- Built data pipelines",
     "Education",
     "BSc Computer Science, Trinity College Dublin",
+    "Certifications",
+    "AWS Certified Solutions Architect - Associate",
+    "Certified Kubernetes Administrator",
 ]
 
 
@@ -131,6 +134,7 @@ async def test_resume_pdf_and_docx(mcp_services):
         assert pdf["stored"] is True
         assert "Python" in pdf["structured"]["skills"]
         assert pdf["structured"]["contact"]["email"] == "jane.doe@example.com"
+        assert "Certified Kubernetes Administrator" in pdf["structured"]["certifications"]
 
         DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         dx = _data(await _call(mcp_services["resume"], _tok(uid), "parse_resume",

@@ -36,6 +36,7 @@ class StructuredResume(BaseModel):
     skills: list[str] = Field(default_factory=list)
     experience: list[ExperienceItem] = Field(default_factory=list)
     education: list[EducationItem] = Field(default_factory=list)
+    certifications: list[str] = Field(default_factory=list)
 
 
 class JobIn(BaseModel):

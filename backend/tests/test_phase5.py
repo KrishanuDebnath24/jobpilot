@@ -58,9 +58,11 @@ async def _call(url, uid, tool, args=None):
 def test_aggregate_counts_frequencies_deterministically():
     analyses = [
         {"required_skills": ["Python", "Kubernetes"], "keywords": ["api"],
-         "seniority": "senior", "tech_stack": ["AWS"], "gaps_vs_resume": ["no k8s"]},
+         "seniority": "senior", "tech_stack": ["AWS"], "gaps_vs_resume": ["no k8s"],
+         "required_certifications": ["AWS Certified Solutions Architect"]},
         {"required_skills": ["python", "Go"], "keywords": ["API"],
-         "seniority": "Senior", "tech_stack": ["aws"], "gaps_vs_resume": ["no k8s"]},
+         "seniority": "Senior", "tech_stack": ["aws"], "gaps_vs_resume": ["no k8s"],
+         "required_certifications": ["aws certified solutions architect"]},
         {"required_skills": ["Python"], "keywords": [],
          "seniority": "mid", "tech_stack": [], "gaps_vs_resume": []},
     ]
@@ -70,6 +72,9 @@ def test_aggregate_counts_frequencies_deterministically():
     # normalized: Python in all 3 -> 100%; Kubernetes/Go each in 1 -> 33.3%
     assert freq["Python"] == 100.0
     assert freq["Kubernetes"] == 33.3
+    # certifications normalized (case-insensitive) -> AWS cert in 2/3 jobs -> 66.7%
+    certs = {r["label"]: r["pct"] for r in agg["certification_frequency"]}
+    assert certs["AWS Certified Solutions Architect"] == 66.7
     # recurring gap present in 2/3 jobs -> 66.7%
     gaps = {r["label"]: r["pct"] for r in agg["recurring_gaps"]}
     assert gaps["no k8s"] == 66.7

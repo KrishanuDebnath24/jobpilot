@@ -79,6 +79,7 @@ export type Aggregate = {
   skill_frequency?: AggregateRow[];
   common_keywords?: AggregateRow[];
   tech_stack_frequency?: AggregateRow[];
+  certification_frequency?: AggregateRow[];
   seniority_distribution?: AggregateRow[];
   recurring_gaps?: AggregateRow[];
 };

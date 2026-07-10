@@ -26,6 +26,7 @@ _SECTIONS = {
     "skills": ("skills", "technical skills", "core skills", "technologies"),
     "experience": ("experience", "work experience", "employment", "professional experience"),
     "education": ("education", "academic background", "qualifications"),
+    "certifications": ("certifications", "certification", "certificates", "licenses", "licenses & certifications", "licenses and certifications"),
 }
 
 
@@ -139,11 +140,21 @@ def to_structured(raw_text: str) -> StructuredResume:
         if ln.strip()
     ]
 
+    # One credential per line (bullets stripped); keep whole names intact so a comma
+    # inside a cert title, e.g. "AWS Certified Solutions Architect, Associate", survives.
+    certifications: list[str] = []
+    for ln in sections.get("certifications", []):
+        cert = _BULLET_RE.sub("", ln).strip(" .-")
+        if cert:
+            certifications.append(cert)
+    certifications = list(dict.fromkeys(certifications))
+
     return StructuredResume(
         contact=contact,
         skills=skills,
         experience=experience,
         education=education,
+        certifications=certifications,
     )
 
 

@@ -113,6 +113,12 @@ function SuggestionCard({
             <p className="mb-1.5 text-xs uppercase tracking-wide text-neutral-500">Most-required skills</p>
             <Bar rows={agg.skill_frequency} />
           </div>
+          {agg.certification_frequency && agg.certification_frequency.length > 0 && (
+            <div className="sm:col-span-2">
+              <p className="mb-1.5 text-xs uppercase tracking-wide text-neutral-500">Certifications requested</p>
+              <Bar rows={agg.certification_frequency} />
+            </div>
+          )}
         </div>
       )}
 

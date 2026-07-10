@@ -41,6 +41,12 @@ _SCHEMA = {
             "type": "array", "items": {"type": "string"},
             "description": "Frameworks/tools/platforms named in the posting",
         },
+        "required_certifications": {
+            "type": "array", "items": {"type": "string"},
+            "description": "Professional certifications or licenses the posting names "
+            "as required or preferred (e.g. 'AWS Certified Solutions Architect', "
+            "'CISSP', 'PMP', 'RN license'). Empty if the posting names none.",
+        },
         "gaps_vs_resume": {
             "type": "array", "items": {"type": "string"},
             "description": "Concrete gaps: something the job asks for that the resume "
@@ -48,15 +54,18 @@ _SCHEMA = {
             "Kubernetes; resume shows only Docker').",
         },
     },
-    "required": ["required_skills", "keywords", "seniority", "tech_stack", "gaps_vs_resume"],
+    "required": ["required_skills", "keywords", "seniority", "tech_stack",
+                 "required_certifications", "gaps_vs_resume"],
     "additionalProperties": False,
 }
 
 _RUBRIC = (
     "Extract only what the posting actually states; do not invent requirements. Ground "
     "every gap in a concrete comparison of THIS job against the candidate resume above. "
-    "Normalize skills to common names (e.g. 'k8s' -> 'Kubernetes'). This is factual "
-    "extraction, not advice."
+    "Normalize skills to common names (e.g. 'k8s' -> 'Kubernetes'). Capture named "
+    "certifications/licenses under required_certifications, and if the posting requires "
+    "one the resume's certifications don't evidence, record it as a gap too. This is "
+    "factual extraction, not advice."
 )
 
 _SYSTEM = (
@@ -82,6 +91,9 @@ def _resume_block(resume: dict) -> str:
     for edu in (resume.get("education") or [])[:3]:
         if edu.get("text"):
             lines.append("Education: " + str(edu["text"])[:200])
+    if resume.get("certifications"):
+        lines.append("Certifications: " + ", ".join(
+            str(c)[:120] for c in resume["certifications"][:30]))
     return "\n".join(lines) or "(no structured resume content)"
 
 
@@ -199,6 +211,8 @@ def aggregate(analyses: list[dict]) -> dict:
         "skill_frequency": _freq([a.get("required_skills") or [] for a in full], n),
         "common_keywords": _freq([a.get("keywords") or [] for a in full], n),
         "tech_stack_frequency": _freq([a.get("tech_stack") or [] for a in full], n),
+        "certification_frequency": _freq(
+            [a.get("required_certifications") or [] for a in full], n),
         "seniority_distribution": [
             {"label": k, "count": v, "pct": round(100 * v / n, 1) if n else 0.0}
             for k, v in seniority.most_common()
