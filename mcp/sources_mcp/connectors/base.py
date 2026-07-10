@@ -52,6 +52,11 @@ SOURCES: list[dict] = [
         "description": "Careerjet aggregator — Ireland site via en_IE locale (default on).",
     },
     {
+        "name": "muse",
+        "source_type": "api",
+        "description": "The Muse public jobs API — free, full-text, genuine Dublin coverage.",
+    },
+    {
         "name": "jsearch",
         "source_type": "api",
         "description": "JSearch/Google-for-Jobs (Indeed/LinkedIn reach) — metered, default OFF.",

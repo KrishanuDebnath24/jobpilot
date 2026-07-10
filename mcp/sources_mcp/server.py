@@ -15,7 +15,7 @@ from jobpilot_core.mcp_auth import UserContextMiddleware, require_user_id
 from jobpilot_core.settings import get_settings
 from mcp.server.fastmcp import FastMCP
 
-from .connectors import adzuna, careerjet, crawl, greenhouse, jooble, jsearch
+from .connectors import adzuna, careerjet, crawl, greenhouse, jooble, jsearch, themuse
 from .connectors.base import SOURCES
 
 settings = get_settings()
@@ -100,6 +100,18 @@ async def search_jsearch(
         settings, roles=roles, keywords=keywords, location=location, num_pages=num_pages
     )
     return {"connector": "jsearch", "count": len(jobs), "jobs": [j.model_dump() for j in jobs]}
+
+
+@mcp.tool()
+async def search_muse(
+    roles: list[str] | None = None,
+    keywords: list[str] | None = None,
+    location: str = "Dublin, Ireland",
+) -> dict:
+    """The Muse public jobs API (free, full-text) -> common raw shape."""
+    require_user_id()
+    jobs = await themuse.search_muse(settings, roles=roles, keywords=keywords, location=location)
+    return {"connector": "muse", "count": len(jobs), "jobs": [j.model_dump() for j in jobs]}
 
 
 @mcp.tool()

@@ -240,6 +240,48 @@ def test_crawler_jsonld_absent_returns_none():
 
 
 # --------------------------------------------------------------------------- #
+# Pure unit — The Muse mapping + client-side city/term filter (no network)
+# --------------------------------------------------------------------------- #
+def test_muse_to_raw_full_text():
+    from sources_mcp.connectors.themuse import _to_raw
+
+    job = {
+        "id": 42,
+        "name": "Senior Software Engineer",
+        "company": {"name": "Acme"},
+        "locations": [{"name": "Dublin, Ireland"}],
+        "contents": "<p>Build <b>APIs</b> in Python.</p>",
+        "refs": {"landing_page": "https://www.themuse.com/jobs/acme/senior-swe"},
+        "categories": [{"name": "Software Engineering"}],
+    }
+    raw = _to_raw(job)
+    assert raw.title == "Senior Software Engineer" and raw.company == "Acme"
+    assert raw.location == "Dublin, Ireland"
+    assert raw.description == "Build APIs in Python."
+    assert raw.description_completeness == "full"  # The Muse serves full bodies
+    assert raw.source_type == "api" and raw.url.endswith("senior-swe")
+
+
+def test_muse_city_filter_drops_remote_leak():
+    from sources_mcp.connectors.themuse import _city_match
+
+    # The Muse's loose location filter leaks Flexible/Remote into a city query.
+    assert _city_match("Dublin, Ireland", "dublin") is True
+    assert _city_match("Flexible / Remote", "dublin") is False
+    assert _city_match("Cork, Ireland", "dublin") is False
+    assert _city_match("anything", "") is True  # no city -> keep all
+
+
+def test_muse_derive_categories_from_profile():
+    from sources_mcp.connectors.themuse import _derive_categories
+
+    cats = _derive_categories(["Senior Software Engineer"], ["Python", "Data", "AWS"])
+    assert "Software Engineering" in cats and "Data and Analytics" in cats
+    # Unmapped role -> no category (falls back to a broad city query).
+    assert _derive_categories(["Barista"], []) == []
+
+
+# --------------------------------------------------------------------------- #
 # Pure unit — profile-aware search term derivation (Step 1; no network/LLM)
 # --------------------------------------------------------------------------- #
 def test_derive_search_terms_from_resume():

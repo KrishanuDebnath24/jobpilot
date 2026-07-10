@@ -139,6 +139,15 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
                 raw_jobs, by_connector, errors, usage,
             )
 
+    # The Muse (free, full-text) filters its results client-side rather than by a
+    # free-text query, so it gets the full role+keyword set (not just the primary role).
+    if "muse" in sources:
+        await _run_connector(
+            user_id, "muse", "search_muse",
+            {"roles": roles, "keywords": keywords, "location": roi_location},
+            raw_jobs, by_connector, errors, usage,
+        )
+
     if "crawl" in sources:
         await _run_connector(
             user_id, "crawl", "run_crawl",

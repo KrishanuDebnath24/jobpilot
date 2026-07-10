@@ -130,6 +130,11 @@ class Settings(BaseSettings):
     jsearch_date_posted: str = "all"
     aggregator_results_per_page: int = 50  # cap per aggregator call
 
+    # --- The Muse (free public jobs API; a key is optional and only raises rate
+    #     limits). Full-text, has genuine Dublin coverage. Backend/sources-mcp env. ---
+    muse_api_key: str = ""
+    muse_max_pages: int = 3  # pages fetched per run (20 results/page); bounds requests
+
     # --- Scout retrieval tuning ---
     # Derive search terms (roles/keywords/locations) from the user's resume and merge
     # them with the configured search terms, so scouting matches the user's profile.
