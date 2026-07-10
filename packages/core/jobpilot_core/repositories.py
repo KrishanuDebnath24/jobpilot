@@ -145,6 +145,40 @@ async def upsert_jobs(
     return saved
 
 
+async def hydrate_snippet_jobs(session: AsyncSession, user_id: uuid.UUID) -> dict:
+    """Level 2 cross-source hydration: give a ``snippet`` job the full-text body of a
+    ``full``/``hydrated`` job that is confidently the same posting (same employer +
+    location + role), when Level 1's dedupe hash didn't already collapse them. Copies
+    the description and flips ``description_completeness`` to ``hydrated``; it never
+    merges or deletes rows, and only ever touches snippet rows. Deterministic (no LLM);
+    the confident-match rule lives in :func:`scout.plan_hydration`. Returns
+    ``{"hydrated": n, "details": [...]}``."""
+    from .scout import plan_hydration
+
+    rows = (
+        await session.execute(select(models.Job).where(models.Job.user_id == user_id))
+    ).scalars().all()
+    by_id = {str(r.id): r for r in rows}
+    jobs = [
+        {
+            "id": str(r.id), "company": r.company, "title": r.title, "location": r.location,
+            "description": r.description, "description_completeness": r.description_completeness,
+        }
+        for r in rows
+    ]
+    details: list[dict] = []
+    for plan in plan_hydration(jobs):
+        row = by_id.get(plan["snippet_id"])
+        if row is None or row.description_completeness != "snippet":
+            continue  # guard: only ever hydrate a still-snippet row
+        row.description = plan["description"]
+        row.description_completeness = "hydrated"
+        details.append({"job_id": plan["snippet_id"], "source_id": plan["source_id"]})
+    if details:
+        await session.flush()
+    return {"hydrated": len(details), "details": details}
+
+
 async def get_jobs(
     session: AsyncSession,
     user_id: uuid.UUID,

@@ -16,10 +16,12 @@ import uuid
 from jobpilot_core import repositories
 from jobpilot_core.db import session_scope
 from jobpilot_core.scout import (
+    _confident_same_role,
     canonicalize_url,
     completeness_rank,
     compute_dedupe_hash,
     normalize_raw,
+    plan_hydration,
     record_precedence,
     source_rank,
     unique_contribution,
@@ -159,6 +161,75 @@ def test_hydration_conservative_boundary_team_suffix_kept():
     assert with_team != bare
 
 
+# --------------------------------------------------------------------------- #
+# Level 2 cross-source hydration — plan_hydration: borrow a full body for a snippet
+# that is confidently the SAME posting, but ONLY when extremely sure.
+# --------------------------------------------------------------------------- #
+def _snip(id, title, company="State Street", location="Dublin", desc="teaser"):
+    return {"id": id, "title": title, "company": company, "location": location,
+            "description": desc, "description_completeness": "snippet"}
+
+
+def _full(id, title, company="State Street", location="Dublin", desc="X" * 2000):
+    return {"id": id, "title": title, "company": company, "location": location,
+            "description": desc, "description_completeness": "full"}
+
+
+def test_confident_same_role_rule():
+    # team/product suffix -> same role; discipline/seniority diff or 1-token -> not.
+    assert _confident_same_role("Senior QA Engineer", "Senior QA Engineer, Charles River Dev")
+    assert _confident_same_role("Backend Engineer", "Backend Engineer, Payments Team")
+    assert not _confident_same_role("Software Engineer", "Software Engineer, Frontend")
+    assert not _confident_same_role("Engineer", "Engineer, Platform")   # 1-token subset
+    assert not _confident_same_role("Backend Engineer", "Senior Backend Engineer")  # seniority
+    assert not _confident_same_role("Data Engineer", "Data Scientist")  # not containment
+
+
+def test_hydration_pass_borrows_full_text_for_confident_twin():
+    """The live State-Street shape: a ', <team>' snippet borrows the bare full-text
+    twin's body and would be marked hydrated."""
+    jobs = [
+        _snip("s1", "Senior QA Automation Engineer, Charles River Development"),
+        _full("f1", "Senior QA Automation Engineer", desc="Full JD " + "y" * 3000),
+    ]
+    plans = plan_hydration(jobs)
+    assert len(plans) == 1
+    assert plans[0]["snippet_id"] == "s1" and plans[0]["source_id"] == "f1"
+    assert plans[0]["description"].startswith("Full JD")
+
+
+def test_hydration_pass_refuses_discipline_and_generic():
+    # discipline difference -> refuse; generic 1-token snippet -> refuse.
+    assert plan_hydration([_snip("s", "Software Engineer"),
+                           _full("f", "Software Engineer, Frontend")]) == []
+    assert plan_hydration([_snip("s", "Engineer"),
+                           _full("f", "Engineer, Platform")]) == []
+
+
+def test_hydration_pass_refuses_when_ambiguous():
+    """Two full candidates that both look same-role (different teams) => ambiguous =>
+    refuse, because we cannot be extremely sure which posting the snippet is."""
+    jobs = [
+        _snip("s", "Senior Backend Engineer"),
+        _full("f1", "Senior Backend Engineer, Payments"),
+        _full("f2", "Senior Backend Engineer, Billing"),
+    ]
+    assert plan_hydration(jobs) == []
+
+
+def test_hydration_pass_requires_company_and_location_anchor():
+    # different location -> no anchor match; missing company -> refuse outright.
+    assert plan_hydration([_snip("s", "Backend Engineer", location="Cork"),
+                           _full("f", "Backend Engineer, Payments", location="Dublin")]) == []
+    assert plan_hydration([_snip("s", "Backend Engineer", company=""),
+                           _full("f", "Backend Engineer, Payments")]) == []
+
+
+def test_hydration_pass_refuses_different_company():
+    assert plan_hydration([_snip("s", "Backend Engineer", company="Stripe"),
+                           _full("f", "Backend Engineer, Payments", company="Square")]) == []
+
+
 def test_source_precedence_ordering():
     # Direct sources outrank aggregators: ats > crawl > aggregator(api).
     assert source_rank("ats") > source_rank("crawl") > source_rank("api")
@@ -172,6 +243,11 @@ def test_completeness_tiebreaker_precedence():
     assert record_precedence("api", "full") > record_precedence("api", "snippet")
     # Tier dominates: an ATS snippet still outranks a full-text aggregator.
     assert record_precedence("ats", "snippet") > record_precedence("api", "full")
+    # `hydrated` sits between snippet and full: a re-scraped snippet cannot clobber a
+    # hydrated row, but genuine full text still upgrades it.
+    assert completeness_rank("full") > completeness_rank("hydrated") > completeness_rank("snippet")
+    assert record_precedence("api", "hydrated") > record_precedence("api", "snippet")
+    assert record_precedence("api", "full") > record_precedence("api", "hydrated")
 
 
 def test_unique_contribution_counts_source_only_jobs():
@@ -212,6 +288,47 @@ async def test_source_precedence_direct_beats_aggregator(mcp_services):
         await _call(db, uid, "upsert_jobs", {"jobs": [job("careerjet", "api", "https://careerjet/z")]})
         rows = (await _call(db, uid, "get_jobs", {"limit": 100}))["jobs"]
         assert len(rows) == 1 and rows[0]["source_type"] == "ats" and "greenhouse.io" in rows[0]["url"]
+    finally:
+        await _cleanup(uid)
+
+
+async def test_hydrate_snippet_jobs_end_to_end(mcp_services):
+    """Level 2 via db-mcp: a snippet whose title carries a team suffix (so it did NOT
+    collapse in Level 1) borrows the full-text twin's body and is marked 'hydrated',
+    while a same-employer role with a discipline difference is left untouched."""
+    db = mcp_services["db"]
+
+    def job(connector, source_type, title, completeness, desc, url):
+        return normalize_raw({"connector": connector, "source": connector,
+                              "source_type": source_type, "company": "State Street",
+                              "title": title, "location": "Dublin", "description": desc,
+                              "description_completeness": completeness, "url": url}).model_dump()
+
+    uid = await _mk_user()
+    try:
+        await _call(db, uid, "upsert_jobs", {"jobs": [
+            # confident twin: team-suffixed snippet + bare full-text ATS row
+            job("careerjet", "api", "Senior QA Automation Engineer, Charles River Development",
+                "snippet", "teaser", "https://careerjet/a"),
+            job("greenhouse:statestreet", "ats", "Senior QA Automation Engineer",
+                "full", "FULL BODY " + "z" * 2000, "https://boards.greenhouse.io/ss/b"),
+            # discipline difference at same employer -> must stay snippet
+            job("careerjet", "api", "Software Engineer", "snippet", "teaser", "https://careerjet/c"),
+            job("greenhouse:statestreet", "ats", "Software Engineer, Frontend",
+                "full", "FE BODY " + "q" * 2000, "https://boards.greenhouse.io/ss/d"),
+        ]})
+        res = await _call(db, uid, "hydrate_snippet_jobs", {})
+        assert res["hydrated"] == 1, res
+
+        rows = {r["title"]: r for r in (await _call(db, uid, "get_jobs", {"limit": 100}))["jobs"]}
+        twin = rows["Senior QA Automation Engineer, Charles River Development"]
+        assert twin["description_completeness"] == "hydrated"
+        assert twin["description"].startswith("FULL BODY")
+        # the discipline-different snippet was NOT hydrated
+        se = rows["Software Engineer"]
+        assert se["description_completeness"] == "snippet" and se["description"] == "teaser"
+        # idempotent: a second pass hydrates nothing new
+        assert (await _call(db, uid, "hydrate_snippet_jobs", {}))["hydrated"] == 0
     finally:
         await _cleanup(uid)
 

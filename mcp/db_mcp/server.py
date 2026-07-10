@@ -56,6 +56,15 @@ async def upsert_jobs(jobs: list[dict]) -> dict:
 
 
 @mcp.tool()
+async def hydrate_snippet_jobs() -> dict:
+    """Level 2 cross-source hydration: borrow a full-text body for snippet jobs that are
+    confidently the same posting as a full/hydrated job (see repositories)."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        return await repositories.hydrate_snippet_jobs(session, uid)
+
+
+@mcp.tool()
 async def search_jobs(query: str, limit: int = 20) -> dict:
     """Phase-1 keyword fallback (semantic embedding search lands in Phase 3)."""
     uid = require_user_id()

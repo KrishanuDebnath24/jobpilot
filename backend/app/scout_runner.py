@@ -183,6 +183,18 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
     unique_by_connector = unique_contribution(raw_jobs, [n["dedupe_hash"] for n in normalized])
     if normalized:
         await mcp_client.db_mcp(user_id, "upsert_jobs", {"jobs": normalized})
+    # Level 2 cross-source hydration: snippet jobs that are confidently the same posting
+    # as a full-text job (but escaped Level 1's hash collapse) borrow that full body and
+    # are marked 'hydrated'. Deterministic, no LLM; never merges/deletes rows.
+    hydrated = 0
+    if normalized:
+        try:
+            res = await mcp_client.db_mcp(user_id, "hydrate_snippet_jobs", {})
+            hydrated = res.get("hydrated", 0)
+            if hydrated:
+                logger.info("scout.hydrate hydrated=%d snippet job(s) from full-text twins", hydrated)
+        except Exception as exc:  # noqa: BLE001 - hydration is best-effort, never fatal
+            logger.warning("scout.hydrate failed (non-fatal): %s", exc)
     after = await _count_jobs(user_id)
 
     summary = {
@@ -190,6 +202,7 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
         "unique": len(unique_hashes),
         "new": after - before,
         "deduped": len(raw_jobs) - len(unique_hashes),
+        "hydrated": hydrated,
         "by_connector": by_connector,
         "unique_by_connector": unique_by_connector,
         "errors": errors,

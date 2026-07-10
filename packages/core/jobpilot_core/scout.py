@@ -31,7 +31,10 @@ _SOURCE_RANK = {"ats": 3, "crawl": 2, "api": 1, "seed": 0}
 # against full text (e.g. JSearch full-text vs a Jooble snippet, both source_type
 # 'api'). This is the *secondary* precedence key: source tier decides first, then
 # completeness. Snippets only ever add coverage; they never overwrite full text.
-_COMPLETENESS_RANK = {"full": 1, "snippet": 0}
+# `hydrated` (Level 2 borrowed full text) sits between: it outranks a snippet — so a
+# re-scraped teaser can't clobber a job we already hydrated — but genuine full text
+# still upgrades it.
+_COMPLETENESS_RANK = {"full": 2, "hydrated": 1, "snippet": 0}
 
 
 def source_rank(source_type: str | None) -> int:
@@ -251,3 +254,98 @@ def unique_contribution(
             (only,) = tuple(connectors)
             out[only] = out.get(only, 0) + 1
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Cross-source hydration (Level 2): borrow a full-text body for a `snippet` job that is
+# the SAME posting as a `full`/`hydrated` job which Level 1's hash did NOT collapse
+# (e.g. an aggregator title carries a team suffix the ATS title lacks). Unlike Level 1
+# this does NOT merge rows — it copies the description onto the snippet and marks it
+# `hydrated`. Deterministic, no LLM. Tuned to "only if extremely sure": a confident
+# same-role rule + hard anchors (same canonical company AND coarse location) + a
+# uniqueness guard (refuse if more than one full candidate could match).
+# --------------------------------------------------------------------------- #
+
+# Tokens that CHANGE a role's discipline or level. If the token-set *difference* between
+# two titles contains any of these, they are different roles and we refuse to hydrate —
+# this is the safety core. (Shared functional tokens are fine; only the diff is judged.)
+_FUNCTIONAL_TOKENS = {
+    # disciplines / stacks
+    "frontend", "front-end", "backend", "back-end", "fullstack", "full-stack",
+    "mobile", "ios", "android", "web", "cloud", "data", "database", "analytics",
+    "ml", "ai", "nlp", "security", "infosec", "platform", "infrastructure", "infra",
+    "devops", "sre", "reliability", "qa", "quality", "test", "testing", "automation",
+    "embedded", "firmware", "systems", "network", "networking", "hardware", "software",
+    # functions
+    "sales", "marketing", "finance", "hr", "legal", "design", "product", "research",
+    "support", "operations", "ops", "growth", "recruiting", "people", "accounting",
+    # languages / frameworks
+    "python", "java", "javascript", "typescript", "golang", "go", "rust", "ruby",
+    "scala", "kotlin", "swift", "php", "node", "react", "angular", "vue", "dotnet",
+    "sql", "cpp",
+    # seniority / level
+    "intern", "internship", "graduate", "junior", "jr", "mid", "senior", "sr",
+    "staff", "principal", "lead", "manager", "director", "head", "vp", "chief",
+    "associate", "apprentice",
+}
+
+
+def _title_tokens(title: str | None) -> set[str]:
+    return {t for t in re.split(r"[\s,]+", _canon_title(title)) if t}
+
+
+def _confident_same_role(title_a: str | None, title_b: str | None) -> bool:
+    """True only when two titles are confidently the SAME role: after Level 1
+    canonicalization, one title's token set contains the other's, the smaller has at
+    least two tokens (a one-token title like "engineer" is too generic to be sure), and
+    every EXTRA token in the larger is non-functional (a team/product name — not a
+    discipline, stack, function, or seniority word). Any functional or seniority
+    difference => treated as a different role => not a match."""
+    ta, tb = _title_tokens(title_a), _title_tokens(title_b)
+    if not ta or not tb:
+        return False
+    smaller, larger = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
+    if len(smaller) < 2 or not smaller <= larger:
+        return False
+    return not (larger - smaller) & _FUNCTIONAL_TOKENS
+
+
+def plan_hydration(jobs: list[dict]) -> list[dict]:
+    """Plan Level 2 hydration over one user's jobs (deterministic, no LLM).
+
+    For each ``snippet`` job, find ``full``/``hydrated`` jobs that are confidently the
+    same posting — same canonical company AND same coarse location AND
+    :func:`_confident_same_role` title — and, only when EXACTLY ONE such candidate
+    exists (more than one is ambiguous → refuse), plan to copy its description onto the
+    snippet. Returns ``[{"snippet_id", "source_id", "description"}]``. Refuses on any
+    missing company/location anchor, so it never guesses. Each job dict needs ``id``,
+    ``company``, ``title``, ``location``, ``description``, ``description_completeness``."""
+    fulls = [
+        j for j in jobs
+        if j.get("description_completeness") in ("full", "hydrated")
+        and (j.get("description") or "").strip()
+    ]
+    plans: list[dict] = []
+    for s in jobs:
+        if s.get("description_completeness") != "snippet":
+            continue
+        company, loc = _canon_company(s.get("company")), _coarse_location(s.get("location"))
+        if not company or not loc:
+            continue  # both anchors required — never hydrate without them
+        current = (s.get("description") or "").strip()
+        candidates = [
+            f for f in fulls
+            if f.get("id") != s.get("id")
+            and _canon_company(f.get("company")) == company
+            and _coarse_location(f.get("location")) == loc
+            and _confident_same_role(s.get("title"), f.get("title"))
+            and len((f.get("description") or "").strip()) > len(current)
+        ]
+        if len(candidates) != 1:
+            continue  # 0 → nothing to borrow; >1 → ambiguous → refuse (extremely sure)
+        src = candidates[0]
+        plans.append({
+            "snippet_id": s["id"], "source_id": src["id"],
+            "description": (src.get("description") or "").strip(),
+        })
+    return plans

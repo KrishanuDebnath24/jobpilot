@@ -51,7 +51,7 @@ export type Job = {
   source: string | null;
   source_type: string | null;
   connector: string | null;
-  // Addendum 2.2: full | snippet.
+  // Addendum 2.2: full | snippet | hydrated (Level 2 borrowed a full-text twin's body).
   description_completeness?: string | null;
   dedupe_hash: string | null;
   status: string;
