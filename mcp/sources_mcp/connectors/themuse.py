@@ -59,6 +59,14 @@ def _derive_categories(roles: list[str] | None, keywords: list[str] | None) -> l
     return cats
 
 
+def _normalize_location(location: str | None) -> str:
+    """The Muse's location facet is "City, Country"; a bare city ("Dublin") doesn't
+    match and returns global results. The app targets the Republic of Ireland, so
+    complete a country-less location to Ireland before querying."""
+    loc = (location or "").strip()
+    return f"{loc}, Ireland" if loc and "," not in loc else loc
+
+
 def _locations(job: dict) -> str:
     return ", ".join(loc.get("name", "") for loc in job.get("locations") or [] if loc.get("name"))
 
@@ -104,7 +112,8 @@ async def search_muse(
     """Fetch The Muse jobs for a location, filtered to the requested city and (when the
     profile implies them) relevant categories. Returns the common raw shape, paginated
     up to ``muse_max_pages``."""
-    city = (location or "").split(",")[0].strip().lower()
+    location = _normalize_location(location)
+    city = location.split(",")[0].strip().lower()
     categories = _derive_categories(roles, keywords)
     pages = min(max_pages or settings.muse_max_pages, settings.muse_max_pages)
     base_params: dict = {"location": location}

@@ -281,6 +281,17 @@ def test_muse_derive_categories_from_profile():
     assert _derive_categories(["Barista"], []) == []
 
 
+def test_muse_normalize_location_completes_country():
+    from sources_mcp.connectors.themuse import _normalize_location
+
+    # A bare city gets the RoI country so it matches The Muse's "City, Country" facet.
+    assert _normalize_location("Dublin") == "Dublin, Ireland"
+    assert _normalize_location("Cork") == "Cork, Ireland"
+    # An already-qualified location is left as-is.
+    assert _normalize_location("Dublin, Ireland") == "Dublin, Ireland"
+    assert _normalize_location("") == ""
+
+
 # --------------------------------------------------------------------------- #
 # Pure unit — profile-aware search term derivation (Step 1; no network/LLM)
 # --------------------------------------------------------------------------- #
