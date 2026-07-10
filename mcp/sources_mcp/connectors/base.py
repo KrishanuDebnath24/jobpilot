@@ -37,16 +37,6 @@ SOURCES: list[dict] = [
         "description": "Greenhouse public boards API, per target employer.",
     },
     {
-        "name": "lever",
-        "source_type": "ats",
-        "description": "Lever public postings API, per company (full descriptions, no key).",
-    },
-    {
-        "name": "smartrecruiters",
-        "source_type": "ats",
-        "description": "SmartRecruiters public Posting API, per company (list + full jobAd, no key).",
-    },
-    {
         "name": "crawl",
         "source_type": "crawl",
         "description": "Polite single-board crawler (robots + rate limit); reads each posting's full description from schema.org JSON-LD.",

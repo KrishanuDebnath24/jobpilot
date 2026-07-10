@@ -298,67 +298,14 @@ def test_extract_greenhouse_slugs():
 def test_merge_boards_unions_and_caps():
     from jobpilot_core.ats_boards import DEFAULT_GREENHOUSE_BOARDS, merge_boards
 
-    boards = merge_boards(["MyCo", "intercom"], {"newco", "stripe"}, DEFAULT_GREENHOUSE_BOARDS, cap=40)
+    boards = merge_boards(["MyCo", "intercom"], {"newco", "stripe"}, cap=40)
     assert boards[0] == "myco"  # configured first, lowercased
     assert "intercom" in boards and "stripe" in boards and "newco" in boards
     assert len(boards) == len(set(boards))  # de-duped
-    assert set(DEFAULT_GREENHOUSE_BOARDS).issubset(set(boards))  # defaults folded in
+    # Defaults are folded in.
+    assert set(DEFAULT_GREENHOUSE_BOARDS).issubset(set(boards))
     # Cap is honored.
-    assert len(merge_boards([f"c{i}" for i in range(100)], set(), DEFAULT_GREENHOUSE_BOARDS, cap=10)) == 10
-
-
-def test_merge_boards_smartrecruiters_preserves_case():
-    from jobpilot_core.ats_boards import merge_boards
-
-    # SmartRecruiters ids are case-sensitive — casefold=False keeps them intact.
-    boards = merge_boards([], {"DeliveryHero"}, ["Bosch"], casefold=False)
-    assert "DeliveryHero" in boards and "Bosch" in boards
-
-
-def test_extract_lever_and_smartrecruiters_slugs():
-    from jobpilot_core.ats_boards import extract_lever_slugs, extract_smartrecruiters_slugs
-
-    urls = [
-        "https://jobs.lever.co/whoop/38493926-11d7",
-        "https://api.lever.co/v0/postings/gopuff",
-        "https://jobs.smartrecruiters.com/DeliveryHero/744000136820480-city-head",
-        "https://www.adzuna.co.uk/jobs/land/ad/1",  # neither -> ignored
-        None,
-    ]
-    assert extract_lever_slugs(urls) == {"whoop", "gopuff"}
-    assert extract_smartrecruiters_slugs(urls) == {"DeliveryHero"}  # case preserved
-
-
-# --------------------------------------------------------------------------- #
-# Pure unit — Lever / SmartRecruiters field mapping (no network)
-# --------------------------------------------------------------------------- #
-def test_lever_full_text_and_location():
-    from sources_mcp.connectors.lever import _full_text, _location
-
-    job = {
-        "description": "<p>Build <b>APIs</b>.</p>",
-        "lists": [{"text": "Requirements", "content": "<ul><li>5+ yrs Python</li></ul>"}],
-        "additional": "<p>We offer equity.</p>",
-        "categories": {"location": "Dublin, Ireland", "allLocations": ["Dublin, Ireland"]},
-    }
-    text = _full_text(job)
-    assert "Build APIs" in text and "Requirements: 5+ yrs Python" in text and "equity" in text
-    assert _location(job) == "Dublin, Ireland"
-
-
-def test_smartrecruiters_full_text_and_location():
-    from sources_mcp.connectors.smartrecruiters import _full_text, _list_location
-
-    detail = {
-        "jobAd": {"sections": {
-            "jobDescription": {"text": "Own the platform."},
-            "qualifications": {"text": "5 years Go."},
-            "additionalInformation": {"text": "Hybrid in Dublin."},
-        }}
-    }
-    assert _full_text(detail) == "Own the platform. 5 years Go. Hybrid in Dublin."
-    posting = {"location": {"city": "Dublin", "country": "ie", "fullLocation": "Dublin, Ireland"}}
-    assert _list_location(posting) == "Dublin, Ireland"
+    assert len(merge_boards([f"c{i}" for i in range(100)], set(), cap=10)) == 10
 
 
 # --------------------------------------------------------------------------- #

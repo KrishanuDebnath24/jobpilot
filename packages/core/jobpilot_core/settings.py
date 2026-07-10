@@ -139,12 +139,6 @@ class Settings(BaseSettings):
     # Poll this many Greenhouse boards per run at most (configured employers + the
     # curated Ireland default set + slugs harvested from fetched apply links).
     scout_max_greenhouse_boards: int = 40
-    # Same idea for the other free per-company ATS APIs (Lever / SmartRecruiters):
-    # default seed + harvested slugs, capped. SmartRecruiters needs a second call per
-    # posting for the full description, so its per-board detail fetches are also capped.
-    scout_max_lever_boards: int = 40
-    scout_max_smartrecruiters_boards: int = 40
-    scout_sr_max_detail_fetches: int = 25
 
     # --- Crawler connector politeness + spend guards ---
     # The board rejects unknown UAs at the network layer (disconnects non-browsers),

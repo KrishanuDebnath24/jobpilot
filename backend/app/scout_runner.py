@@ -13,15 +13,7 @@ import logging
 import uuid
 
 from jobpilot_core import events, tracing
-from jobpilot_core.ats_boards import (
-    DEFAULT_GREENHOUSE_BOARDS,
-    DEFAULT_LEVER_BOARDS,
-    DEFAULT_SMARTRECRUITERS_BOARDS,
-    extract_greenhouse_slugs,
-    extract_lever_slugs,
-    extract_smartrecruiters_slugs,
-    merge_boards,
-)
+from jobpilot_core.ats_boards import extract_greenhouse_slugs, merge_boards
 from jobpilot_core.profile_search import derive_search_terms, merge_search_terms
 from jobpilot_core.scout import normalize_raw, unique_contribution
 from jobpilot_core.settings import get_settings
@@ -154,52 +146,22 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
             raw_jobs, by_connector, errors, usage,
         )
 
-    # Step 2: per-company ATS boards (Greenhouse / Lever / SmartRecruiters) over the
-    # configured employers + curated defaults + slugs harvested from the apply links of
-    # everything fetched so far. Full-text, free, no key. Each list is capped for
-    # politeness; per-board failures are recorded, never fatal. The dedupe tail then
-    # upgrades any matching aggregator snippet to the ATS full text automatically.
-    def _ats_terms(company: str) -> dict:
-        return {"company": company, "roles": roles, "locations": locations, "keywords": keywords}
-
-    board_counts: dict[str, int] = {}
-
+    # Step 2: Greenhouse over configured employers + curated Ireland defaults + slugs
+    # harvested from the apply links of everything fetched so far. Per-board 404s are
+    # recorded, never fatal; the whole list is capped for politeness.
+    greenhouse_boards: list[str] = []
     if "greenhouse" in sources:
         harvested = extract_greenhouse_slugs(rj.get("url") for rj in raw_jobs)
-        boards = merge_boards(
-            target_employers, harvested, DEFAULT_GREENHOUSE_BOARDS,
-            cap=settings.scout_max_greenhouse_boards,
+        greenhouse_boards = merge_boards(
+            target_employers, harvested, cap=settings.scout_max_greenhouse_boards
         )
-        board_counts["greenhouse"] = len(boards)
-        for company in boards:
+        if harvested:
+            logger.info("scout.greenhouse harvested slugs=%s", sorted(harvested))
+        for company in greenhouse_boards:
             await _run_connector(
                 user_id, f"greenhouse:{company}", "fetch_greenhouse",
-                _ats_terms(company), raw_jobs, by_connector, errors, usage,
-            )
-
-    if "lever" in sources:
-        harvested = extract_lever_slugs(rj.get("url") for rj in raw_jobs)
-        boards = merge_boards(
-            [], harvested, DEFAULT_LEVER_BOARDS, cap=settings.scout_max_lever_boards
-        )
-        board_counts["lever"] = len(boards)
-        for company in boards:
-            await _run_connector(
-                user_id, f"lever:{company}", "fetch_lever",
-                _ats_terms(company), raw_jobs, by_connector, errors, usage,
-            )
-
-    if "smartrecruiters" in sources:
-        harvested = extract_smartrecruiters_slugs(rj.get("url") for rj in raw_jobs)
-        boards = merge_boards(
-            [], harvested, DEFAULT_SMARTRECRUITERS_BOARDS,
-            cap=settings.scout_max_smartrecruiters_boards, casefold=False,
-        )
-        board_counts["smartrecruiters"] = len(boards)
-        for company in boards:
-            await _run_connector(
-                user_id, f"smartrecruiters:{company}", "fetch_smartrecruiters",
-                _ats_terms(company), raw_jobs, by_connector, errors, usage,
+                {"company": company, "roles": roles, "locations": locations, "keywords": keywords},
+                raw_jobs, by_connector, errors, usage,
             )
 
     # --- shared tail: deterministic normalize + dedupe, then persist via db-mcp ---
@@ -223,9 +185,9 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
         "unique_by_connector": unique_by_connector,
         "errors": errors,
         "llm_usage": {**usage, "estimated_cost_usd": round(usage["estimated_cost_usd"], 6)},
-        # Transparency: what the profile derived and how many ATS boards we polled.
+        # Transparency: what the profile derived and how many boards we polled.
         "profile_terms": derived,
-        "ats_boards": board_counts,
+        "greenhouse_boards": len(greenhouse_boards),
     }
     logger.info("scout.summary %s", summary)
     return summary
