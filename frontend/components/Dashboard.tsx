@@ -4,10 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CvDraft, Job, SearchConfig, SearchConfigProposal } from "@/lib/types";
 import {
   deriveSearchConfig,
+  getBaseResumeId,
   getCvDrafts,
   getDashboardJobs,
   getMe,
-  getMyResume,
   getSearchConfig,
   getToken,
   setToken,
@@ -67,17 +67,18 @@ export default function Dashboard() {
     setSettings((s) => ({ ...s, open: false, proposal: null }));
   }, []);
 
-  // Per-job tailored CVs to attach to job rows + the current résumé id (a tailored CV is
-  // "attached" only if exported and built from the current résumé — matches the CV-aware
-  // qualifier; a newer upload makes older drafts stale, so they fall away here too).
+  // Per-job tailored CVs to attach to job rows + the current uploaded-résumé id (a tailored
+  // CV is "attached" only if exported and built from the current uploaded résumé — matches
+  // the CV-aware qualifier; a newer UPLOAD makes older drafts stale, so they fall away here
+  // too, while applying suggestions — an assembled version — never affects this).
   const [cvDrafts, setCvDrafts] = useState<CvDraft[]>([]);
   const [resumeId, setResumeId] = useState<string | null>(null);
 
   const loadCvContext = useCallback(async () => {
     try {
-      const [drafts, me] = await Promise.all([getCvDrafts(), getMyResume()]);
+      const [drafts, id] = await Promise.all([getCvDrafts(), getBaseResumeId()]);
       setCvDrafts(drafts);
-      setResumeId(me.resume?.id ?? null);
+      setResumeId(id);
     } catch {
       /* CV context is best-effort; never wedge the dashboard */
     }

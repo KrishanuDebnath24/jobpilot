@@ -26,9 +26,12 @@ logger = logging.getLogger("jobpilot.tailor")
 
 
 async def _base_resume(user_id: uuid.UUID) -> tuple[dict, str | None]:
-    wrap = (await mcp_client.resume_mcp(user_id, "get_structured_resume", {}))["resume"]
+    # The WORKING resume = the latest uploaded file (not an assembled apply-to-resume
+    # version), so a tailored CV is tagged with the same parent id the qualifier scores
+    # against — keeping the two in lockstep across apply-to-resume.
+    wrap = (await mcp_client.resume_mcp(user_id, "get_base_resume", {}))["resume"]
     if not wrap or not wrap.get("structured"):
-        raise RuntimeError("no resume on file — upload a resume before tailoring")
+        raise RuntimeError("no uploaded resume on file — upload a resume before tailoring")
     return wrap["structured"], wrap.get("id")
 
 

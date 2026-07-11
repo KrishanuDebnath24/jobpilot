@@ -245,6 +245,13 @@ async def my_resume(current_user=Depends(get_current_user)) -> dict:
     return await mcp_client.resume_mcp(current_user.id, "get_structured_resume", {})
 
 
+@app.get("/resumes/me/base", tags=["resumes"])
+async def my_base_resume(current_user=Depends(get_current_user)) -> dict:
+    """The WORKING resume (latest uploaded) that scoring/tailoring use. Assembled
+    apply-to-resume versions never appear here — so they can't take over qualification."""
+    return await mcp_client.resume_mcp(current_user.id, "get_base_resume", {})
+
+
 def _resume_media_type(ref: str) -> tuple[str, str]:
     """(media_type, ext) from a stored file_ref's extension. mime isn't a column; the
     key carries the extension (see storage.resume_key)."""

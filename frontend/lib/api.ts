@@ -104,6 +104,10 @@ export async function uploadResume(file: File, consent: boolean): Promise<Resume
 /** The parsed resume currently on file (or `{ resume: null }` if none). */
 export const getMyResume = () =>
   request<{ resume: { id: string; structured: StructuredResume } | null }>("/resumes/me");
+/** Id of the WORKING resume = latest uploaded file (what scoring/tailoring use). Assembled
+ *  apply-to-resume versions are excluded, so applying suggestions can't take over. */
+export const getBaseResumeId = () =>
+  request<{ resume: { id: string } | null }>("/resumes/me/base").then((r) => r.resume?.id ?? null);
 export const getDashboardJobs = () =>
   request<{ jobs: Job[] }>("/dashboard/jobs").then((r) => r.jobs);
 export const getQualifyRuns = () =>

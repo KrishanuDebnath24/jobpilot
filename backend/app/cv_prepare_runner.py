@@ -15,6 +15,7 @@ import uuid
 
 from .analyze_runner import run_analyze
 from .cv_export_runner import run_export
+from .qualify_runner import run_qualify
 from .tailor_runner import run_tailor
 from . import mcp_client
 
@@ -42,13 +43,25 @@ async def run_prepare_cvs(user_id: uuid.UUID, job_ids: list[str]) -> dict:
         exp = await run_export(user_id, draft_ids)
         exported = exp.get("exported", 0)
 
+    # Re-qualify immediately so the just-tailored jobs' scores reflect their new CV. Qualify
+    # is incremental: only the freshly-tailored jobs changed cv_version, so it re-scores those
+    # and skips the rest of the pool. Best-effort — the CVs are already attached either way.
+    requalified = 0
+    if exported:
+        try:
+            q = await run_qualify(user_id)
+            requalified = q.get("scored", 0)
+        except Exception as exc:  # noqa: BLE001 - requalify must never fail the attach
+            logger.warning("cv_prepare.requalify failed (non-fatal): %s", exc)
+
     summary = {
         "analyzed": analyze.get("analyzed", analyze.get("count", 0)),
         "tailored": tailor.get("tailored", 0),
         "exported": exported,
+        "requalified": requalified,
         "drafts": drafts,
         "errors": {**(analyze.get("errors") or {}), **(tailor.get("errors") or {})},
     }
-    logger.info("cv_prepare.summary tailored=%d exported=%d errors=%d",
-                summary["tailored"], summary["exported"], len(summary["errors"]))
+    logger.info("cv_prepare.summary tailored=%d exported=%d requalified=%d errors=%d",
+                summary["tailored"], summary["exported"], requalified, len(summary["errors"]))
     return summary

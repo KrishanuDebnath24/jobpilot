@@ -134,6 +134,20 @@ async def list_resume_versions() -> dict:
 
 
 @mcp.tool()
+async def get_base_resume() -> dict:
+    """The caller's WORKING resume for scoring/tailoring = the latest *uploaded* resume
+    (``source='upload'``). Assembled 'apply-to-resume' versions are downloadable artifacts,
+    never the working resume — so applying suggestions can't take over qualification.
+    Returns ``{resume: {id, structured} | None}``."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        resume = await repositories.get_latest_uploaded_resume(session, uid)
+        if resume is None:
+            return {"resume": None}
+        return {"resume": {"id": str(resume.id), "structured": resume.parsed_json}}
+
+
+@mcp.tool()
 async def get_resume_file(resume_id: str | None = None) -> dict:
     """Fetch the ORIGINAL uploaded resume file (PDF/DOCX) as base64. Defaults to the
     caller's most recent *uploaded* resume; assembled versions have no stored file.

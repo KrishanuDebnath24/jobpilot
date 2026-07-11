@@ -53,9 +53,11 @@ async def run_qualify(
 ) -> dict:
     settings = get_settings()
     pid = str(pipeline_id) if pipeline_id else None
-    resume_wrap = (await mcp_client.resume_mcp(user_id, "get_structured_resume", {}))["resume"]
+    # Parent = the latest UPLOADED resume (not an assembled apply-to-resume version), so
+    # applying suggestions can never take over qualification — it's just a downloadable file.
+    resume_wrap = (await mcp_client.resume_mcp(user_id, "get_base_resume", {}))["resume"]
     if not resume_wrap or not resume_wrap.get("structured"):
-        raise RuntimeError("no resume on file — upload a resume before qualifying")
+        raise RuntimeError("no uploaded resume on file — upload a resume before qualifying")
     resume = resume_wrap["structured"]
     resume_version = resume_wrap.get("id")
 
@@ -67,13 +69,16 @@ async def run_qualify(
     jobs = (await mcp_client.db_mcp(user_id, "get_qualified_jobs", {"limit": 5000}))["jobs"]
 
     # CV-aware scoring: a job with an exported tailored CV (built from the CURRENT parent
-    # resume) is scored against that CV; every other job against the parent. Keep the
-    # newest approved draft per job (db-mcp returns newest-first).
+    # resume) is scored against that CV; every other job against the parent. Keep the newest
+    # approved draft per job that is actually ATTACHED — exported (pdf_ref) AND built from the
+    # current parent — so this matches exactly what the dashboard row shows (no display/score
+    # divergence). db-mcp returns newest-first.
     drafts = (await mcp_client.db_mcp(user_id, "get_cv_drafts", {"status": "approved"}))["drafts"]
     draft_by_job: dict[str, dict] = {}
     for d in drafts:
         jid = d.get("job_id")
-        if jid and jid not in draft_by_job:
+        if (jid and jid not in draft_by_job and d.get("pdf_ref")
+                and str(d.get("base_resume_version")) == str(resume_version)):
             draft_by_job[jid] = d
 
     counts = {"scored": 0, "qualified": 0, "disqualified": 0, "gated_out": 0, "skipped": 0}

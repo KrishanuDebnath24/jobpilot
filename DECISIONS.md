@@ -980,3 +980,24 @@ there was no way to fetch the original uploaded file (only a plain-text renderin
   analyze→tailor→export chain and the streaming endpoint are covered by the DB/live suites
   and manual E2E (upload → qualify=parent → Prepare CVs → rows show tailored PDF → re-qualify
   = tailored for those, parent for the rest → new upload → qualify back to parent).
+
+### Follow-up (post-review) — "working résumé" = latest upload + auto-requalify
+
+Two fixes after the code review:
+
+- **Apply-to-résumé can no longer take over qualification (was F2).** The "current parent
+  résumé" for scoring/tailoring/row-attachment is now the latest **uploaded** résumé, not the
+  newest résumé row of any source. A new resume-mcp tool `get_base_resume` (→
+  `get_latest_uploaded_resume`) backs it; `run_qualify` and `tailor_runner._base_resume` both
+  read it, and the frontend row map keys off `GET /resumes/me/base` (`getBaseResumeId`). An
+  *assembled* apply-to-résumé version is now purely a downloadable artifact — it never shifts
+  the parent version, so tailored CVs stay attached across an apply and qualification is never
+  hijacked. (`get_structured_resume` — used by scout/analyze/enhance/config-deriver — is
+  unchanged; only the CV-scoring path is scoped to the upload.)
+- **Prepare CVs auto-requalifies the tailored jobs (user ask).** `run_prepare_cvs` ends with
+  an incremental `run_qualify` after export, so the just-tailored jobs re-score against their
+  new CV immediately (only their `cv_version` changed → the rest of the pool is skipped).
+- **Row now matches the score (was F3).** `run_qualify` builds `draft_by_job` from only the
+  drafts that are actually *attached* — exported (`pdf_ref`) AND built from the current upload
+  (`base_resume_version == resume_version`) — the same filter the dashboard row uses, so the
+  displayed CV and the scored CV can't diverge.
