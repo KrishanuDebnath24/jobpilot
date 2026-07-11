@@ -12,7 +12,11 @@ import type {
   PipelineExecution,
   PipelineRun,
   QueryTurn,
+  ResumeUploadResult,
   ResumeVersion,
+  SearchConfig,
+  SearchConfigProposal,
+  StructuredResume,
   Suggestion,
 } from "./types";
 
@@ -68,6 +72,38 @@ export async function login(email: string, password: string): Promise<string> {
 }
 
 export const getMe = () => request<{ id: string; email: string }>("/auth/me");
+
+// --- Resume / CV attach (multipart; can't use the JSON `request()` helper) ---
+export const RESUME_ACCEPT = ".pdf,.docx";
+export const RESUME_MAX_BYTES = 10 * 1024 * 1024; // mirrors settings.resume_max_bytes
+
+/** Attach a CV (PDF/DOCX). `consent` is required — the backend rejects without it. */
+export async function uploadResume(file: File, consent: boolean): Promise<ResumeUploadResult> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("consent", String(consent));
+  // NB: don't set Content-Type — the browser adds the multipart boundary itself.
+  const res = await fetch(`${API_URL}/resumes`, {
+    method: "POST",
+    cache: "no-store",
+    headers: { ...(getToken() ? { Authorization: `Bearer ${getToken()}` } : {}) },
+    body: form,
+  });
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      detail = (await res.json()).detail ?? detail;
+    } catch {
+      /* ignore */
+    }
+    throw new ApiError(res.status, detail);
+  }
+  return (await res.json()) as ResumeUploadResult;
+}
+
+/** The parsed resume currently on file (or `{ resume: null }` if none). */
+export const getMyResume = () =>
+  request<{ resume: { id: string; structured: StructuredResume } | null }>("/resumes/me");
 export const getDashboardJobs = () =>
   request<{ jobs: Job[] }>("/dashboard/jobs").then((r) => r.jobs);
 export const getQualifyRuns = () =>
@@ -76,6 +112,21 @@ export const getScoutRuns = () =>
   request<{ runs: PipelineRun[] }>("/scout/runs").then((r) => r.runs);
 export const runScout = () =>
   request<{ task_id: string }>("/scout/run", { method: "POST" });
+
+// --- Search config: what Scout fans out on (user-editable; LLM-proposed from resume) ---
+export const getSearchConfig = () =>
+  request<{ config: SearchConfig }>("/search-config").then((r) => r.config);
+export const updateSearchConfig = (fields: Partial<SearchConfig>) =>
+  request<{ config: SearchConfig }>("/search-config", {
+    method: "PUT",
+    body: JSON.stringify(fields),
+  }).then((r) => r.config);
+/** Propose a market-canonical config from the resume (review-only; nothing is saved). */
+export const deriveSearchConfig = (hint?: string) =>
+  request<{ proposal: SearchConfigProposal; has_resume: boolean }>("/search-config/derive", {
+    method: "POST",
+    body: JSON.stringify({ hint: hint ?? null }),
+  });
 export const runQualify = (requalifyAll = false) =>
   request<{ task_id: string }>(`/qualify/run?requalify_all=${requalifyAll}`, {
     method: "POST",
@@ -192,6 +243,29 @@ export const tailorCvs = (job_ids: string[]) =>
     method: "POST",
     body: JSON.stringify({ job_ids }),
   });
+/** One-click per-job CV: Analyze → Tailor → approve → Export for the selected jobs. */
+export const prepareCvs = (job_ids: string[]) =>
+  request<{ task_id: string; job_count: number }>("/cv/prepare", {
+    method: "POST",
+    body: JSON.stringify({ job_ids }),
+  });
+
+/** Fetch a file with the auth header and return a blob object URL (+ its content type),
+ *  usable as both an <iframe> src (view) and an <a download> href. Caller revokes the URL. */
+async function fetchBlobUrl(path: string): Promise<{ url: string; type: string }> {
+  const res = await fetch(`${API_URL}${path}`, {
+    headers: { Authorization: `Bearer ${getToken() ?? ""}` },
+    cache: "no-store",
+  });
+  if (!res.ok) throw new ApiError(res.status, `fetch failed (${res.status})`);
+  const blob = await res.blob();
+  return { url: URL.createObjectURL(blob), type: blob.type || "application/octet-stream" };
+}
+/** The caller's latest uploaded résumé as its original file (PDF/DOCX). 404 if none/assembled. */
+export const getBaseCvBlob = () => fetchBlobUrl("/resumes/me/file");
+/** A tailored CV draft's rendered file (pdf|docx) as a blob URL. */
+export const getCvDraftBlob = (draftId: string, fmt: "pdf" | "docx") =>
+  fetchBlobUrl(`/cv/drafts/${draftId}/download/${fmt}`);
 export const getCvDrafts = (status?: string) =>
   request<{ drafts: CvDraft[] }>(`/cv/drafts${status ? `?status=${status}` : ""}`).then(
     (r) => r.drafts,

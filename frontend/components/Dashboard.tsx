@@ -1,8 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Job } from "@/lib/types";
-import { getDashboardJobs, getMe, getToken, setToken } from "@/lib/api";
+import type { CvDraft, Job, SearchConfig, SearchConfigProposal } from "@/lib/types";
+import {
+  deriveSearchConfig,
+  getCvDrafts,
+  getDashboardJobs,
+  getMe,
+  getMyResume,
+  getSearchConfig,
+  getToken,
+  setToken,
+} from "@/lib/api";
 import LoginGate from "./LoginGate";
 import PipelineLive from "./PipelineLive";
 import JobsTable from "./JobsTable";
@@ -12,6 +21,8 @@ import Ask from "./Ask";
 import Gates from "./Gates";
 import TailoredCVs from "./TailoredCVs";
 import CostPanel from "./CostPanel";
+import ResumeUpload from "./ResumeUpload";
+import SearchSettings, { type SearchSettingsMode } from "./SearchSettings";
 
 type Decision = "all" | "qualified" | "disqualified" | "unscored";
 
@@ -24,6 +35,75 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const loadingJobs = useRef(false);
+
+  // Search config + the settings modal (onboarding / edit / review) that manages it.
+  const [config, setConfig] = useState<SearchConfig | null>(null);
+  const [settings, setSettings] = useState<{
+    open: boolean;
+    mode: SearchSettingsMode;
+    proposal: SearchConfigProposal | null;
+    seq: number; // bumped per open so the modal remounts and re-inits its state
+  }>({ open: false, mode: "edit", proposal: null, seq: 0 });
+
+  const loadConfig = useCallback(async () => {
+    try {
+      const cfg = await getSearchConfig();
+      setConfig(cfg);
+      // No id == never saved a config → block on onboarding until they set one.
+      if (!cfg.id) {
+        setSettings((s) => ({ open: true, mode: "onboarding", proposal: null, seq: s.seq + 1 }));
+      }
+    } catch {
+      /* a config fetch hiccup shouldn't wedge the dashboard */
+    }
+  }, []);
+
+  const openSettings = useCallback((mode: SearchSettingsMode, proposal: SearchConfigProposal | null = null) => {
+    setSettings((s) => ({ open: true, mode, proposal, seq: s.seq + 1 }));
+  }, []);
+
+  const onConfigSaved = useCallback((cfg: SearchConfig) => {
+    setConfig(cfg);
+    setSettings((s) => ({ ...s, open: false, proposal: null }));
+  }, []);
+
+  // Per-job tailored CVs to attach to job rows + the current résumé id (a tailored CV is
+  // "attached" only if exported and built from the current résumé — matches the CV-aware
+  // qualifier; a newer upload makes older drafts stale, so they fall away here too).
+  const [cvDrafts, setCvDrafts] = useState<CvDraft[]>([]);
+  const [resumeId, setResumeId] = useState<string | null>(null);
+
+  const loadCvContext = useCallback(async () => {
+    try {
+      const [drafts, me] = await Promise.all([getCvDrafts(), getMyResume()]);
+      setCvDrafts(drafts);
+      setResumeId(me.resume?.id ?? null);
+    } catch {
+      /* CV context is best-effort; never wedge the dashboard */
+    }
+  }, []);
+
+  const cvDraftByJobId = useMemo(() => {
+    const map: Record<string, CvDraft> = {};
+    for (const d of cvDrafts) {
+      const current = !resumeId || d.base_resume_version === resumeId;
+      if (d.status === "approved" && d.pdf_ref && current && !map[d.job_id]) {
+        map[d.job_id] = d; // getCvDrafts is newest-first → keep the latest per job
+      }
+    }
+    return map;
+  }, [cvDrafts, resumeId]);
+
+  // After a résumé (re)upload, propose a fresh canonical config and open the review dialog.
+  const onResumeUploaded = useCallback(async () => {
+    loadCvContext(); // new upload → refresh résumé id so stale tailored CVs drop off the rows
+    try {
+      const { proposal, has_resume } = await deriveSearchConfig();
+      if (has_resume) openSettings("review", proposal);
+    } catch {
+      /* propose is best-effort; the user can still edit config manually */
+    }
+  }, [openSettings, loadCvContext]);
 
   const toggleSelect = useCallback((id: string) => {
     setSelected((prev) => {
@@ -62,8 +142,19 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    if (authed) loadJobs();
-  }, [authed, loadJobs]);
+    if (authed) {
+      loadJobs();
+      loadConfig();
+    }
+  }, [authed, loadJobs, loadConfig]);
+
+  // Poll the CV context so tailored CVs attach to rows as the Prepare/Export tasks finish.
+  useEffect(() => {
+    if (!authed) return;
+    loadCvContext();
+    const t = setInterval(loadCvContext, 8000);
+    return () => clearInterval(t);
+  }, [authed, loadCvContext]);
 
   const onAuthed = async () => {
     try {
@@ -138,6 +229,41 @@ export default function Dashboard() {
         <Gates onChanged={loadJobs} />
         <CostPanel />
       </div>
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <ResumeUpload onUploaded={onResumeUploaded} />
+        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/30">
+          <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-2.5">
+            <div>
+              <h2 className="text-sm font-semibold text-neutral-200">Search settings</h2>
+              <p className="text-xs text-neutral-500">What Scout searches for.</p>
+            </div>
+            <button
+              onClick={() => openSettings("edit")}
+              className="rounded-lg border border-neutral-700 px-2.5 py-1 text-xs text-neutral-200 transition hover:border-neutral-500"
+            >
+              Edit
+            </button>
+          </div>
+          <dl className="space-y-1.5 px-4 py-3 text-xs">
+            <div className="flex gap-2">
+              <dt className="w-20 shrink-0 text-neutral-500">Roles</dt>
+              <dd className="text-neutral-300">{config?.roles?.join(", ") || "—"}</dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="w-20 shrink-0 text-neutral-500">Locations</dt>
+              <dd className="text-neutral-300">{config?.locations?.join(", ") || "—"}</dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="w-20 shrink-0 text-neutral-500">Keywords</dt>
+              <dd className="text-neutral-300">{config?.keywords?.join(", ") || "—"}</dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="w-20 shrink-0 text-neutral-500">Sources</dt>
+              <dd className="text-neutral-300">{config?.sources?.join(", ") || "—"}</dd>
+            </div>
+          </dl>
+        </section>
+      </div>
 
       {error && (
         <p className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-300">
@@ -176,7 +302,12 @@ export default function Dashboard() {
         </span>
       </div>
 
-      <JobsTable jobs={visible} selected={selected} onToggleSelect={toggleSelect} />
+      <JobsTable
+        jobs={visible}
+        selected={selected}
+        onToggleSelect={toggleSelect}
+        cvDraftByJobId={cvDraftByJobId}
+      />
 
       <Suggestions
         selectedJobIds={[...selected]}
@@ -188,6 +319,17 @@ export default function Dashboard() {
         selectedJobIds={[...selected]}
         jobTitleById={(id) => jobs.find((j) => j.id === id)?.title ?? "Job"}
       />
+
+      {settings.open && (
+        <SearchSettings
+          key={settings.seq}
+          mode={settings.mode}
+          initial={config}
+          proposal={settings.proposal}
+          onClose={() => setSettings((s) => ({ ...s, open: false, proposal: null }))}
+          onSaved={onConfigSaved}
+        />
+      )}
     </main>
   );
 }

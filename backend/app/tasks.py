@@ -89,6 +89,15 @@ def cv_export(user_id: str, draft_ids: list[str] | None = None) -> dict:
     return run_async(run_export(uuid.UUID(user_id), draft_ids))
 
 
+@celery.task(name="cv.prepare")
+def cv_prepare(user_id: str, job_ids: list[str]) -> dict:
+    """One-click per-job CV: Analyze → Tailor → approve → Export for the selected jobs,
+    so a downloadable tailored CV attaches to each job row."""
+    from .cv_prepare_runner import run_prepare_cvs
+
+    return run_async(run_prepare_cvs(uuid.UUID(user_id), job_ids))
+
+
 @celery.task(name="cv.requalify")
 def cv_requalify(user_id: str, draft_ids: list[str] | None = None) -> dict:
     """Phase 6.5: re-qualify tailored drafts vs their jobs (batched) + delta report."""

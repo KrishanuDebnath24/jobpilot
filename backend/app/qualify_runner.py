@@ -13,7 +13,12 @@ import logging
 import uuid
 
 from jobpilot_core import events, tracing
-from jobpilot_core.qualifier import combine, refine_with_llm, score_deterministic
+from jobpilot_core.qualifier import (
+    combine,
+    refine_with_llm,
+    score_deterministic,
+    select_effective_resume,
+)
 from jobpilot_core.settings import get_settings
 
 from . import mcp_client
@@ -37,7 +42,10 @@ def _version_of(job: dict) -> tuple | None:
     if not q or not q.get("reasons_json"):
         return None
     rj = q["reasons_json"]
-    return (rj.get("resume_version"), rj.get("config_version"))
+    # CV-aware: the effective-CV identity (a tailored draft id, or the parent resume id)
+    # is the re-score key. Fall back to resume_version for qualifications written before
+    # cv_version existed.
+    return (rj.get("cv_version") or rj.get("resume_version"), rj.get("config_version"))
 
 
 async def run_qualify(
@@ -58,27 +66,38 @@ async def run_qualify(
 
     jobs = (await mcp_client.db_mcp(user_id, "get_qualified_jobs", {"limit": 5000}))["jobs"]
 
+    # CV-aware scoring: a job with an exported tailored CV (built from the CURRENT parent
+    # resume) is scored against that CV; every other job against the parent. Keep the
+    # newest approved draft per job (db-mcp returns newest-first).
+    drafts = (await mcp_client.db_mcp(user_id, "get_cv_drafts", {"status": "approved"}))["drafts"]
+    draft_by_job: dict[str, dict] = {}
+    for d in drafts:
+        jid = d.get("job_id")
+        if jid and jid not in draft_by_job:
+            draft_by_job[jid] = d
+
     counts = {"scored": 0, "qualified": 0, "disqualified": 0, "gated_out": 0, "skipped": 0}
     errors: dict[str, str] = {}
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost_usd": 0.0}
-    current = (resume_version, config_version)
     total = len(jobs)
     await _emit(user_id, events.make_event(
         "qualify", events.STARTED, pipeline_id=pid, counts={"total": total}))
 
     for processed, job in enumerate(jobs, start=1):
         try:
-            if not requalify_all and _version_of(job) == current:
+            eff_resume, cv_source, cv_version = select_effective_resume(
+                resume, resume_version, draft_by_job.get(job["id"]))
+            if not requalify_all and _version_of(job) == (cv_version, config_version):
                 counts["skipped"] += 1
                 continue
             if counts["scored"] >= settings.qualify_max_jobs:
                 counts["skipped"] += 1
                 continue
 
-            det = score_deterministic(resume, job, qcfg, preferred_locations=prefs)
+            det = score_deterministic(eff_resume, job, qcfg, preferred_locations=prefs)
             llm_data = None
             if det["must_have_gate"] == "pass":
-                res = await refine_with_llm(resume, job, qcfg, settings)  # gate-passers only
+                res = await refine_with_llm(eff_resume, job, qcfg, settings)  # gate-passers only
                 llm_data = res.data
                 usage["input_tokens"] += res.usage.input_tokens
                 usage["output_tokens"] += res.usage.output_tokens
@@ -101,6 +120,8 @@ async def run_qualify(
                 "limited_data": limited_data,
                 "resume_version": resume_version,
                 "config_version": config_version,
+                "cv_source": cv_source,      # tailored draft id, or "parent"
+                "cv_version": cv_version,    # re-score key: effective-CV identity
             }
             await mcp_client.db_mcp(user_id, "upsert_qualification", {
                 "job_id": job["id"], "score": final["score"], "decision": final["decision"],

@@ -898,3 +898,85 @@ Running log of non-obvious engineering choices. One line + rationale each.
   horizontal scaling notes, **backup/restore for Postgres *and* object storage together**
   (dangling-ref hazard called out), rollback (code-first, schema via backup), and the
   operational escape hatches (`RATE_LIMIT_ENABLED`/`TRACING_ENABLED`, stale-pipeline reaper).
+
+## Feature — User-editable search config + LLM resume→config canonicalization
+
+The search config (what Scout fans out on) had no UI and no HTTP surface — it existed only
+as the hardcoded `DEFAULT_SEARCH_CONFIG` in the seed script, and the résumé influenced
+scouting only via a deterministic re-derivation at scout time (raw, non-canonical titles).
+This makes the config first-class: users set it in the UI, and every résumé (re)upload
+proposes a market-canonical config for review.
+
+- **Propose-then-confirm, not auto-apply.** On résumé upload the frontend calls
+  `POST /search-config/derive` (LLM, review-only, **no DB write**); the proposal pre-fills a
+  review dialog the user edits and confirms. Save is a separate `PUT /search-config`. Chosen
+  over silently overwriting the config so the user always sees and owns what Scout searches.
+- **Regenerate derived fields on confirm; preserve user-owned fields.** The review dialog
+  overwrites `roles`/`keywords`/`locations` from the new résumé; `sources`/`target_employers`/
+  `schedule` are always kept. `PUT` is a partial update (`exclude_none`) so an omitted field
+  is never cleared.
+- **The hint is not persisted — the edit is the steering.** The optional free-text "target
+  hint" lives *in* the review dialog and re-runs the proposal; there is **no schema change**
+  (no migration). Satisfies "take a hint from the user" without a stored column.
+- **Market-canonical roles via the cheap tier (Haiku), forced tool call.** Mapping arbitrary
+  résumé title spellings onto the titles job boards actually index is judgement, not
+  field-mapping — so it's an LLM call (`jobpilot_core.config_deriver`, via the existing
+  `llm.extract_json` choke point, `temperature=0`, résumé treated strictly as data). This is
+  the one place résumé→config uses an LLM; `profile_search`'s deterministic lift is kept as
+  the **fallback** when no key is set, so offline/CI and no-key dev still produce a proposal.
+- **LLM orchestration stays in a backend runner, config-mcp stays deterministic/DB-only.**
+  `config_deriver_runner` fetches the résumé via resume-mcp and calls core; the confirmed
+  write goes through config-mcp `update_search_config`. Preserves the "no direct ORM in
+  backend / LLM via core / DB via MCP" separation used by the other stage runners.
+- **Blocking onboarding on first login.** The dashboard treats a config with no `id` as
+  "never configured" and shows the settings modal in blocking `onboarding` mode. The same
+  component serves `edit` (from a summary card) and `review` (post-upload, proposal-filled).
+  In `onboarding` mode the modal **embeds the résumé uploader**, and an upload there
+  auto-runs the proposal — so a first-time user completes CV → suggest → confirm without
+  leaving the modal (upload inside onboarding calls a local `suggest()`, not the dashboard's
+  review-open handler, so it never spawns a second modal).
+- **Tests:** `test_config_deriver.py` (DB-free: fallback shape, no-key short-circuit,
+  empty-résumé guard, hard cap) + `test_config_deriver_live.py` (key-gated: asserts messy
+  titles canonicalize — no `@`/dates/company names — and skills/location survive).
+
+## Feature — Per-job CVs on job rows + CV-aware qualifier
+
+Each job row now carries a CV you can view inline and download; the qualifier scores each
+job against the CV attached to it. Previously tailored CVs lived only in a separate panel
+(tailor → approve → export), the qualifier scored every job against one latest résumé, and
+there was no way to fetch the original uploaded file (only a plain-text rendering).
+
+- **The per-job CV is the Tailored CV** (résumé + job + its analysis, honest/locked-safe).
+  Enhance produces advisory *suggestions*, not a CV file, so it stays a separate panel. A
+  new **`/cv/prepare`** one-click flow (`cv_prepare_runner`) chains the existing runners for
+  exactly the selected jobs: `run_analyze` → `run_tailor` → approve the fresh drafts →
+  `run_export`. Export only renders **approved** drafts, so "auto-export" endorses the
+  freshly-tailored (honest-by-construction) drafts before rendering. Reuses the runners
+  wholesale — no new pipeline logic, per-job error isolation already lives in each.
+- **CV-aware qualifier.** `run_qualify` scores each job against its **effective CV**:
+  `qualifier.select_effective_resume(parent, parent_version, draft)` returns the tailored
+  draft's `tailored_content_json` (which shares the résumé shape the scorer reads) **only if
+  it's the attached CV** — exported (`pdf_ref` set) AND built from the current parent résumé
+  (`base_resume_version == resume_version`) — else the parent (last-uploaded) résumé. The
+  qualification stamps `cv_source`/`cv_version`, and `cv_version` is the incremental
+  re-score key (a newly-attached CV re-scores; an unchanged job still skips).
+- **Upload invalidation is automatic, not a delete.** A new upload is a new résumé row with
+  a new `resume_version`; every prior draft's `base_resume_version` stops matching, so
+  scoring (and the job-row attachment, filtered the same way) falls back to the parent for
+  all jobs until they're re-tailored. First run has no drafts → parent for all — same path.
+  Drafts are kept for the improvement report; `/cv/requalify` + report are untouched.
+- **Base CV = original uploaded file.** New resume-mcp `get_resume_file` (latest
+  `source='upload'` résumé; assembled versions have no stored file) + `GET /resumes/me/file`
+  streams it inline, media type inferred from the storage key's extension (no `mime` column;
+  no schema change). New repo `get_latest_uploaded_resume`.
+- **Inline view in the job row.** `JobsTable`'s `JobCv` fetches the CV **with the auth
+  header** into a blob object URL (an iframe can't send a bearer token, so the URL can't be
+  the endpoint directly — same approach as `downloadCv`), embeds PDFs in an `<iframe>`, and
+  offers downloads; a DOCX base résumé falls back to download-only. Dashboard builds the
+  `job_id → draft` map (approved + exported + current-version), polling every 8s so CVs
+  attach as the Prepare/Export tasks finish.
+- **Tests:** `test_cv_attach.py` (DB-free: `select_effective_resume` across
+  tailored/parent/stale/unexported/none, and the extension→media-type helper). The
+  analyze→tailor→export chain and the streaming endpoint are covered by the DB/live suites
+  and manual E2E (upload → qualify=parent → Prepare CVs → rows show tailored PDF → re-qualify
+  = tailored for those, parent for the rest → new upload → qualify back to parent).

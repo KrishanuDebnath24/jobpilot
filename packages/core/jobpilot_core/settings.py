@@ -145,6 +145,14 @@ class Settings(BaseSettings):
     # curated Ireland default set + slugs harvested from fetched apply links).
     scout_max_greenhouse_boards: int = 40
 
+    # --- Config deriver (LLM). On resume (re)upload, an LLM studies the parsed resume
+    #     and PROPOSES a market-canonical search config (roles normalized to standard
+    #     titles, keywords, locations) for the user to review + confirm. Cheap extraction
+    #     tier — canonicalizing already-parsed fields is normalization, not reasoning.
+    #     Falls back to the deterministic profile_search derivation when no key is set. ---
+    config_deriver_model: str = "claude-haiku-4-5"
+    config_deriver_max_tokens: int = 512
+
     # --- Crawler connector politeness + spend guards ---
     # The board rejects unknown UAs at the network layer (disconnects non-browsers),
     # so we send a mainstream browser UA. Politeness is still enforced the ways that

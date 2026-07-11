@@ -263,6 +263,22 @@ async def get_latest_resume(
     ).scalar_one_or_none()
 
 
+async def get_latest_uploaded_resume(
+    session: AsyncSession, user_id: uuid.UUID
+) -> models.Resume | None:
+    """The user's most recent *uploaded* resume (``source='upload'``). Assembled
+    versions have a synthetic ``file_ref`` and no stored file, so they're excluded —
+    this is the row whose original PDF/DOCX we can stream back."""
+    return (
+        await session.execute(
+            select(models.Resume)
+            .where(models.Resume.user_id == user_id, models.Resume.source == "upload")
+            .order_by(models.Resume.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
 async def list_resume_file_refs(session: AsyncSession, user_id: uuid.UUID) -> list[str]:
     res = await session.execute(
         select(models.Resume.file_ref).where(models.Resume.user_id == user_id)

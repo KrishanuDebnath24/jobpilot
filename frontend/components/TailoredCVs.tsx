@@ -8,6 +8,7 @@ import {
   exportCvs,
   getCvDrafts,
   getCvReport,
+  prepareCvs,
   rejectCvDrafts,
   requalifyCvs,
   tailorCvs,
@@ -90,19 +91,32 @@ export default function TailoredCVs({
         <div>
           <h2 className="text-sm font-semibold text-neutral-200">Tailored CVs</h2>
           <p className="text-xs text-neutral-500">
-            Tailor selected jobs honestly (real experience in the job’s language; locked facts never
-            change), then approve → export → re-qualify.
+            “Prepare CVs” runs analyze → tailor → export for the selected jobs and attaches an
+            honest, job-specific CV to each job row (locked facts never change). The qualifier then
+            scores those jobs against their attached CV.
           </p>
         </div>
         <button
-          onClick={() =>
-            run("tailor", () => tailorCvs(selectedJobIds))
-          }
+          onClick={() => run("prepare", () => prepareCvs(selectedJobIds))}
           disabled={!!busy || selectedJobIds.length === 0}
           className="ml-auto rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-1.5 text-sm text-sky-200 transition hover:bg-sky-500/20 disabled:opacity-40"
-          title={selectedJobIds.length === 0 ? "Select jobs in the table first" : ""}
+          title={
+            selectedJobIds.length === 0
+              ? "Select jobs in the table first"
+              : "Analyze → tailor → export, then the CV attaches to each job row"
+          }
         >
-          {busy === "tailor" ? "Tailoring…" : `Tailor ${selectedJobIds.length} selected`}
+          {busy === "prepare"
+            ? "Preparing CVs…"
+            : `Prepare CVs for ${selectedJobIds.length} selected`}
+        </button>
+        <button
+          onClick={() => run("tailor", () => tailorCvs(selectedJobIds))}
+          disabled={!!busy || selectedJobIds.length === 0}
+          className="rounded-lg border border-neutral-700 px-3 py-1.5 text-sm text-neutral-200 transition hover:border-neutral-500 disabled:opacity-40"
+          title={selectedJobIds.length === 0 ? "Select jobs in the table first" : "Tailor only (review, then approve/export yourself)"}
+        >
+          {busy === "tailor" ? "Tailoring…" : "Tailor only"}
         </button>
       </div>
 

@@ -24,6 +24,30 @@ DEFAULT_WEIGHTS = {"skills": 0.40, "experience": 0.25, "title_keyword": 0.25, "l
 DEFAULT_THRESHOLD = 0.5
 
 
+def select_effective_resume(
+    parent_resume: dict, parent_version: str | None, draft: dict | None
+) -> tuple[dict, str, str]:
+    """Pick the resume a job should be scored against (CV-aware qualification).
+
+    Returns ``(resume_dict, cv_source, cv_version)``. A tailored ``draft`` is used only
+    when it is the CV *attached* to this job — i.e. it has been **exported** (``pdf_ref``
+    set) AND was built from the **current** parent resume (``base_resume_version`` ==
+    ``parent_version``). Otherwise the parent (last-uploaded) resume is used. Because a new
+    upload makes a new parent version, every prior draft's ``base_resume_version`` stops
+    matching, so scoring falls back to the parent for all jobs until they're re-tailored —
+    no deletes needed. ``cv_version`` (draft id or parent version) is the incremental
+    re-score key so a newly-attached CV re-scores while an unchanged job still skips.
+
+    The tailored content shares the resume shape (skills/summary/experience) the scorer
+    reads, so it's returned as-is."""
+    if draft and draft.get("pdf_ref") and str(draft.get("base_resume_version")) == str(parent_version):
+        content = draft.get("tailored_content_json")
+        if isinstance(content, dict) and content:
+            did = str(draft.get("id"))
+            return content, did, did
+    return parent_resume, "parent", str(parent_version)
+
+
 def default_qualifier_config(resume_skills: list[str], max_nice: int = 12) -> dict:
     """Conservative default derived from the resume: top skills → nice-to-haves,
     **no must-haves** (never disqualify the whole pool on day one), moderate threshold."""

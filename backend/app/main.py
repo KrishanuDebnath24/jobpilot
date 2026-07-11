@@ -99,6 +99,22 @@ class GateActionRequest(BaseModel):
     gate_id: str
 
 
+class SearchConfigUpdate(BaseModel):
+    """Partial update of the user's search config — only provided fields are written."""
+    roles: list[str] | None = None
+    locations: list[str] | None = None
+    keywords: list[str] | None = None
+    sources: list[str] | None = None
+    target_employers: list[str] | None = None
+    schedule: str | None = None
+
+
+class DeriveConfigRequest(BaseModel):
+    """Ask the LLM to propose a market-canonical config from the resume (review-only, no
+    write). ``hint`` is the optional free-text steer typed in the review dialog."""
+    hint: str | None = None
+
+
 class ApplyRequest(BaseModel):
     """Phase 6: apply accepted suggestions — only ``confirmed_skills`` get added."""
     confirmed_skills: list[str] | None = None
@@ -229,6 +245,33 @@ async def my_resume(current_user=Depends(get_current_user)) -> dict:
     return await mcp_client.resume_mcp(current_user.id, "get_structured_resume", {})
 
 
+def _resume_media_type(ref: str) -> tuple[str, str]:
+    """(media_type, ext) from a stored file_ref's extension. mime isn't a column; the
+    key carries the extension (see storage.resume_key)."""
+    ext = ref.rsplit(".", 1)[-1].lower() if "." in ref else "pdf"
+    if ext == "pdf":
+        return "application/pdf", "pdf"
+    if ext == "docx":
+        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"
+    return "application/octet-stream", ext
+
+
+@app.get("/resumes/me/file", tags=["resumes"])
+async def download_my_resume_file(current_user=Depends(get_current_user)):
+    """Stream the caller's most recent *uploaded* resume as its original file (PDF/DOCX),
+    inline so the browser can preview it. 404 if the latest resume is assembled/file-less."""
+    from fastapi.responses import Response
+
+    res = await mcp_client.resume_mcp(current_user.id, "get_resume_file", {})
+    if res.get("error") or not res.get("file_b64"):
+        raise HTTPException(status_code=404, detail=res.get("error") or "no uploaded resume file")
+    data = base64.b64decode(res["file_b64"])
+    media, ext = _resume_media_type(res.get("file_ref") or "")
+    return Response(
+        content=data, media_type=media,
+        headers={"Content-Disposition": f'inline; filename="resume.{ext}"'})
+
+
 # --------------------------------------------------------------------------- #
 # Jobs (through db-mcp)
 # --------------------------------------------------------------------------- #
@@ -253,6 +296,38 @@ async def trigger_scout(current_user=Depends(get_current_user)) -> dict:
 @app.get("/scout/runs", tags=["scout"])
 async def list_scout_runs(current_user=Depends(get_current_user)) -> dict:
     return await mcp_client.db_mcp(current_user.id, "get_pipeline_runs", {"stage": "scout"})
+
+
+# --------------------------------------------------------------------------- #
+# Search config — what Scout fans out on. Read/updated by the user in the UI;
+# an LLM proposes a market-canonical config from the resume (propose-then-confirm).
+# --------------------------------------------------------------------------- #
+@app.get("/search-config", tags=["search-config"])
+async def get_search_config(current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.config_mcp(current_user.id, "get_search_config", {})
+
+
+@app.put("/search-config", tags=["search-config"])
+async def update_search_config(
+    body: SearchConfigUpdate, current_user=Depends(get_current_user)
+) -> dict:
+    # Only send keys the caller actually set, so a partial update never clears a field.
+    fields = body.model_dump(exclude_none=True)
+    return await mcp_client.config_mcp(current_user.id, "update_search_config", fields)
+
+
+@app.post("/search-config/derive", tags=["search-config"], dependencies=[_rl_trigger])
+async def derive_search_config(
+    body: DeriveConfigRequest, current_user=Depends(get_current_user)
+) -> dict:
+    """Propose a market-canonical config from the caller's resume (review-only, no write).
+    The frontend pre-fills the review dialog with this; Save calls PUT /search-config."""
+    from .config_deriver_runner import propose_config
+
+    try:
+        return await propose_config(current_user.id, body.hint)
+    except RuntimeError as exc:  # e.g. missing Anthropic key surfaced by the LLM path
+        raise HTTPException(status_code=503, detail=str(exc))
 
 
 # --------------------------------------------------------------------------- #
@@ -524,6 +599,16 @@ async def cv_tailor(body: CvTailorRequest, current_user=Depends(get_current_user
     """Queue tailoring for the selected jobs (Tailor + Critic, locked-safe). Only the
     user's selected jobs are tailored — never the whole pool."""
     from .tasks import cv_tailor as task
+
+    t = task.delay(str(current_user.id), body.job_ids)
+    return {"task_id": t.id, "status": "queued", "job_count": len(body.job_ids)}
+
+
+@app.post("/cv/prepare", tags=["cv"], status_code=status.HTTP_202_ACCEPTED, dependencies=[_rl_trigger])
+async def cv_prepare(body: CvTailorRequest, current_user=Depends(get_current_user)) -> dict:
+    """One-click per-job CV: Analyze → Tailor → approve → Export for the selected jobs, so
+    a downloadable tailored CV attaches to each job row (and the qualifier scores it)."""
+    from .tasks import cv_prepare as task
 
     t = task.delay(str(current_user.id), body.job_ids)
     return {"task_id": t.id, "status": "queued", "job_count": len(body.job_ids)}

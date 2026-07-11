@@ -134,6 +134,28 @@ async def list_resume_versions() -> dict:
 
 
 @mcp.tool()
+async def get_resume_file(resume_id: str | None = None) -> dict:
+    """Fetch the ORIGINAL uploaded resume file (PDF/DOCX) as base64. Defaults to the
+    caller's most recent *uploaded* resume; assembled versions have no stored file.
+    Scoped: the ref MUST live under the caller's own storage prefix. Content is never
+    logged. Returns ``{file_b64, file_ref}`` or ``{error}``."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        if resume_id:
+            resume = await repositories.get_resume(session, uid, uuid.UUID(resume_id))
+        else:
+            resume = await repositories.get_latest_uploaded_resume(session, uid)
+        if resume is None:
+            return {"error": "no uploaded resume on file"}
+        ref = resume.file_ref
+    if not ref or not ref.startswith(user_prefix(uid)):
+        return {"error": "no original file for this resume"}  # e.g. an assembled:// version
+    storage = get_storage(settings)
+    data = await asyncio.to_thread(storage.get_bytes, ref)
+    return {"file_b64": base64.b64encode(data).decode("ascii"), "file_ref": ref}
+
+
+@mcp.tool()
 async def get_resume_version(resume_id: str) -> dict:
     """One resume version, including its downloadable ``raw_text`` rendering."""
     uid = require_user_id()

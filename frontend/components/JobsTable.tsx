@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
-import type { Job } from "@/lib/types";
+import { useEffect, useState } from "react";
+import type { CvDraft, Job } from "@/lib/types";
+import { ApiError, downloadCv, getBaseCvBlob, getCvDraftBlob } from "@/lib/api";
 import {
   Chip,
   DecisionPill,
@@ -12,11 +13,115 @@ import {
   pct,
 } from "./ui";
 
-function JobDetail({ job }: { job: Job }) {
+/** CV attached to a job: the tailored PDF if one is exported for this job, else the base
+ *  uploaded résumé. Fetched with auth into a blob URL (iframes can't send a bearer token),
+ *  shown inline for PDFs, with download buttons. Only mounts when the row is expanded. */
+function JobCv({ cvDraft }: { cvDraft: CvDraft | null }) {
+  // A tailored CV counts only once exported (pdf_ref); otherwise fall back to the base CV.
+  const draftId = cvDraft?.pdf_ref ? cvDraft.id : null;
+  const tailored = draftId !== null;
+  const [blob, setBlob] = useState<{ url: string; type: string } | null>(null);
+  const [status, setStatus] = useState<"loading" | "ready" | "none" | "error">("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    let created: string | null = null;
+    setStatus("loading");
+    setBlob(null);
+    (async () => {
+      try {
+        const res = draftId ? await getCvDraftBlob(draftId, "pdf") : await getBaseCvBlob();
+        if (cancelled) return URL.revokeObjectURL(res.url);
+        created = res.url;
+        setBlob(res);
+        setStatus("ready");
+      } catch (e) {
+        if (cancelled) return;
+        setStatus(e instanceof ApiError && e.status === 404 ? "none" : "error");
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (created) URL.revokeObjectURL(created);
+    };
+  }, [draftId]);
+
+  const isPdf = !!blob?.type.includes("pdf");
+  const ext = isPdf ? "pdf" : "docx";
+
+  return (
+    <div className="space-y-2">
+      <h4 className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-neutral-500">
+        {tailored ? "Tailored CV for this job" : "Your uploaded CV"}
+        {tailored && (
+          <span className="rounded-md border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 text-[10px] normal-case text-sky-200">
+            tailored · honest
+          </span>
+        )}
+      </h4>
+      {status === "loading" && <p className="text-sm text-neutral-500">Loading CV…</p>}
+      {status === "none" && (
+        <p className="text-sm text-neutral-500">
+          No CV on file yet — attach one in “Your CV / résumé”.
+        </p>
+      )}
+      {status === "error" && <p className="text-sm text-rose-300">Couldn’t load the CV.</p>}
+      {status === "ready" && blob && (
+        <>
+          {isPdf ? (
+            <iframe
+              src={blob.url}
+              title="CV preview"
+              className="h-96 w-full rounded-lg border border-neutral-800 bg-white"
+            />
+          ) : (
+            <p className="text-sm text-neutral-400">
+              Inline preview isn’t available for DOCX — download to view.
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            {tailored ? (
+              <>
+                {cvDraft?.pdf_ref && (
+                  <button
+                    onClick={() => downloadCv(cvDraft.id, "pdf")}
+                    className="rounded-md border border-neutral-700 px-2.5 py-1 text-xs text-neutral-200 hover:border-neutral-500"
+                  >
+                    Download PDF
+                  </button>
+                )}
+                {cvDraft?.docx_ref && (
+                  <button
+                    onClick={() => downloadCv(cvDraft.id, "docx")}
+                    className="rounded-md border border-neutral-700 px-2.5 py-1 text-xs text-neutral-200 hover:border-neutral-500"
+                  >
+                    Download DOCX
+                  </button>
+                )}
+              </>
+            ) : (
+              <a
+                href={blob.url}
+                download={`cv.${ext}`}
+                className="rounded-md border border-neutral-700 px-2.5 py-1 text-xs text-neutral-200 hover:border-neutral-500"
+              >
+                Download {ext.toUpperCase()}
+              </a>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function JobDetail({ job, cvDraft }: { job: Job; cvDraft: CvDraft | null }) {
   const q = job.qualification;
   const rj = q?.reasons_json ?? null;
   return (
     <div className="space-y-4 border-l-2 border-neutral-800 bg-neutral-950/40 px-6 py-4">
+      <JobCv cvDraft={cvDraft} />
+
       {!q ? (
         <p className="text-sm text-neutral-500">
           Not yet qualified — run Qualify to score this job.
@@ -129,10 +234,12 @@ function JobRow({
   job,
   selected,
   onToggleSelect,
+  cvDraft,
 }: {
   job: Job;
   selected?: boolean;
   onToggleSelect?: (id: string) => void;
+  cvDraft?: CvDraft | null;
 }) {
   const [open, setOpen] = useState(false);
   const colSpan = onToggleSelect ? 7 : 6;
@@ -177,7 +284,7 @@ function JobRow({
       {open && (
         <tr>
           <td colSpan={colSpan} className="p-0">
-            <JobDetail job={job} />
+            <JobDetail job={job} cvDraft={cvDraft ?? null} />
           </td>
         </tr>
       )}
@@ -189,10 +296,12 @@ export default function JobsTable({
   jobs,
   selected,
   onToggleSelect,
+  cvDraftByJobId,
 }: {
   jobs: Job[];
   selected?: Set<string>;
   onToggleSelect?: (id: string) => void;
+  cvDraftByJobId?: Record<string, CvDraft>;
 }) {
   if (jobs.length === 0) {
     return (
@@ -222,6 +331,7 @@ export default function JobsTable({
               job={job}
               selected={selected?.has(job.id)}
               onToggleSelect={onToggleSelect}
+              cvDraft={cvDraftByJobId?.[job.id] ?? null}
             />
           ))}
         </tbody>

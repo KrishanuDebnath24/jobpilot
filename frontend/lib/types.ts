@@ -179,6 +179,51 @@ export type ResumeVersion = {
   parent_id: string | null;
   created_at: string | null;
 };
+
+// Resume upload (POST /resumes) — deterministic parse of an attached CV.
+export type StructuredResume = {
+  contact?: {
+    name?: string | null;
+    email?: string | null;
+    phone?: string | null;
+    location?: string | null;
+    links?: string[];
+  };
+  summary?: string | null;
+  skills?: string[];
+  experience?: { title?: string | null; company?: string | null; dates?: string | null; bullets?: string[] }[];
+  education?: { text?: string }[];
+  certifications?: string[];
+};
+export type ResumeUploadResult = {
+  resume_id: string | null;
+  stored: boolean;
+  mime: string;
+  file_ref?: string;
+  structured: StructuredResume;
+};
+
+// Search config — what Scout fans out on. `id` is absent until the user has saved one
+// (we treat "no id" as "not configured yet" → onboarding).
+export type SearchConfig = {
+  id?: string;
+  roles: string[];
+  locations: string[];
+  keywords: string[];
+  sites: string[];
+  sources: string[];
+  target_employers: string[];
+  schedule: string | null;
+  created_at?: string | null;
+};
+// LLM proposal from the resume (review-only; roles are market-canonical).
+export type SearchConfigProposal = {
+  roles: string[];
+  keywords: string[];
+  locations: string[];
+  seniority?: string | null;
+  notes?: string | null;
+};
 export type ApplyPreview = {
   accepted_count: number;
   applied_rewrites: BulletRewrite[];
@@ -238,6 +283,7 @@ export type CvDraft = {
   after_score: number | null;
   pdf_ref: string | null;
   docx_ref: string | null;
+  base_resume_version?: string | null;
   critic_notes_json: CvCriticNotes;
   tailored_content_json: TailoredContent;
   created_at: string | null;
