@@ -14,9 +14,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from jobpilot_core import events, repositories, tracing
 from jobpilot_core.resume_parse import ALLOWED_MIME
-from jobpilot_core.security import create_access_token, verify_password
+from jobpilot_core.security import create_access_token, hash_password, verify_password
 from jobpilot_core.settings import Settings, get_settings
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import mcp_client
@@ -67,6 +67,13 @@ class HealthResponse(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+
+class RegisterRequest(BaseModel):
+    """Self-serve sign-up. Password is length-checked here; email uniqueness is enforced
+    at the route (409 on conflict)."""
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=200)
 
 
 class TokenResponse(BaseModel):
@@ -179,6 +186,24 @@ async def login(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password"
         )
+    return TokenResponse(access_token=create_access_token(user.id, settings))
+
+
+@app.post("/auth/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED,
+          tags=["auth"], dependencies=[_rl_auth])
+async def register(
+    body: RegisterRequest,
+    settings: Settings = Depends(get_settings),
+    db: AsyncSession = Depends(get_db),
+) -> TokenResponse:
+    """Create an account and sign in immediately. Rejects a duplicate email with 409;
+    rate-limited per-IP like login. Email match is case-insensitive."""
+    if await repositories.get_user_by_email(db, body.email) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An account with this email already exists",
+        )
+    user = await repositories.create_user(db, body.email, hash_password(body.password))
     return TokenResponse(access_token=create_access_token(user.id, settings))
 
 

@@ -71,6 +71,16 @@ export async function login(email: string, password: string): Promise<string> {
   return body.access_token;
 }
 
+/** Create an account and sign in. 409 if the email is already registered. */
+export async function register(email: string, password: string): Promise<string> {
+  const body = await request<{ access_token: string }>("/auth/register", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+  setToken(body.access_token);
+  return body.access_token;
+}
+
 export const getMe = () => request<{ id: string; email: string }>("/auth/me");
 
 // --- Resume / CV attach (multipart; can't use the JSON `request()` helper) ---
