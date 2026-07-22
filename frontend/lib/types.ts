@@ -1,8 +1,7 @@
 export type DimensionScores = {
   skills?: number;
   experience?: number;
-  title_keyword?: number;
-  location?: number;
+  roles_match?: number;
 };
 
 // Phase 8b: per-user LLM cost report (estimates from logged run usage).
@@ -24,7 +23,7 @@ export type CostReport = {
 export type ReasonsJson = {
   dimension_scores?: DimensionScores;
   weighted_score?: number;
-  semantic_fit?: number | null;
+  roles_match?: number | null;
   gate?: string;
   reasons?: string[];
   // Addendum 2.2: scored on aggregator snippet text only (low-confidence).
@@ -53,6 +52,9 @@ export type Job = {
   connector: string | null;
   // Addendum 2.2: full | snippet | hydrated (Level 2 borrowed a full-text twin's body).
   description_completeness?: string | null;
+  // Deterministically classified by Scout (no LLM); null when unknown.
+  employment_type?: string | null; // full_time|part_time|contract|temporary|internship
+  seniority?: string | null; // intern|junior|mid|senior|staff|principal|lead|manager|director
   dedupe_hash: string | null;
   status: string;
   created_at: string | null;

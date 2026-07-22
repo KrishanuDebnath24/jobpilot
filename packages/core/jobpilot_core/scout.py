@@ -198,12 +198,114 @@ def compute_dedupe_hash(
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
 
+# --------------------------------------------------------------------------- #
+# Employment-type + seniority classification (deterministic, NO LLM — same principle
+# as the rest of the normalize step). Structured connector fields decide first (the
+# aggregators already report them); a title-keyword heuristic is the fallback so
+# crawler/ATS rows that carry no such field are still classified. Both are best-effort
+# and nullable: an unknown value stays None rather than being guessed.
+# --------------------------------------------------------------------------- #
+
+# Normalized vocabularies (seniority mirrors the Analyzer's enum for cross-stage consistency).
+EMPLOYMENT_TYPES = ("full_time", "part_time", "contract", "temporary", "internship")
+SENIORITY_LEVELS = (
+    "intern", "junior", "mid", "senior", "staff", "principal", "lead", "manager", "director",
+)
+
+# JSearch `job_employment_type` (uppercased) -> normalized employment type.
+_JSEARCH_EMPLOYMENT = {
+    "FULLTIME": "full_time", "PARTTIME": "part_time", "CONTRACTOR": "contract",
+    "CONTRACT": "contract", "INTERN": "internship", "INTERNSHIP": "internship",
+    "TEMPORARY": "temporary", "TEMP": "temporary",
+}
+
+# The Muse `levels` name (lowercased) -> normalized seniority.
+_MUSE_LEVEL_SENIORITY = {
+    "internship": "intern", "entry level": "junior", "mid level": "mid",
+    "senior level": "senior", "management": "manager",
+}
+
+# Title-keyword rules: first matching row wins, so order encodes precedence.
+_EMPLOYMENT_TITLE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("internship", ("internship", "intern")),
+    ("contract", ("contractor", "contract", "fixed term", "fixed-term", "freelance")),
+    ("part_time", ("part-time", "part time")),
+    ("temporary", ("temporary", "temp")),
+)
+_SENIORITY_TITLE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("director", ("director", "vp", "vice president", "head of", "chief", "cto", "ceo", "cfo")),
+    ("principal", ("principal",)),
+    ("staff", ("staff",)),
+    ("lead", ("lead",)),
+    ("manager", ("manager", "management")),
+    ("senior", ("senior", "sr")),
+    ("junior", ("junior", "jr", "graduate", "trainee", "entry level", "entry-level")),
+    ("intern", ("intern", "internship")),
+)
+
+
+def _has_kw(text: str, kw: str) -> bool:
+    """Word-boundary-ish presence of ``kw`` in already-normalized ``text`` — so 'intern'
+    matches the standalone word but NOT 'internal', and 'contract' does not fire on
+    'contractor' (which is listed separately). Same matcher family as the qualifier gate."""
+    return re.search(r"(?<![a-z0-9])" + re.escape(kw) + r"(?![a-z0-9])", text) is not None
+
+
+def _match_title_rules(title_norm: str, rules: tuple[tuple[str, tuple[str, ...]], ...]) -> str | None:
+    for value, keywords in rules:
+        if any(_has_kw(title_norm, kw) for kw in keywords):
+            return value
+    return None
+
+
+def _employment_from_raw(raw: dict) -> str | None:
+    """Employment type from a connector's structured fields: JSearch `job_employment_type`,
+    then Adzuna `contract_type` (permanent|contract) + `contract_time` (full_time|part_time)."""
+    jt = raw.get("job_employment_type")
+    if isinstance(jt, str):
+        mapped = _JSEARCH_EMPLOYMENT.get(jt.strip().upper())
+        if mapped:
+            return mapped
+    ctype = str(raw.get("contract_type") or "").strip().lower()
+    if ctype == "contract":
+        return "contract"
+    ctime = str(raw.get("contract_time") or "").strip().lower().replace("-", "_")
+    if ctime == "part_time":
+        return "part_time"
+    if ctime == "full_time" or ctype == "permanent":
+        return "full_time"
+    return None
+
+
+def _seniority_from_raw(raw: dict) -> str | None:
+    """Seniority from The Muse's `levels` list (the one connector that reports it structurally)."""
+    levels = raw.get("levels")
+    if isinstance(levels, list):
+        for lv in levels:
+            mapped = _MUSE_LEVEL_SENIORITY.get(str(lv or "").strip().lower())
+            if mapped:
+                return mapped
+    return None
+
+
+def classify_job(title: str | None, raw: dict | None) -> tuple[str | None, str | None]:
+    """Return ``(employment_type, seniority)`` for a job — structured connector fields
+    first, title-keyword heuristic as the fallback. Deterministic, no LLM; either value is
+    None when nothing reliable is found (never guessed)."""
+    raw = raw or {}
+    title_norm = _norm(title)
+    employment = _employment_from_raw(raw) or _match_title_rules(title_norm, _EMPLOYMENT_TITLE_RULES)
+    seniority = _seniority_from_raw(raw) or _match_title_rules(title_norm, _SENIORITY_TITLE_RULES)
+    return employment, seniority
+
+
 def normalize_raw(raw: RawJob | dict) -> JobIn:
     """Deterministically map a raw connector job into the ``jobs`` table shape,
     computing the dedupe hash. Idempotent: same input -> same dedupe_hash."""
     rj = raw if isinstance(raw, RawJob) else RawJob.model_validate(raw)
     source_type = rj.source_type if rj.source_type in _SOURCE_TYPES else "crawl"
     url = canonicalize_url(rj.url)
+    employment_type, seniority = classify_job(rj.title, rj.raw)
     normalized = {
         "title": rj.title,
         "company": rj.company,
@@ -214,6 +316,8 @@ def normalize_raw(raw: RawJob | dict) -> JobIn:
         "connector": rj.connector,
         "external_id": rj.external_id,
         "description_completeness": rj.description_completeness,
+        "employment_type": employment_type,
+        "seniority": seniority,
     }
     return JobIn(
         title=rj.title,
@@ -225,6 +329,8 @@ def normalize_raw(raw: RawJob | dict) -> JobIn:
         source_type=source_type,
         connector=rj.connector,
         description_completeness=rj.description_completeness,
+        employment_type=employment_type,
+        seniority=seniority,
         dedupe_hash=compute_dedupe_hash(rj.company, rj.title, rj.location, url),
         raw_json=rj.raw or None,
         normalized_json=normalized,

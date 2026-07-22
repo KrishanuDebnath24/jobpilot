@@ -63,8 +63,6 @@ async def run_qualify(
 
     qcfg = (await mcp_client.config_mcp(user_id, "get_qualifier_config", {}))["config"]
     config_version = qcfg.get("id") or "default"
-    scfg = (await mcp_client.config_mcp(user_id, "get_search_config", {}))["config"]
-    prefs = scfg.get("locations") or []
 
     jobs = (await mcp_client.db_mcp(user_id, "get_qualified_jobs", {"limit": 5000}))["jobs"]
 
@@ -99,7 +97,7 @@ async def run_qualify(
                 counts["skipped"] += 1
                 continue
 
-            det = score_deterministic(eff_resume, job, qcfg, preferred_locations=prefs)
+            det = score_deterministic(eff_resume, job, qcfg)
             llm_data = None
             if det["must_have_gate"] == "pass":
                 res = await refine_with_llm(eff_resume, job, qcfg, settings)  # gate-passers only
@@ -117,9 +115,9 @@ async def run_qualify(
             # jobs are scored normally and carry no flag.
             limited_data = job.get("description_completeness") == "snippet"
             reasons_json = {
-                "dimension_scores": det["dimension_scores"],
-                "weighted_score": det["weighted_score"],
-                "semantic_fit": final["semantic_fit"],
+                "dimension_scores": final["dimension_scores"],
+                "weighted_score": final["score"],
+                "roles_match": final["roles_match"],
                 "gate": det["must_have_gate"],
                 "reasons": final["reasons"],
                 "limited_data": limited_data,

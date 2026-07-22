@@ -11,6 +11,7 @@ import json
 import uuid
 
 import docx
+import pytest
 from jobpilot_core import repositories
 from jobpilot_core.db import session_scope
 from jobpilot_core.security import hash_password, mint_mcp_context_token
@@ -35,6 +36,15 @@ RESUME_LINES = [
     "AWS Certified Solutions Architect - Associate",
     "Certified Kubernetes Administrator",
 ]
+
+
+# Resume parsing now structures the text with a strong Claude model, so the two tests
+# that call parse_resume need a real key (and cost a few LLM calls). The deterministic
+# isolation/auth/round-trip tests below stay ungated.
+requires_key = pytest.mark.skipif(
+    not S.anthropic_api_key.startswith("sk-ant-"),
+    reason="resume parsing now calls the LLM — needs a real ANTHROPIC_API_KEY",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -125,6 +135,7 @@ async def test_isolation_spoofed_user_id_and_round_trip(mcp_services):
         await _call(mcp_services["db"], _tok(b), "delete_user_data")
 
 
+@requires_key
 async def test_resume_pdf_and_docx(mcp_services):
     uid = await _mk_user()
     try:
@@ -132,16 +143,21 @@ async def test_resume_pdf_and_docx(mcp_services):
                                 {"file_b64": _pdf(), "filename": "r.pdf",
                                  "declared_mime": "application/pdf", "consent": True}))
         assert pdf["stored"] is True
-        assert "Python" in pdf["structured"]["skills"]
-        assert pdf["structured"]["contact"]["email"] == "jane.doe@example.com"
-        assert "Certified Kubernetes Administrator" in pdf["structured"]["certifications"]
+        s = pdf["structured"]
+        # LLM structuring is not byte-deterministic, so assert on stable, tolerant
+        # properties (presence / case-insensitive substring), not exact strings.
+        assert s["contact"]["email"] == "jane.doe@example.com"
+        assert any("python" in (sk or "").lower() for sk in s["skills"])
+        assert any("kubernetes" in (c or "").lower() for c in s["certifications"])
+        assert any("acme" in f"{e.get('company')} {e.get('title')}".lower()
+                   for e in s["experience"])
 
         DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         dx = _data(await _call(mcp_services["resume"], _tok(uid), "parse_resume",
                                {"file_b64": _docx(), "filename": "r.docx",
                                 "declared_mime": DOCX, "consent": True}))
         assert dx["stored"] is True
-        assert "Docker" in dx["structured"]["skills"]
+        assert any("docker" in (sk or "").lower() for sk in dx["structured"]["skills"])
 
         latest = _data(await _call(mcp_services["resume"], _tok(uid), "get_structured_resume"))
         assert latest["resume"] is not None
@@ -149,6 +165,7 @@ async def test_resume_pdf_and_docx(mcp_services):
         await _call(mcp_services["db"], _tok(uid), "delete_user_data")
 
 
+@requires_key
 async def test_erasure_wipes_rows_and_files(mcp_services):
     uid = await _mk_user()
     await _call(mcp_services["db"], _tok(uid), "upsert_jobs",

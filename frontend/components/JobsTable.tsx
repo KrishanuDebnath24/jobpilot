@@ -10,7 +10,6 @@ import {
   LimitedDataBadge,
   ScoreCell,
   SourceBadge,
-  pct,
 } from "./ui";
 
 /** CV attached to a job: the tailored PDF if one is exported for this job, else the base
@@ -120,6 +119,20 @@ function JobDetail({ job, cvDraft }: { job: Job; cvDraft: CvDraft | null }) {
   const rj = q?.reasons_json ?? null;
   return (
     <div className="space-y-4 border-l-2 border-neutral-800 bg-neutral-950/40 px-6 py-4">
+      {(job.employment_type || job.seniority) && (
+        <div className="flex flex-wrap gap-1.5">
+          {job.seniority && (
+            <span className="rounded-md border border-neutral-700 bg-neutral-800/60 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-neutral-300">
+              {job.seniority}
+            </span>
+          )}
+          {job.employment_type && (
+            <span className="rounded-md border border-neutral-700 bg-neutral-800/60 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-neutral-300">
+              {job.employment_type.replace(/_/g, " ")}
+            </span>
+          )}
+        </div>
+      )}
       <JobCv cvDraft={cvDraft} />
 
       {!q ? (
@@ -161,11 +174,6 @@ function JobDetail({ job, cvDraft }: { job: Job; cvDraft: CvDraft | null }) {
             <div className="space-y-1.5">
               <h4 className="text-xs font-medium uppercase tracking-wide text-neutral-500">
                 Dimension breakdown
-                {rj.semantic_fit != null && (
-                  <span className="ml-2 font-normal normal-case text-neutral-400">
-                    · semantic fit {pct(rj.semantic_fit)}
-                  </span>
-                )}
               </h4>
               <DimensionBars dims={rj.dimension_scores} />
             </div>

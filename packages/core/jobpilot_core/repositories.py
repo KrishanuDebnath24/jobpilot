@@ -35,6 +35,8 @@ def job_to_dict(job: models.Job) -> dict:
         "source_type": job.source_type,
         "connector": job.connector,
         "description_completeness": job.description_completeness,
+        "employment_type": job.employment_type,
+        "seniority": job.seniority,
         "dedupe_hash": job.dedupe_hash,
         "status": job.status,
         "created_at": _iso(job.created_at),
@@ -138,6 +140,8 @@ async def upsert_jobs(
             target.source_type = data.source_type
             target.connector = data.connector
             target.description_completeness = data.description_completeness
+            target.employment_type = data.employment_type
+            target.seniority = data.seniority
             target.raw_json = data.raw_json
             target.normalized_json = data.normalized_json
             target.status = data.status
@@ -185,10 +189,16 @@ async def get_jobs(
     limit: int = 100,
     offset: int = 0,
     status: str | None = None,
+    employment_type: str | None = None,
+    seniority: str | None = None,
 ) -> list[models.Job]:
     stmt = select(models.Job).where(models.Job.user_id == user_id)
     if status:
         stmt = stmt.where(models.Job.status == status)
+    if employment_type:
+        stmt = stmt.where(models.Job.employment_type == employment_type)
+    if seniority:
+        stmt = stmt.where(models.Job.seniority == seniority)
     stmt = stmt.order_by(models.Job.created_at.desc()).limit(limit).offset(offset)
     return list((await session.execute(stmt)).scalars().all())
 

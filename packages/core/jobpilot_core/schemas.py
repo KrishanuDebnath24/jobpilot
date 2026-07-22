@@ -33,6 +33,7 @@ class StructuredResume(BaseModel):
 
     contact: Contact = Field(default_factory=Contact)
     summary: str | None = None
+    total_years_experience: float | None = None  # LLM-computed from work roles (excl. education)
     skills: list[str] = Field(default_factory=list)
     experience: list[ExperienceItem] = Field(default_factory=list)
     education: list[EducationItem] = Field(default_factory=list)
@@ -51,6 +52,9 @@ class JobIn(BaseModel):
     source_type: str | None = None  # api|ats|crawl|seed
     connector: str | None = None
     description_completeness: str = "snippet"  # full|snippet|hydrated (set per source)
+    # Deterministically classified by Scout (no LLM); None when unknown. See scout.classify_job.
+    employment_type: str | None = None  # full_time|part_time|contract|temporary|internship
+    seniority: str | None = None  # intern|junior|mid|senior|staff|principal|lead|manager|director
     dedupe_hash: str | None = None
     raw_json: dict | None = None
     normalized_json: dict | None = None

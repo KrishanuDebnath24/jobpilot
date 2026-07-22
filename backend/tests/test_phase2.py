@@ -18,6 +18,7 @@ from jobpilot_core.db import session_scope
 from jobpilot_core.scout import (
     _confident_same_role,
     canonicalize_url,
+    classify_job,
     completeness_rank,
     compute_dedupe_hash,
     normalize_raw,
@@ -264,6 +265,52 @@ def test_unique_contribution_counts_source_only_jobs():
     assert contrib == {"jsearch": 1, "jooble": 1}  # careerjet added nothing unique
 
 
+# --------------------------------------------------------------------------- #
+# Employment-type + seniority classification (deterministic, no LLM)
+# --------------------------------------------------------------------------- #
+def test_classify_job_from_structured_raw_fields():
+    """Structured connector fields decide first: Adzuna contract_type/contract_time,
+    JSearch job_employment_type, The Muse levels."""
+    assert classify_job("Backend Engineer", {"contract_type": "contract"})[0] == "contract"
+    assert classify_job("Backend Engineer", {"contract_time": "part_time"})[0] == "part_time"
+    assert classify_job("Backend Engineer", {"contract_type": "permanent"})[0] == "full_time"
+    assert classify_job("Data Analyst", {"job_employment_type": "CONTRACTOR"})[0] == "contract"
+    assert classify_job("Data Analyst", {"job_employment_type": "INTERN"})[0] == "internship"
+    assert classify_job("Data Analyst", {"levels": ["Senior Level"]})[1] == "senior"
+    assert classify_job("Data Analyst", {"levels": ["Entry Level"]})[1] == "junior"
+
+
+def test_classify_job_from_title_heuristic():
+    """When the source carries no structured field, the title-keyword fallback classifies
+    (covers the crawler + ATS boards)."""
+    assert classify_job("Senior Software Engineer", None) == (None, "senior")
+    assert classify_job("Graduate Software Engineer", None)[1] == "junior"  # freshers
+    assert classify_job("Software Engineer Intern", None) == ("internship", "intern")
+    assert classify_job("QA Engineer (Contract)", None)[0] == "contract"
+    assert classify_job("Engineering Manager", None)[1] == "manager"
+    assert classify_job("Part-Time Support Agent", None)[0] == "part_time"
+
+
+def test_classify_job_word_boundary_guards():
+    """The matcher is word-boundary-ish: 'internal' is not an intern, and a plain
+    'Software Engineer' with no signal stays unclassified (never guessed)."""
+    assert classify_job("Internal Audit Associate", None)[1] != "intern"
+    assert classify_job("Software Engineer", None) == (None, None)
+    # A structured field always wins over a silent title.
+    assert classify_job("Software Engineer", {"job_employment_type": "FULLTIME"})[0] == "full_time"
+
+
+def test_normalize_raw_sets_employment_and_seniority():
+    job = normalize_raw({
+        "connector": "adzuna", "source": "adzuna", "source_type": "api",
+        "title": "Senior Backend Engineer", "company": "Stripe", "location": "Dublin",
+        "url": "https://adzuna/x", "raw": {"contract_type": "contract"},
+    })
+    assert job.employment_type == "contract"
+    assert job.seniority == "senior"
+    assert job.normalized_json["employment_type"] == "contract"
+
+
 async def test_source_precedence_direct_beats_aggregator(mcp_services):
     """A job in an aggregator AND a direct source collapses to one row keeping the
     direct record, regardless of run order (uses db-mcp; no external keys)."""
@@ -329,6 +376,34 @@ async def test_hydrate_snippet_jobs_end_to_end(mcp_services):
         assert se["description_completeness"] == "snippet" and se["description"] == "teaser"
         # idempotent: a second pass hydrates nothing new
         assert (await _call(db, uid, "hydrate_snippet_jobs", {}))["hydrated"] == 0
+    finally:
+        await _cleanup(uid)
+
+
+async def test_get_jobs_filters_by_employment_type_and_seniority(mcp_services):
+    """get_jobs narrows by employment_type / seniority (the 'contract only' / 'freshers'
+    filters). A NULL-classified job never matches a filter."""
+    db = mcp_services["db"]
+
+    def job(title, company, url, raw=None):
+        return normalize_raw({"connector": "adzuna", "source": "adzuna", "source_type": "api",
+                              "title": title, "company": company, "location": "Dublin",
+                              "url": url, "raw": raw or {}}).model_dump()
+
+    uid = await _mk_user()
+    try:
+        await _call(db, uid, "upsert_jobs", {"jobs": [
+            job("QA Engineer", "A", "https://a/1", {"contract_type": "contract"}),   # contract
+            job("Graduate Developer", "B", "https://b/2"),                          # junior (freshers)
+            job("Senior Platform Engineer", "C", "https://c/3"),                    # senior
+            job("Software Engineer", "D", "https://d/4"),                           # unclassified (NULL)
+        ]})
+        contract = (await _call(db, uid, "get_jobs", {"employment_type": "contract"}))["jobs"]
+        assert [r["title"] for r in contract] == ["QA Engineer"]
+        juniors = (await _call(db, uid, "get_jobs", {"seniority": "junior"}))["jobs"]
+        assert [r["title"] for r in juniors] == ["Graduate Developer"]
+        # No filter -> all four (including the unclassified one).
+        assert len((await _call(db, uid, "get_jobs", {"limit": 100}))["jobs"]) == 4
     finally:
         await _cleanup(uid)
 

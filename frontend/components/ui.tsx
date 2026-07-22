@@ -72,13 +72,12 @@ export function Chip({ label, tone }: { label: string; tone: "match" | "miss" })
 const DIM_LABELS: Record<keyof DimensionScores, string> = {
   skills: "Skills",
   experience: "Experience",
-  title_keyword: "Title match",
-  location: "Location",
+  roles_match: "Roles match",
 };
 
 export function DimensionBars({ dims }: { dims: DimensionScores }) {
   return (
-    <div className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
+    <div className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-3">
       {(Object.keys(DIM_LABELS) as (keyof DimensionScores)[]).map((k) => {
         const v = dims[k];
         return (

@@ -38,13 +38,13 @@ def test_full_pipeline_spine_composes_end_to_end():
     job = normalize_raw(RAW_JOB).model_dump()
     assert job["title"] == "Backend Engineer" and job["dedupe_hash"]
 
-    # 3) QUALIFY — deterministic hybrid score (gate + weighted), no LLM
+    # 3) QUALIFY — deterministic pass: the must-have gate + the experience-years dimension.
+    #    Skills/roles are LLM-graded (exercised in the live tests), so no LLM here.
     config = qualifier.default_qualifier_config(RESUME["skills"])
     before = qualifier.score_deterministic(RESUME, job, config)
     assert before["must_have_gate"] == "pass"          # no must-haves configured -> passes
-    assert 0.0 <= before["weighted_score"] <= 1.0
-    assert "go" in [s.lower() for s in before["matched_skills"]]  # real overlap found
-    assert before["missing_skills"]                    # the job asks for things the resume lacks
+    assert 0.0 <= before["experience_score"] <= 1.0
+    assert before["required_years"] == 3               # "3+ years" parsed from the posting
 
     # 4) ANALYZE — roll per-job analyses into a counted aggregate (no LLM)
     analyses = [
@@ -96,14 +96,12 @@ def test_full_pipeline_spine_composes_end_to_end():
     assert "Jane Doe" in text and "2019-2024" in text   # locked facts present + intact
 
     # 8) RE-QUALIFY — score the tailored CV against the same job (before/after on record).
-    #    The tailored CV still surfaces the real overlap and passes the gate; a strict score
-    #    lift from the LLM refine is proven in test_phase6_5_live (deterministic taxonomy is
-    #    coarse, so here we assert a valid, comparable after-score exists).
+    #    The deterministic pass (gate + experience) is stable and comparable; the skills/roles
+    #    lift from the LLM refine is proven in test_phase6_5_live.
     after = qualifier.score_deterministic(honest, job, config)
-    assert after["must_have_gate"] == "pass" and 0.0 <= after["weighted_score"] <= 1.0
-    assert "go" in [s.lower() for s in after["matched_skills"]]
+    assert after["must_have_gate"] == "pass" and 0.0 <= after["experience_score"] <= 1.0
 
     # 9) QUERY — the exact facts a read-only question would answer now exist and are consistent
-    delta = round(after["weighted_score"] - before["weighted_score"], 4)
+    delta = round(after["experience_score"] - before["experience_score"], 4)
     assert isinstance(delta, float)                    # "which CV improved / by how much" is answerable
     assert agg["basis"].startswith("computed from 2 full-text")

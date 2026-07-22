@@ -1,8 +1,9 @@
-"""resume-mcp — deterministic resume ingestion over HTTP (streamable MCP).
+"""resume-mcp — resume ingestion over HTTP (streamable MCP).
 
-Extract text (PDF/DOCX) -> rules-based structured shape -> store the file and
-persist the resume row (with consent + retention). NO LLM calls this phase. The
-scoping ``user_id`` comes only from the signed request context.
+Extract text (PDF/DOCX) -> LLM structuring into the typed shape (a strong Claude model,
+no rules-based parsing) -> store the file and persist the resume row (with consent +
+retention). Resume text is treated as untrusted data by the structuring prompt; the
+scoping ``user_id`` still comes only from the signed request context.
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ async def parse_resume(
     if len(data) > settings.resume_max_bytes:
         raise ValueError(f"file exceeds {settings.resume_max_bytes} bytes")
 
-    raw_text, structured, mime = parse_resume_bytes(data, filename, declared_mime)
+    raw_text, structured, mime = await parse_resume_bytes(data, filename, declared_mime, settings)
 
     if not consent:
         return {

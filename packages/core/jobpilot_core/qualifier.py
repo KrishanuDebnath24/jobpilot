@@ -1,13 +1,19 @@
-"""Qualifier — hybrid ATS scoring.
+"""Qualifier — skills + experience-years + roles-match scoring.
 
-Two passes (see the Phase 3 work order):
-1. :func:`score_deterministic` — a **pure, no-LLM** function: dimension scores
-   (skills / experience / title-keyword / location) from the parsed resume + the
-   normalized job, weighted per the qualifier config, plus a hard **must-have gate**.
-2. :func:`refine_with_llm` — Haiku, **only for gate-passers**, temperature 0,
-   structured output. Job text is treated strictly as data (injection-hardened).
+The final score is a weighted blend of exactly **three** dimensions and nothing else:
+``skills``, ``experience`` (years), and ``roles_match``.
 
-Deterministic scoring is reproducible: same inputs → same decision.
+Two passes:
+1. :func:`score_deterministic` — a pure, no-LLM function: the hard **must-have gate** plus
+   the **experience-years** dimension (the parser's ``total_years_experience`` vs the job's
+   required years). Reproducible: same inputs → same gate + experience.
+2. :func:`refine_with_llm` — **Sonnet**, only for gate-passers, structured output. It reads
+   the full job + resume and returns the job's required / matched / missing **skills** (no
+   taxonomy) and a **roles_match** score. Job text is treated strictly as data
+   (injection-hardened).
+
+:func:`combine` folds them together: ``skills = matched/required`` (from the LLM lists),
+``experience`` (deterministic), ``roles_match`` (from the LLM), weighted per the config.
 """
 
 from __future__ import annotations
@@ -18,9 +24,9 @@ from .llm import extract_json
 from .settings import Settings
 
 # --------------------------------------------------------------------------- #
-# Config defaults
+# Config defaults — exactly three scored dimensions.
 # --------------------------------------------------------------------------- #
-DEFAULT_WEIGHTS = {"skills": 0.40, "experience": 0.25, "title_keyword": 0.25, "location": 0.10}
+DEFAULT_WEIGHTS = {"skills": 0.5, "experience": 0.2, "roles_match": 0.3}
 DEFAULT_THRESHOLD = 0.5
 
 
@@ -65,57 +71,9 @@ def default_qualifier_config(resume_skills: list[str], max_nice: int = 12) -> di
 
 
 # --------------------------------------------------------------------------- #
-# Coarse skills taxonomy (canonical -> aliases). Cheap keyword matching; the Haiku
-# pass produces the *refined* matched/missing skills.
+# Deterministic helpers — used by the must-have gate and the experience dimension.
+# No skills taxonomy: skill/role matching is done by the LLM (see below).
 # --------------------------------------------------------------------------- #
-TAXONOMY: dict[str, list[str]] = {
-    "python": ["python"],
-    "java": ["java"],
-    "javascript": ["javascript", "js"],
-    "typescript": ["typescript", "ts"],
-    "go": ["golang", "go"],
-    "rust": ["rust"],
-    "c#": ["c#", ".net", "dotnet"],
-    "c++": ["c++"],
-    "ruby": ["ruby", "rails"],
-    "php": ["php"],
-    "scala": ["scala"],
-    "kotlin": ["kotlin"],
-    "sql": ["sql", "postgresql", "postgres", "mysql", "sqlite"],
-    "nosql": ["nosql", "mongodb", "dynamodb", "cassandra"],
-    "react": ["react", "reactjs", "react.js"],
-    "vue": ["vue", "vuejs"],
-    "angular": ["angular"],
-    "node": ["node", "nodejs", "node.js"],
-    "fastapi": ["fastapi"],
-    "django": ["django"],
-    "flask": ["flask"],
-    "spring": ["spring", "spring boot"],
-    "docker": ["docker"],
-    "kubernetes": ["kubernetes", "k8s"],
-    "aws": ["aws", "amazon web services"],
-    "gcp": ["gcp", "google cloud"],
-    "azure": ["azure"],
-    "terraform": ["terraform"],
-    "kafka": ["kafka"],
-    "redis": ["redis"],
-    "graphql": ["graphql"],
-    "rest": ["rest", "restful"],
-    "ci/cd": ["ci/cd", "cicd", "continuous integration"],
-    "linux": ["linux", "unix"],
-    "git": ["git"],
-    "machine learning": ["machine learning", "ml", "pytorch", "tensorflow", "scikit-learn"],
-    "data engineering": ["data engineering", "etl", "airflow", "spark"],
-    "microservices": ["microservices", "microservice"],
-}
-
-_STOPWORDS = {
-    "the", "and", "for", "with", "you", "our", "are", "will", "who", "job", "role",
-    "team", "work", "senior", "junior", "lead", "staff", "engineer", "developer",
-    "software", "experience", "years", "year", "ireland", "dublin", "remote",
-}
-
-
 def _norm(text: str | None) -> str:
     return re.sub(r"\s+", " ", (text or "").lower()).strip()
 
@@ -128,14 +86,6 @@ def _term_in_text(term: str, text: str) -> bool:
     return re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])", text) is not None
 
 
-def _skills_in_text(text: str) -> set[str]:
-    found: set[str] = set()
-    for canonical, aliases in TAXONOMY.items():
-        if any(_term_in_text(a, text) for a in aliases):
-            found.add(canonical)
-    return found
-
-
 def _resume_text(resume: dict) -> str:
     parts: list[str] = list(resume.get("skills") or [])
     if resume.get("summary"):
@@ -143,7 +93,7 @@ def _resume_text(resume: dict) -> str:
     for exp in resume.get("experience") or []:
         parts.append(exp.get("title") or "")
         parts.append(exp.get("company") or "")
-        parts.append(exp.get("dates") or "")  # dates feed the experience-years estimate
+        parts.append(exp.get("dates") or "")  # dates feed the fallback experience-years estimate
         parts.extend(exp.get("bullets") or [])
     for edu in resume.get("education") or []:
         parts.append(edu.get("text") or "")
@@ -154,17 +104,14 @@ def _job_text(job: dict) -> str:
     return _norm(" ".join(str(job.get(k) or "") for k in ("title", "company", "description")))
 
 
-def _tokens(text: str) -> set[str]:
-    return {w for w in re.findall(r"[a-z0-9+#./]+", text) if len(w) > 2 and w not in _STOPWORDS}
-
-
 def _required_years(job_text: str) -> int:
     yrs = [int(m) for m in re.findall(r"(\d{1,2})\s*\+?\s*(?:years|yrs)", job_text)]
     return min(max(yrs), 15) if yrs else 0
 
 
 def _resume_years(resume: dict, resume_text: str) -> float:
-    years = [int(y) for y in re.findall(r"(19|20)\d{2}", resume_text)]
+    """Fallback only — used when the parsed resume lacks ``total_years_experience``."""
+    years = [int(y) for y in re.findall(r"(?:19|20)\d{2}", resume_text)]
     if len(years) >= 2:
         span = max(years) - min(years)
         if 0 < span <= 45:
@@ -173,101 +120,58 @@ def _resume_years(resume: dict, resume_text: str) -> float:
     return float(min(n_exp * 2, 10))  # rough proxy when dates aren't parseable
 
 
-def _title_score(job_title: str | None, resume_text: str) -> float:
-    title_tokens = _tokens(_norm(job_title))
-    if not title_tokens:
-        return 0.5
-    resume_tokens = _tokens(resume_text)
-    hits = len(title_tokens & resume_tokens)
-    return round(min(1.0, hits / len(title_tokens)), 4)
-
-
-def _location_score(job: dict, preferred: list[str]) -> float:
-    loc = _norm(job.get("location"))
-    if "remote" in _job_text(job):
-        return 1.0
-    if not loc:
-        return 0.5
-    if not preferred:
-        return 0.8  # no stated preference -> mild positive
-    if any(_norm(p).split(",")[0] in loc for p in preferred if p):
-        return 1.0
-    return 0.4
-
-
 def _normalize_terms(terms: list[str]) -> list[str]:
     return [t.strip() for t in (terms or []) if t and t.strip()]
 
 
-def score_deterministic(
-    resume: dict,
-    job: dict,
-    config: dict,
-    preferred_locations: list[str] | None = None,
-) -> dict:
-    """Pure deterministic scoring. Returns dimension scores, weighted total, the
-    must-have gate result, and matched/missing skills. No LLM, no I/O."""
+def _weighted(dims: dict, weights: dict) -> float:
+    wsum = sum(float(weights.get(k, 0)) for k in dims) or 1.0
+    return sum(float(weights.get(k, 0)) * v for k, v in dims.items()) / wsum
+
+
+def score_deterministic(resume: dict, job: dict, config: dict) -> dict:
+    """Pure deterministic pass: the must-have gate + the experience-years dimension.
+
+    Skills and roles are graded by the LLM (see :func:`refine_with_llm`), so they are not
+    computed here. No LLM, no I/O; same inputs → same gate + experience."""
     resume_text = _resume_text(resume)
-    resume_skills = _skills_in_text(resume_text) | _skills_in_text(
-        _norm(" ".join(resume.get("skills") or []))
-    )
     job_text = _job_text(job)
-    job_skills = _skills_in_text(job_text)
 
+    # Must-have gate: every must-have term must be present in the job (hard pre-filter).
     must = _normalize_terms(config.get("must_have"))
-    nice = _normalize_terms(config.get("nice_to_have"))
-
-    # Must-have gate: every must-have term must be present in the job.
     missing_must = [m for m in must if not _term_in_text(m, job_text)]
     gate = "fail" if missing_must else "pass"
 
-    matched_skills = sorted(resume_skills & job_skills)
-    missing_skills = sorted(job_skills - resume_skills)  # job asks, resume lacks
-
-    if job_skills:
-        skills_score = len(matched_skills) / len(job_skills)
-    else:
-        skills_score = 0.6  # nothing recognizable to match against
-    nice_hits = sum(1 for n in nice if _term_in_text(n, job_text) and _term_in_text(n, resume_text))
-    skills_score = min(1.0, skills_score + 0.05 * nice_hits)
-
     req_years = _required_years(job_text)
-    res_years = _resume_years(resume, resume_text)
+    # Prefer the parser's LLM-computed work experience (excludes education); fall back to the
+    # text-scan heuristic only for resumes/CVs that don't carry the field.
+    _stated = resume.get("total_years_experience")
+    res_years = float(_stated) if isinstance(_stated, (int, float)) else _resume_years(resume, resume_text)
     exp_score = 1.0 if req_years == 0 else max(0.0, min(1.0, res_years / req_years))
 
-    dims = {
-        "skills": round(skills_score, 4),
-        "experience": round(exp_score, 4),
-        "title_keyword": _title_score(job.get("title"), resume_text),
-        "location": _location_score(job, preferred_locations or []),
-    }
-    weights = config.get("weights_json") or DEFAULT_WEIGHTS
-    wsum = sum(float(weights.get(k, 0)) for k in dims) or 1.0
-    weighted = sum(float(weights.get(k, 0)) * v for k, v in dims.items()) / wsum
-
     return {
-        "dimension_scores": dims,
-        "weighted_score": round(weighted, 4),
         "must_have_gate": gate,
         "missing_must_have": missing_must,
-        "matched_skills": matched_skills,
-        "missing_skills": missing_skills,
-        "job_skills": sorted(job_skills),
+        "experience_score": round(exp_score, 4),
         "required_years": req_years,
         "resume_years": res_years,
     }
 
 
 # --------------------------------------------------------------------------- #
-# LLM refinement (Haiku, gated, temperature 0, structured)
+# LLM refinement (Sonnet, gated, structured). It reads the FULL job + resume and grades
+# the two semantic dimensions — skills and roles_match — with no taxonomy.
 # --------------------------------------------------------------------------- #
 _RUBRIC = (
-    "Judge how well the candidate fits THIS specific job. Weigh real skill overlap, "
-    "seniority/years alignment, and domain relevance. Be calibrated: a strong match "
-    "is 0.8-1.0, a plausible stretch 0.4-0.7, a poor fit below 0.4. Refined skills "
-    "must be grounded in both texts. Every reason must cite a concrete fact from the "
-    "resume and/or the job (e.g. 'resume shows 4 yrs Python; role asks 5+'). This is "
-    "fit guidance, not a hiring verdict."
+    "Judge the candidate for THIS job on exactly two things. (1) SKILLS — read the whole "
+    "posting and list required_skills (the skills/tools the job needs), then matched_skills "
+    "(required skills the resume demonstrably shows) and missing_skills (required skills it "
+    "does not). Match by meaning, not spelling (treat 'Postgres' and 'PostgreSQL' as the same). "
+    "(2) ROLES — roles_match is 0..1 for how well the candidate's PAST ROLES, seniority, and "
+    "domain fit this role (e.g. a Data Engineer background fits an Analytics Engineer role; a "
+    "large seniority or domain gap lowers it). Every reason must cite a concrete fact from the "
+    "resume and/or the job (e.g. 'resume shows Data Engineer at LTIMindtree; role is Analytics "
+    "Engineer'). This is fit guidance, not a hiring verdict."
 )
 
 _SYSTEM = (
@@ -281,16 +185,21 @@ _SYSTEM = (
 _REFINE_SCHEMA = {
     "type": "object",
     "properties": {
-        "semantic_fit_score": {"type": "number", "description": "0..1 fit for THIS job"},
-        "refined_matched_skills": {"type": "array", "items": {"type": "string"}},
-        "refined_missing_skills": {"type": "array", "items": {"type": "string"}},
+        "required_skills": {"type": "array", "items": {"type": "string"},
+                            "description": "every skill/tool THIS job requires"},
+        "matched_skills": {"type": "array", "items": {"type": "string"},
+                           "description": "required skills the resume demonstrably shows"},
+        "missing_skills": {"type": "array", "items": {"type": "string"},
+                           "description": "required skills the resume does not show"},
+        "roles_match": {"type": "number",
+                        "description": "0..1 fit of the candidate's past roles/seniority/domain to THIS role"},
         "reasons": {
             "type": "array",
             "items": {"type": "string"},
             "description": "concrete, fact-citing reasons (resume vs job)",
         },
     },
-    "required": ["semantic_fit_score", "refined_matched_skills", "refined_missing_skills", "reasons"],
+    "required": ["required_skills", "matched_skills", "missing_skills", "roles_match", "reasons"],
     "additionalProperties": False,
 }
 
@@ -344,7 +253,7 @@ def _refine_user_text(resume: dict, job: dict) -> str:
 async def refine_with_llm(
     resume: dict, job: dict, config: dict, settings: Settings, model: str | None = None
 ):
-    """Gate-passers only. Temperature 0 for reproducibility."""
+    """Gate-passers only. Sonnet tier; temperature is omitted (Sonnet 5 rejects it)."""
     return await extract_json(
         system=_SYSTEM,
         user_text=_refine_user_text(resume, job),
@@ -352,8 +261,8 @@ async def refine_with_llm(
         tool_description="Record the structured ATS fit judgment for this job.",
         input_schema=_REFINE_SCHEMA,
         settings=settings,
-        model=model,
-        temperature=0,
+        model=model or settings.qualifier_refine_model,
+        max_tokens=settings.qualifier_refine_max_tokens,
     )
 
 
@@ -369,49 +278,60 @@ def refine_batch_params(resume: dict, job: dict, settings: Settings, model: str 
         tool_name=REFINE_TOOL,
         tool_description="Record the structured ATS fit judgment for this job.",
         input_schema=_REFINE_SCHEMA,
-        model=model or settings.scout_extractor_model,
-        max_tokens=settings.llm_max_output_tokens,
-        temperature=0,
+        model=model or settings.qualifier_refine_model,
+        max_tokens=settings.qualifier_refine_max_tokens,
     )
 
 
 # --------------------------------------------------------------------------- #
-# Combine deterministic + LLM into a final decision
+# Combine the three dimensions into a final decision
 # --------------------------------------------------------------------------- #
 def combine(deterministic: dict, llm: dict | None, config: dict) -> dict:
-    """Merge the two passes. Decision = gate passed AND combined score ≥ threshold."""
-    threshold = float(config.get("threshold", DEFAULT_THRESHOLD))
+    """Blend skills + experience + roles_match into the final decision.
+
+    ``experience`` comes from the deterministic pass; ``skills`` (= matched/required) and
+    ``roles_match`` come from the LLM. Decision = gate passed AND weighted score ≥ threshold.
+    ``_weighted`` renormalizes over whatever dimensions are present, so a missing LLM result
+    (rare) simply drops skills/roles from the blend rather than falling back to a taxonomy."""
+    _thr = config.get("threshold")
+    threshold = float(_thr) if _thr is not None else DEFAULT_THRESHOLD
     if deterministic["must_have_gate"] == "fail":
         missing = ", ".join(deterministic["missing_must_have"])
         return {
             "score": 0.0,
             "decision": "disqualified",
             "reasons": [f"Hard-disqualified: job is missing must-have(s): {missing}"],
-            "matched_skills": deterministic["matched_skills"],
-            "missing_skills": deterministic["missing_skills"],
-            "semantic_fit": None,
+            "matched_skills": [],
+            "missing_skills": [],
+            "roles_match": None,
+            "dimension_scores": {"experience": deterministic["experience_score"]},
             "gated_out": True,
         }
-    det = deterministic["weighted_score"]
+
+    dims: dict[str, float] = {"experience": deterministic["experience_score"]}
+    matched: list[str] = []
+    missing: list[str] = []
+    reasons: list[str] = []
     if llm:
-        sem = max(0.0, min(1.0, float(llm.get("semantic_fit_score", det))))
-        score = round(0.6 * det + 0.4 * sem, 4)
-        matched = llm.get("refined_matched_skills") or deterministic["matched_skills"]
-        missing = llm.get("refined_missing_skills") or deterministic["missing_skills"]
+        required = llm.get("required_skills") or []
+        matched = llm.get("matched_skills") or []
+        missing = llm.get("missing_skills") or []
+        if required:
+            dims["skills"] = max(0.0, min(1.0, len(matched) / len(required)))
+        roles = llm.get("roles_match")
+        if isinstance(roles, (int, float)):
+            dims["roles_match"] = max(0.0, min(1.0, float(roles)))
         reasons = llm.get("reasons") or []
-    else:
-        sem, score = None, det
-        matched, missing, reasons = (
-            deterministic["matched_skills"],
-            deterministic["missing_skills"],
-            [],
-        )
+
+    weights = {**DEFAULT_WEIGHTS, **(config.get("weights_json") or {})}
+    score = round(_weighted(dims, weights), 4)
     return {
         "score": score,
         "decision": "qualified" if score >= threshold else "disqualified",
         "reasons": reasons,
         "matched_skills": matched,
         "missing_skills": missing,
-        "semantic_fit": sem,
+        "roles_match": dims.get("roles_match"),
+        "dimension_scores": {k: round(v, 4) for k, v in dims.items()},
         "gated_out": False,
     }

@@ -32,6 +32,8 @@ export default function Dashboard() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [decision, setDecision] = useState<Decision>("all");
   const [source, setSource] = useState<string>("all");
+  const [employment, setEmployment] = useState<string>("all");
+  const [seniority, setSeniority] = useState<string>("all");
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const loadingJobs = useRef(false);
@@ -176,6 +178,16 @@ export default function Dashboard() {
     () => Array.from(new Set(jobs.map((j) => j.connector).filter(Boolean))).sort() as string[],
     [jobs],
   );
+  // Employment/seniority options are whatever Scout actually classified across the pool
+  // (so the dropdowns never offer a value that would match nothing).
+  const employmentTypes = useMemo(
+    () => Array.from(new Set(jobs.map((j) => j.employment_type).filter(Boolean))).sort() as string[],
+    [jobs],
+  );
+  const seniorities = useMemo(
+    () => Array.from(new Set(jobs.map((j) => j.seniority).filter(Boolean))).sort() as string[],
+    [jobs],
+  );
 
   const visible = useMemo(() => {
     const filtered = jobs.filter((j) => {
@@ -184,12 +196,14 @@ export default function Dashboard() {
       if (decision === "disqualified" && d !== "disqualified") return false;
       if (decision === "unscored" && j.qualification) return false;
       if (source !== "all" && j.connector !== source) return false;
+      if (employment !== "all" && j.employment_type !== employment) return false;
+      if (seniority !== "all" && j.seniority !== seniority) return false;
       return true;
     });
     return filtered.sort(
       (a, b) => (b.qualification?.score ?? -1) - (a.qualification?.score ?? -1),
     );
-  }, [jobs, decision, source]);
+  }, [jobs, decision, source, employment, seniority]);
 
   const qualifiedCount = jobs.filter((j) => j.qualification?.decision === "qualified").length;
 
@@ -298,6 +312,34 @@ export default function Dashboard() {
             </option>
           ))}
         </select>
+        {employmentTypes.length > 0 && (
+          <select
+            value={employment}
+            onChange={(e) => setEmployment(e.target.value)}
+            className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-1.5 text-sm capitalize text-neutral-300 outline-none focus:border-neutral-600"
+          >
+            <option value="all">All types</option>
+            {employmentTypes.map((t) => (
+              <option key={t} value={t}>
+                {t.replace(/_/g, " ")}
+              </option>
+            ))}
+          </select>
+        )}
+        {seniorities.length > 0 && (
+          <select
+            value={seniority}
+            onChange={(e) => setSeniority(e.target.value)}
+            className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-1.5 text-sm capitalize text-neutral-300 outline-none focus:border-neutral-600"
+          >
+            <option value="all">All levels</option>
+            {seniorities.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        )}
         <span className="ml-auto text-sm text-neutral-500">
           {visible.length} of {jobs.length} jobs · {qualifiedCount} qualified · sorted by score
         </span>

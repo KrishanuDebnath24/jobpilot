@@ -105,7 +105,7 @@ TOOLS: list[dict] = [
     _tool("get_qualifier_config", "Read the user's Qualifier config (weights, threshold, must/nice-to-have).", {}),
     _tool("update_qualifier_config",
           "Update Qualifier scoring config. CONSEQUENTIAL — changes how jobs are scored; confirm first.",
-          {"weights_json": {"type": "object", "description": "{skills,experience,title_keyword,location}"},
+          {"weights_json": {"type": "object", "description": "{skills,experience,roles_match}"},
            "threshold": {"type": "number"},
            "must_have": {"type": "array", "items": {"type": "string"}},
            "nice_to_have": {"type": "array", "items": {"type": "string"}}}),

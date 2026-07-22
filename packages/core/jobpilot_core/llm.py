@@ -30,6 +30,8 @@ _PRICING: dict[str, tuple[float, float]] = {
     # Phase 5 Enhancer tier (intro pricing; keep in sync with claude.com/pricing).
     "claude-sonnet-5": (3.0, 15.0),
     "claude-sonnet-4-6": (3.0, 15.0),
+    # Strong tier — resume structuring (resume-mcp).
+    "claude-opus-4-8": (5.0, 25.0),
 }
 _DEFAULT_PRICE = (1.0, 5.0)  # assume the cheap tier if a model is unlisted
 

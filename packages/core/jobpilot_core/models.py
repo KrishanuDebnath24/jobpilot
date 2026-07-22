@@ -144,6 +144,12 @@ class Job(Base):
     description_completeness: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default="snippet", default="snippet"
     )
+    # Deterministically classified by Scout (normalize_raw) — no LLM. NULL when the source
+    # is silent and the title gives no hint (never guessed). Drives the employment/seniority
+    # filters. employment_type ∈ full_time|part_time|contract|temporary|internship;
+    # seniority ∈ intern|junior|mid|senior|staff|principal|lead|manager|director.
+    employment_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    seniority: Mapped[str | None] = mapped_column(String(16), nullable=True)
     raw_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     normalized_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)

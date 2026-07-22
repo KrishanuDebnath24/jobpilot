@@ -37,7 +37,7 @@ async def _context(user_id: uuid.UUID):
 async def run_requalify(user_id: uuid.UUID, draft_ids: list[str] | None = None) -> dict:
     """Re-qualify tailored drafts (a subset, or all approved) and report deltas."""
     settings = get_settings()
-    qcfg, prefs, jobs = await _context(user_id)
+    qcfg, _prefs, jobs = await _context(user_id)
 
     drafts = (await mcp_client.db_mcp(user_id, "get_cv_drafts", {}))["drafts"]
     if draft_ids:
@@ -57,7 +57,7 @@ async def run_requalify(user_id: uuid.UUID, draft_ids: list[str] | None = None) 
         if job is None or not cv:
             errors[did] = "missing job or tailored content"
             continue
-        det = qualifier.score_deterministic(cv, job, qcfg, preferred_locations=prefs)
+        det = qualifier.score_deterministic(cv, job, qcfg)
         dets[did] = det
         if det["must_have_gate"] == "pass":
             to_refine[did] = {"resume": cv, "job": job}
@@ -77,7 +77,7 @@ async def run_requalify(user_id: uuid.UUID, draft_ids: list[str] | None = None) 
                 break
             await asyncio.sleep(settings.batch_poll_interval_seconds)
         results, _ = await collect_batch_results(
-            settings, bid, qualifier.REFINE_TOOL, settings.scout_extractor_model)
+            settings, bid, qualifier.REFINE_TOOL, settings.qualifier_refine_model)
         refined = results
     elif to_refine:
         for did, v in to_refine.items():

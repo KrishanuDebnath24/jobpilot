@@ -116,6 +116,16 @@ class SearchConfigUpdate(BaseModel):
     schedule: str | None = None
 
 
+class QualifierConfigUpdate(BaseModel):
+    """Partial update of the user's qualifier config — only provided fields are written.
+    ``must_have`` is the hard gate: a job missing any must-have term is disqualified (so
+    e.g. ``["contract"]`` narrows the qualified set to contract postings)."""
+    weights_json: dict | None = None
+    threshold: float | None = None
+    must_have: list[str] | None = None
+    nice_to_have: list[str] | None = None
+
+
 class DeriveConfigRequest(BaseModel):
     """Ask the LLM to propose a market-canonical config from the resume (review-only, no
     write). ``hint`` is the optional free-text steer typed in the review dialog."""
@@ -308,8 +318,16 @@ async def download_my_resume_file(current_user=Depends(get_current_user)):
 # Jobs (through db-mcp)
 # --------------------------------------------------------------------------- #
 @app.get("/jobs", tags=["jobs"])
-async def list_jobs(current_user=Depends(get_current_user)) -> dict:
-    return await mcp_client.db_mcp(current_user.id, "get_jobs", {})
+async def list_jobs(
+    employment_type: str | None = None,
+    seniority: str | None = None,
+    current_user=Depends(get_current_user),
+) -> dict:
+    """List the user's jobs, optionally narrowed by employment type (e.g. ``contract``)
+    or seniority (e.g. ``junior``/``intern`` for freshers). Both are deterministically
+    classified at scout time; a NULL value never matches a filter."""
+    args = {k: v for k, v in {"employment_type": employment_type, "seniority": seniority}.items() if v}
+    return await mcp_client.db_mcp(current_user.id, "get_jobs", args)
 
 
 # --------------------------------------------------------------------------- #
@@ -360,6 +378,26 @@ async def derive_search_config(
         return await propose_config(current_user.id, body.hint)
     except RuntimeError as exc:  # e.g. missing Anthropic key surfaced by the LLM path
         raise HTTPException(status_code=503, detail=str(exc))
+
+
+# --------------------------------------------------------------------------- #
+# Qualifier config — the scored weights/threshold + the hard must-have gate. Read/
+# updated by the user; the gate is the lever to narrow the qualified set by a term
+# (e.g. must_have=["contract"]). Proxied to config-mcp (user-scoped by the signed ctx).
+# --------------------------------------------------------------------------- #
+@app.get("/qualifier-config", tags=["qualifier-config"])
+async def get_qualifier_config(current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.config_mcp(current_user.id, "get_qualifier_config", {})
+
+
+@app.put("/qualifier-config", tags=["qualifier-config"])
+async def update_qualifier_config(
+    body: QualifierConfigUpdate, current_user=Depends(get_current_user)
+) -> dict:
+    # Partial update: only send keys the caller actually set, so an omitted field is left
+    # untouched rather than cleared.
+    fields = body.model_dump(exclude_none=True)
+    return await mcp_client.config_mcp(current_user.id, "update_qualifier_config", fields)
 
 
 # --------------------------------------------------------------------------- #

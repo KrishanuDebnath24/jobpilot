@@ -30,11 +30,16 @@ async def get_jobs(
     status: str | None = None,
     limit: int = 100,
     offset: int = 0,
+    employment_type: str | None = None,
+    seniority: str | None = None,
     user_id: str | None = None,  # IGNORED — scoping comes from the request context
 ) -> dict:
     uid = require_user_id()
     async with session_scope() as session:
-        jobs = await repositories.get_jobs(session, uid, limit=limit, offset=offset, status=status)
+        jobs = await repositories.get_jobs(
+            session, uid, limit=limit, offset=offset, status=status,
+            employment_type=employment_type, seniority=seniority,
+        )
         return {"jobs": [repositories.job_to_dict(j) for j in jobs]}
 
 

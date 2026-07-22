@@ -64,6 +64,17 @@ class Settings(BaseSettings):
     llm_max_output_tokens: int = 1024
     # Cap jobs scored per Qualifier run (bounds LLM spend on the gated refine pass).
     qualify_max_jobs: int = 200
+    # The Qualifier's fit-refine pass (gate-passers only). A Sonnet tier: it reads the FULL
+    # job + resume, so it grades skill coverage without the deterministic taxonomy's blind
+    # spots — required skills the taxonomy doesn't know are still detected.
+    qualifier_refine_model: str = "claude-sonnet-5"
+    qualifier_refine_max_tokens: int = 1500  # room for matched/missing skills + reasons
+
+    # --- Resume structuring (resume-mcp). A STRONG tier: the model turns extracted resume
+    #     text into the typed StructuredResume shape (no rules-based parsing), so accuracy
+    #     matters more than cost — this runs once per upload, not per job. ---
+    resume_parser_model: str = "claude-opus-4-8"
+    resume_parser_max_tokens: int = 4000  # room for a full structured resume (skills + roles)
 
     # --- Phase 5 (Analyzer + Enhancer). Two-model split, config-driven so tiers can
     #     be promoted without code changes. Analyzer = high-volume extraction (Haiku,

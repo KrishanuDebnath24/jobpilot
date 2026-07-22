@@ -153,19 +153,23 @@ def test_render_both_reports_machine_readable():
 # --------------------------------------------------------------------------- #
 # 6.5f — a legitimate score lift is possible with NO LLM (deterministic pass only)
 # --------------------------------------------------------------------------- #
-def test_deterministic_requalify_lifts_score_for_surfaced_real_keywords():
+def test_requalify_lifts_score_when_more_required_skills_are_matched():
+    # Skills are now LLM-graded (matched/required); a tailored CV that surfaces REAL keywords
+    # raises `matched_skills`, which raises the skills dimension and the final score. This
+    # checks the combine mechanism deterministically (no LLM call): same job/required set,
+    # more matched -> higher score.
     cfg = qualifier.default_qualifier_config(BASE["skills"])
     job = {"title": "Kubernetes Platform Engineer", "company": "X",
            "description": "We need Kubernetes, Go, and REST API experience."}
-    base_only = {**BASE, "summary": "Engineer.",
-                 "experience": [{"title": "Software Engineer", "company": "Acme", "dates": "2019–2023",
-                                 "bullets": ["Did some backend work"]}]}
-    tailored = {**BASE, "summary": "Kubernetes platform and Go backend engineer.",
-                "experience": [{"title": "Software Engineer", "company": "Acme", "dates": "2019–2023",
-                                "bullets": ["Built Kubernetes platforms and Go REST APIs"]}]}
-    before = qualifier.score_deterministic(base_only, job, cfg)["weighted_score"]
-    after = qualifier.score_deterministic(tailored, job, cfg)["weighted_score"]
-    assert after >= before  # surfacing REAL matching keywords legitimately raises the fit
+    det = qualifier.score_deterministic(BASE, job, cfg)
+    required = ["kubernetes", "go", "rest api"]
+    before_llm = {"required_skills": required, "matched_skills": [], "missing_skills": required,
+                  "roles_match": 0.5, "reasons": []}
+    after_llm = {"required_skills": required, "matched_skills": required, "missing_skills": [],
+                 "roles_match": 0.5, "reasons": []}
+    before = qualifier.combine(det, before_llm, cfg)["score"]
+    after = qualifier.combine(det, after_llm, cfg)["score"]
+    assert after > before  # surfacing REAL matching skills legitimately raises the fit
 
 
 # --------------------------------------------------------------------------- #
