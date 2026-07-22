@@ -11,6 +11,7 @@ import type {
   PipelineEvent,
   PipelineExecution,
   PipelineRun,
+  QualifierConfig,
   QueryTurn,
   ResumeUploadResult,
   ResumeVersion,
@@ -145,6 +146,16 @@ export const runQualify = (requalifyAll = false) =>
   request<{ task_id: string }>(`/qualify/run?requalify_all=${requalifyAll}`, {
     method: "POST",
   });
+
+// --- Qualifier config: scoring weights/threshold + the must_have hard gate
+// (e.g. must_have=["contract"] narrows the qualified set to contract postings). ---
+export const getQualifierConfig = () =>
+  request<{ config: QualifierConfig }>("/qualifier-config").then((r) => r.config);
+export const updateQualifierConfig = (fields: Partial<QualifierConfig>) =>
+  request<{ config: QualifierConfig }>("/qualifier-config", {
+    method: "PUT",
+    body: JSON.stringify(fields),
+  }).then((r) => r.config);
 
 // --- Phase 4: pipeline orchestrator ---
 export type RunPipelineResult = {

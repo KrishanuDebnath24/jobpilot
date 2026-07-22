@@ -218,6 +218,20 @@ export type SearchConfig = {
   schedule: string | null;
   created_at?: string | null;
 };
+// Qualifier config — how Qualify scores jobs + the must_have hard gate.
+export type QualifierWeights = {
+  skills?: number;
+  experience?: number;
+  roles_match?: number;
+};
+export type QualifierConfig = {
+  id?: string | null;
+  weights_json: QualifierWeights;
+  threshold: number | null;
+  must_have: string[]; // hard gate: a job missing any of these is disqualified
+  nice_to_have: string[];
+  created_at?: string | null;
+};
 // LLM proposal from the resume (review-only; roles are market-canonical).
 export type SearchConfigProposal = {
   roles: string[];

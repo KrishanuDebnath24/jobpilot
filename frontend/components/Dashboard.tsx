@@ -1,13 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CvDraft, Job, SearchConfig, SearchConfigProposal } from "@/lib/types";
+import type { CvDraft, Job, QualifierConfig, SearchConfig, SearchConfigProposal } from "@/lib/types";
 import {
   deriveSearchConfig,
   getBaseResumeId,
   getCvDrafts,
   getDashboardJobs,
   getMe,
+  getQualifierConfig,
   getSearchConfig,
   getToken,
   setToken,
@@ -23,6 +24,7 @@ import TailoredCVs from "./TailoredCVs";
 import CostPanel from "./CostPanel";
 import ResumeUpload from "./ResumeUpload";
 import SearchSettings, { type SearchSettingsMode } from "./SearchSettings";
+import QualifierSettings from "./QualifierSettings";
 
 type Decision = "all" | "qualified" | "disqualified" | "unscored";
 
@@ -57,6 +59,18 @@ export default function Dashboard() {
       }
     } catch {
       /* a config fetch hiccup shouldn't wedge the dashboard */
+    }
+  }, []);
+
+  // Qualifier config: scoring weights/threshold + the must-have hard filter.
+  const [qualifierConfig, setQualifierConfig] = useState<QualifierConfig | null>(null);
+  const [qualifierOpen, setQualifierOpen] = useState(false);
+
+  const loadQualifierConfig = useCallback(async () => {
+    try {
+      setQualifierConfig(await getQualifierConfig());
+    } catch {
+      /* best-effort; never wedge the dashboard */
     }
   }, []);
 
@@ -148,8 +162,9 @@ export default function Dashboard() {
     if (authed) {
       loadJobs();
       loadConfig();
+      loadQualifierConfig();
     }
-  }, [authed, loadJobs, loadConfig]);
+  }, [authed, loadJobs, loadConfig, loadQualifierConfig]);
 
   // Poll the CV context so tailored CVs attach to rows as the Prepare/Export tasks finish.
   useEffect(() => {
@@ -280,6 +295,51 @@ export default function Dashboard() {
         </section>
       </div>
 
+      <div className="mt-4">
+        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/30">
+          <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-2.5">
+            <div>
+              <h2 className="text-sm font-semibold text-neutral-200">Scoring &amp; filters</h2>
+              <p className="text-xs text-neutral-500">
+                How Qualify scores jobs — and the must-have hard filter.
+              </p>
+            </div>
+            <button
+              onClick={() => setQualifierOpen(true)}
+              className="rounded-lg border border-neutral-700 px-2.5 py-1 text-xs text-neutral-200 transition hover:border-neutral-500"
+            >
+              Edit
+            </button>
+          </div>
+          <dl className="grid gap-1.5 px-4 py-3 text-xs sm:grid-cols-2">
+            <div className="flex gap-2">
+              <dt className="w-24 shrink-0 text-neutral-500">Must-have</dt>
+              <dd className="text-neutral-300">{qualifierConfig?.must_have?.join(", ") || "—"}</dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="w-24 shrink-0 text-neutral-500">Threshold</dt>
+              <dd className="text-neutral-300">{qualifierConfig?.threshold ?? "—"}</dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="w-24 shrink-0 text-neutral-500">Nice-to-have</dt>
+              <dd className="truncate text-neutral-300">
+                {qualifierConfig?.nice_to_have?.join(", ") || "—"}
+              </dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="w-24 shrink-0 text-neutral-500">Weights</dt>
+              <dd className="text-neutral-300">
+                {qualifierConfig?.weights_json
+                  ? `skills ${qualifierConfig.weights_json.skills ?? "—"} · exp ${
+                      qualifierConfig.weights_json.experience ?? "—"
+                    } · roles ${qualifierConfig.weights_json.roles_match ?? "—"}`
+                  : "—"}
+              </dd>
+            </div>
+          </dl>
+        </section>
+      </div>
+
       {error && (
         <p className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-300">
           {error}
@@ -371,6 +431,18 @@ export default function Dashboard() {
           proposal={settings.proposal}
           onClose={() => setSettings((s) => ({ ...s, open: false, proposal: null }))}
           onSaved={onConfigSaved}
+        />
+      )}
+
+      {qualifierOpen && (
+        <QualifierSettings
+          initial={qualifierConfig}
+          onClose={() => setQualifierOpen(false)}
+          onSaved={(cfg) => {
+            setQualifierConfig(cfg);
+            setQualifierOpen(false);
+            loadJobs(); // a "Save & re-qualify" rescored the pool → refresh the table
+          }}
         />
       )}
     </main>
