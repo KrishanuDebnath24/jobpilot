@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 
+from anthropic import APIError, APIStatusError, AuthenticationError, RateLimitError
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -27,6 +29,7 @@ from .ratelimit import ip_rate_limit, user_rate_limit
 from .readiness import check_db, check_redis
 
 settings = get_settings()
+logger = logging.getLogger("jobpilot.api")
 
 app = FastAPI(title="JobPilot API", version=VERSION, summary="Agentic job-hunting platform.")
 
@@ -37,6 +40,50 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# --------------------------------------------------------------------------- #
+# Anthropic failures → a clean, CORS-carrying response.
+#
+# The interactive LLM endpoints (Query agent, Concierge chat) call Anthropic inside the
+# request. A raised `anthropic.APIError` — out of credits, rate-limited, bad key, upstream
+# outage — would otherwise escape as an UNHANDLED 500, and an unhandled 500 is produced by
+# the outermost ServerErrorMiddleware *above* the CORS middleware, so it carries no
+# `access-control-allow-origin` header. The browser then blocks the headerless response and
+# reports a bare "TypeError: NetworkError", hiding the real cause. A *registered* handler
+# runs inside the CORS middleware, so its response gets the CORS headers, the browser reads
+# it, and the UI shows the real message. (Async worker LLM calls — analyze/enhance/cv — fail
+# in Celery, not here, and are reported through their run status; this covers the request
+# path only.)
+# --------------------------------------------------------------------------- #
+def _anthropic_error_response(exc: APIError) -> tuple[int, str]:
+    """Map an Anthropic failure to (http_status, user-facing detail). Rate limits are 429
+    (retryable); every other provider-side condition is 503 (the AI service is unavailable
+    to us — never a 4xx that would wrongly blame the caller's request)."""
+    if isinstance(exc, RateLimitError):
+        return 429, "The AI service is rate-limited right now — please try again in a moment."
+    # Pull the provider's own message out of the error body when present.
+    provider_msg = ""
+    if isinstance(exc, APIStatusError):
+        body = exc.body if isinstance(getattr(exc, "body", None), dict) else {}
+        provider_msg = ((body.get("error") or {}).get("message")) or ""
+    text = (provider_msg or str(exc)).lower()
+    if "credit balance is too low" in text:
+        return 503, (
+            "The AI service is unavailable: the Anthropic account is out of credits. "
+            "Add credits at console.anthropic.com → Plans & Billing, then try again."
+        )
+    if isinstance(exc, AuthenticationError):
+        return 503, "The AI service rejected the API key (check ANTHROPIC_API_KEY)."
+    return 503, "The AI service is temporarily unavailable — please try again shortly."
+
+
+@app.exception_handler(APIError)
+async def _handle_anthropic_error(request: Request, exc: APIError) -> JSONResponse:
+    status_code, detail = _anthropic_error_response(exc)
+    logger.warning("anthropic.error path=%s type=%s: %s",
+                   request.url.path, type(exc).__name__, exc)
+    return JSONResponse(status_code=status_code, content={"detail": detail})
 
 
 @app.on_event("startup")
