@@ -1,13 +1,14 @@
-"""Phase 6.5 LIVE tests — the real Tailor + Critic (Sonnet) and the Concierge chat
-approval, over the real MCP boundary. Skips cleanly unless a real ANTHROPIC_API_KEY +
-Postgres are present.
+"""Phase 6.5 LIVE tests — the real Rewriter⇄Critic alignment loop (Sonnet) and the
+Concierge chat approval, over the real MCP boundary. Skips cleanly unless a real
+ANTHROPIC_API_KEY + Postgres are present.
 
 Covers the acceptance bars that need a live agent, at minimum cost (short cached turns):
-  * the full flow: tailor a selected job → the draft is honest (locked fields
-    byte-identical, no fabricated skills, the job's real keyword surfaced) → approve
-    "by chat" → export an Irish/ATS-safe, machine-readable PDF → re-qualify → the draft
-    carries an after_score (bars 1,2,4,5,6,7);
-  * the Critic catches a planted fabrication / touched locked field (bar 3).
+  * the full flow: align a selected job → the draft is honest (locked fields
+    byte-identical, every skill evidence-backed, the job's real keyword surfaced) →
+    approve "by chat" → Tailor an A4 Irish/ATS-safe, machine-readable PDF → re-qualify →
+    the draft carries an after_score (bars 1,2,4,5,6,7);
+  * the Critic refuses a planted fabrication / touched locked field, and the code gate
+    strips them regardless (bar 3).
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ import uuid
 from datetime import datetime, timezone
 
 import pytest
-from jobpilot_core import cv_fields, cv_render, repositories
+from jobpilot_core import cv_critic, cv_fields, repositories, tailor
 from jobpilot_core.db import session_scope
 from jobpilot_core.schemas import JobIn
 from jobpilot_core.scout import normalize_raw
@@ -154,25 +155,27 @@ async def _cleanup(uid):
 @requires_live
 async def test_live_tailor_review_export_requalify(live_stack):
     from app.concierge_runner import run_turn
+    from app.cv_align_runner import run_align
     from app.cv_export_runner import run_export
     from app.requalify_runner import run_requalify
-    from app.tailor_runner import run_tailor
 
     uid = await _mk_user()
     try:
         jid = await _seed(uid)
 
-        # (1) tailor the selected job — real Tailor + Critic loop
-        summary = await run_tailor(uid, [jid])
+        # (1) align the selected job — real Rewriter⇄Critic loop
+        summary = await run_align(uid, [jid])
         assert summary["tailored"] == 1, summary
         drafts = (await _call(live_stack["db"], uid, "get_cv_drafts", {}))["drafts"]
         assert len(drafts) == 1
         draft = drafts[0]
         tc, snap = draft["tailored_content_json"], draft["locked_snapshot_json"]
 
-        # (2) the draft is HONEST: locked fields byte-identical, nothing fabricated
+        # (2) the draft is HONEST: locked fields byte-identical, and every skill on it is
+        # either in the base resume or backed by a citation that IS in the base resume.
         assert cv_fields.validate_locked(tc, snap)["ok"], cv_fields.validate_locked(tc, snap)
-        assert cv_fields.validate_no_fabricated_skills(tc, BASE)["ok"], "no invented skills"
+        ev = cv_fields.validate_skill_evidence(tc, BASE)
+        assert ev["ok"], f"un-evidenced skills survived the gate: {ev['rejected']}"
         # locked facts specifically preserved
         assert tc["experience"][0]["company"] == "Acme" and tc["experience"][0]["dates"] == "2019–2023"
         assert tc["contact"]["email"] == "jane@x.ie" and tc["education"] == BASE["education"]
@@ -197,9 +200,9 @@ async def test_live_tailor_review_export_requalify(live_stack):
         d = (await _call(live_stack["db"], uid, "get_cv_draft", {"draft_id": draft["id"]}))["draft"]
         assert d["pdf_ref"] and d["docx_ref"]
         fetched = await _call(live_stack["resume"], uid, "get_cv_file", {"ref": d["pdf_ref"]})
-        text = cv_render.pdf_text(base64.b64decode(fetched["file_b64"]))
+        text = tailor.pdf_text(base64.b64decode(fetched["file_b64"]))
         assert "Jane Doe" in text and "2019–2023" in text  # real selectable text + locked date
-        assert cv_render.REFERENCES_LINE in text
+        assert tailor.REFERENCES_LINE in text
         assert "date of birth" not in text.lower()
 
         # (5) re-qualify the tailored CV -> an after_score is recorded (legitimate lift)
@@ -216,7 +219,7 @@ async def test_live_tailor_review_export_requalify(live_stack):
 # --------------------------------------------------------------------------- #
 @requires_live
 async def test_live_critic_catches_planted_fabrication(live_stack):
-    from jobpilot_core.critic import critique_cv
+    from jobpilot_core.cv_critic import critique_cv
 
     snap = cv_fields.extract_locked_snapshot(BASE)
     analysis = {"required_skills": ["Rust", "Kubernetes"], "keywords": ["systems"],
@@ -238,11 +241,17 @@ async def test_live_critic_catches_planted_fabrication(live_stack):
     code_v = cv_fields.validate_tailored(bad, BASE, snap)
     assert not code_v["ok"]  # the validator already flags it
 
-    res = await critique_cv(BASE, snap, job, analysis, bad, S,
-                            code_violations=code_v["violations"] + [f"fabricated: {code_v['fabricated']}"])
+    # (a) the CODE gate is the hard guarantee: Rust has no evidence citation so it is
+    # deleted, and the tampered employer date is re-imposed from the snapshot.
+    fixed = cv_fields.finalize(bad, BASE, snap)
+    assert fixed["experience"][0]["dates"] == "2019–2023", fixed["experience"][0]
+    assert "Rust" not in (fixed.get("skills") or []), fixed.get("skills")
+    assert cv_fields.validate_locked(fixed, snap)["ok"]
+
+    # (b) the CRITIC is the judgement layer: it must refuse to pass the planted draft.
+    findings = {"violations": code_v["violations"], "rejected_skills": code_v["fabricated"]}
+    res = await critique_cv(BASE, snap, job, analysis, bad, S, code_findings=findings)
     c = res.data
     assert c["verdict"] == "revise"  # the critic does not pass a fabricated/tampered draft
-    refined = c["refined_cv"]
-    # the refined draft is honest: locked date restored, fabricated Rust gone
-    assert refined["experience"][0]["dates"] == "2019–2023", refined["experience"][0]
-    assert "Rust" not in (refined.get("skills") or []), refined.get("skills")
+    assert c["integrity_flags"], "a fabricated Rust claim must raise an integrity flag"
+    assert not cv_critic.is_aligned(c, S.cv_alignment_threshold)  # so the loop runs again

@@ -74,16 +74,16 @@ def run_full_pipeline(user_id: str, pipeline_id: str) -> dict:
 
 @celery.task(name="cv.tailor")
 def cv_tailor(user_id: str, job_ids: list[str]) -> dict:
-    """Phase 6.5: tailor a CV per selected job (Tailor + Critic, locked-safe) and
-    persist draft_ready cv_drafts. Sonnet — runs on the data-plane worker."""
-    from .tailor_runner import run_tailor
+    """Phase 6.5: run the Rewriter⇄Critic alignment loop per selected job (locked-safe,
+    evidence-gated) and persist draft_ready cv_drafts. Sonnet — data-plane worker."""
+    from .cv_align_runner import run_align
 
-    return run_async(run_tailor(uuid.UUID(user_id), job_ids))
+    return run_async(run_align(uuid.UUID(user_id), job_ids))
 
 
 @celery.task(name="cv.export")
 def cv_export(user_id: str, draft_ids: list[str] | None = None) -> dict:
-    """Phase 6.5: render approved drafts to Irish-format ATS-safe PDF+DOCX (no LLM)."""
+    """Phase 6.5: Tailor approved drafts into A4 Irish-format ATS-safe PDF+DOCX (no LLM)."""
     from .cv_export_runner import run_export
 
     return run_async(run_export(uuid.UUID(user_id), draft_ids))
@@ -91,8 +91,8 @@ def cv_export(user_id: str, draft_ids: list[str] | None = None) -> dict:
 
 @celery.task(name="cv.prepare")
 def cv_prepare(user_id: str, job_ids: list[str]) -> dict:
-    """One-click per-job CV: Analyze → Tailor → approve → Export for the selected jobs,
-    so a downloadable tailored CV attaches to each job row."""
+    """One-click per-job CV: Analyze → Align → approve → Tailor/Export for the selected
+    jobs, so a downloadable tailored CV attaches to each job row."""
     from .cv_prepare_runner import run_prepare_cvs
 
     return run_async(run_prepare_cvs(uuid.UUID(user_id), job_ids))

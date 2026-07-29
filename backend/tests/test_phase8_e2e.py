@@ -9,7 +9,7 @@ tests; this is the deterministic spine that must never break, runnable anywhere.
 
 from __future__ import annotations
 
-from jobpilot_core import analyzer, cv_fields, cv_render, qualifier, resume_apply
+from jobpilot_core import analyzer, cv_fields, qualifier, resume_apply, tailor
 from jobpilot_core.scout import normalize_raw
 
 # 1) ONBOARD — a parsed resume (the output of resume ingestion)
@@ -90,8 +90,8 @@ def test_full_pipeline_spine_composes_end_to_end():
                                               improved_resume)
 
     # 7) EXPORT — deterministic render to a machine-readable PDF (selectable text)
-    pdf = cv_render.render_pdf(honest)
-    text = cv_render.pdf_text(pdf)
+    pdf = tailor.render_pdf(honest)
+    text = tailor.pdf_text(pdf)
     assert pdf[:4] == b"%PDF" and len(text) > 50        # real selectable text, not an image
     assert "Jane Doe" in text and "2019-2024" in text   # locked facts present + intact
 

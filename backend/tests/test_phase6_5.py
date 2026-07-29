@@ -20,7 +20,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from jobpilot_core import concierge, cv_fields, cv_render, qualifier
+from jobpilot_core import concierge, cv_fields, qualifier, tailor
 from jobpilot_core.storage import cv_key, user_prefix
 
 from .conftest import _db_reachable
@@ -113,14 +113,14 @@ def test_pdf_is_a4_and_machine_readable_with_irish_order():
     from pypdf import PdfReader
     import io
 
-    pdf = cv_render.render_pdf(BASE)
+    pdf = tailor.render_pdf(BASE)
     reader = PdfReader(io.BytesIO(pdf))
     box = reader.pages[0].mediabox
     assert abs(float(box.height) - 841.89) < 2 and abs(float(box.width) - 595.27) < 2  # A4 points
 
-    text = cv_render.pdf_text(pdf)
+    text = tailor.pdf_text(pdf)
     assert len(text) >= 50  # real selectable text, not an image
-    for token in ("Jane Doe", "2019–2023", "Trinity College Dublin", cv_render.REFERENCES_LINE):
+    for token in ("Jane Doe", "2019–2023", "Trinity College Dublin", tailor.REFERENCES_LINE):
         assert token in text, token
     # Irish section order: Profile → Key Skills → Experience → Education
     order = [text.index(s) for s in ("Profile", "Key Skills", "Experience", "Education")]
@@ -133,9 +133,9 @@ def test_pdf_is_a4_and_machine_readable_with_irish_order():
 def test_docx_is_a4_and_readable():
     from docx.shared import Mm
 
-    docx_bytes = cv_render.render_docx(BASE)
-    text = cv_render.docx_text(docx_bytes)
-    assert "Jane Doe" in text and "Kubernetes" in text and cv_render.REFERENCES_LINE in text
+    docx_bytes = tailor.render_docx(BASE)
+    text = tailor.docx_text(docx_bytes)
+    assert "Jane Doe" in text and "Kubernetes" in text and tailor.REFERENCES_LINE in text
 
     import io
     import docx
@@ -145,7 +145,7 @@ def test_docx_is_a4_and_readable():
 
 
 def test_render_both_reports_machine_readable():
-    out = cv_render.render_both(BASE)
+    out = tailor.render_both(BASE)
     assert out["pdf_machine_readable"] and out["pdf_text_len"] >= 50
     assert len(out["pdf"]) > 500 and len(out["docx"]) > 500
 

@@ -20,10 +20,12 @@ const STATUS_STYLE: Record<string, string> = {
   rejected: "border-rose-500/30 bg-rose-500/10 text-rose-200",
 };
 
-/** Tailored-CV review + approval (Phase 6.5). Tailor selected jobs → review the honest
- *  changes (locked facts untouched, no invented skills) → approve (select-all / mass /
- *  particulars) → export Irish-format PDF/DOCX → re-qualify → see the improvement deltas.
- *  Only user-selected jobs are tailored; rejected drafts never export. */
+/** Aligned-CV review + approval (Phase 6.5). A Rewriter⇄Critic loop reshapes each selected
+ *  job's CV until the Critic scores it aligned (or the round cap is hit) → review the
+ *  alignment score, rounds, integrity flags and the evidence behind each added skill (locked
+ *  facts untouched) → approve (select-all / mass / particulars) → Tailor to Irish-format
+ *  PDF/DOCX → re-qualify → see the improvement deltas. Only user-selected jobs run; rejected
+ *  drafts never export. */
 export default function TailoredCVs({
   selectedJobIds,
   jobTitleById,
@@ -103,7 +105,7 @@ export default function TailoredCVs({
           title={
             selectedJobIds.length === 0
               ? "Select jobs in the table first"
-              : "Analyze → tailor → export, then the CV attaches to each job row"
+              : "Analyze → align (Rewriter⇄Critic) → export, then the CV attaches to each job row"
           }
         >
           {busy === "prepare"
@@ -244,8 +246,23 @@ function DraftCard({
 }) {
   const [open, setOpen] = useState(false);
   const notes = draft.critic_notes_json;
-  const changes = draft.tailored_content_json?.change_notes ?? notes?.change_notes ?? [];
+  const content = draft.tailored_content_json;
+  const changes = content?.change_notes ?? notes?.change_notes ?? [];
+  // Locked facts are enforced in code (finalize) on every draft — always safe. Legacy rows
+  // carried an explicit final_ok; default to true for alignment-loop rows.
   const lockedSafe = notes?.final_ok ?? true;
+
+  // New alignment-loop surface (undefined on legacy drafts → those branches simply hide).
+  const alignScore = notes?.alignment_score;
+  const aligned = notes?.aligned;
+  const roundsRun = notes?.rounds_run ?? notes?.rounds?.length;
+  const maxRounds = notes?.max_rounds;
+  const threshold = notes?.threshold;
+  const flags = notes?.integrity_flags ?? [];
+  const evidence = content?.skill_evidence ?? notes?.skill_evidence ?? [];
+  const dims = notes?.dimension_scores ?? {};
+  const unaddressed = notes?.unaddressed_requirements ?? [];
+
   return (
     <div className="rounded-lg border border-neutral-800 bg-neutral-950/40 p-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -256,10 +273,41 @@ function DraftCard({
         <span className={`rounded-md border px-1.5 py-0.5 text-[10px] ${STATUS_STYLE[draft.status]}`}>
           {draft.status.replace("_", " ")}
         </span>
-        {lockedSafe && (
-          <span className="rounded-md border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
-            🔒 locked facts verified
+        {alignScore != null && (
+          <span
+            className={`rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${
+              aligned
+                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+                : "border-amber-500/30 bg-amber-500/10 text-amber-200"
+            }`}
+            title={
+              threshold != null
+                ? `${aligned ? "Cleared" : "Below"} the ${Math.round(threshold * 100)}% alignment bar`
+                : undefined
+            }
+          >
+            {aligned ? "aligned" : "best"} {Math.round(alignScore * 100)}%
           </span>
+        )}
+        {roundsRun != null && (
+          <span className="rounded-md border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
+            {roundsRun}
+            {maxRounds ? `/${maxRounds}` : ""} round{roundsRun === 1 ? "" : "s"}
+          </span>
+        )}
+        {flags.length > 0 ? (
+          <span
+            className="rounded-md border border-rose-500/30 bg-rose-500/10 px-1.5 py-0.5 text-[10px] text-rose-200"
+            title={flags.join(" · ")}
+          >
+            ⚠ {flags.length} integrity flag{flags.length === 1 ? "" : "s"}
+          </span>
+        ) : (
+          lockedSafe && (
+            <span className="rounded-md border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
+              🔒 locked facts verified
+            </span>
+          )
         )}
         {draft.before_score != null && (
           <span className="text-xs text-neutral-500">
@@ -309,11 +357,94 @@ function DraftCard({
       </div>
 
       {open && (
-        <div className="mt-2 space-y-2 border-t border-neutral-800 pt-2 text-xs">
-          {draft.tailored_content_json?.summary && (
+        <div className="mt-2 space-y-3 border-t border-neutral-800 pt-2 text-xs">
+          {/* Alignment summary — how well, over how many rounds */}
+          {alignScore != null && (
+            <p className="text-neutral-400">
+              {aligned ? (
+                <span className="text-emerald-300">Aligned</span>
+              ) : (
+                <span className="text-amber-300">Did not reach the bar</span>
+              )}{" "}
+              at {Math.round(alignScore * 100)}%
+              {threshold != null ? ` (bar ${Math.round(threshold * 100)}%)` : ""}
+              {roundsRun != null
+                ? ` · ${roundsRun}${maxRounds ? ` of ${maxRounds}` : ""} round${roundsRun === 1 ? "" : "s"}`
+                : ""}
+              {notes?.final_verdict ? ` · critic verdict: ${notes.final_verdict}` : ""}
+            </p>
+          )}
+
+          {/* Integrity flags — honesty problems the Critic raised (forces another round) */}
+          {flags.length > 0 && (
+            <div className="rounded-md border border-rose-500/30 bg-rose-500/10 p-2">
+              <p className="mb-0.5 font-medium text-rose-200">⚠ Integrity flags</p>
+              <ul className="list-disc space-y-0.5 pl-4 text-rose-200/90">
+                {flags.map((f, i) => (
+                  <li key={i}>{f}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Per-dimension alignment scores */}
+          {Object.keys(dims).length > 0 && (
+            <div>
+              <p className="mb-1 text-neutral-500">Alignment by dimension</p>
+              <div className="space-y-1">
+                {Object.entries(dims).map(([k, v]) => (
+                  <div key={k} className="flex items-center gap-2">
+                    <span className="w-36 truncate capitalize text-neutral-400">{k.replace(/_/g, " ")}</span>
+                    <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-neutral-800">
+                      <span
+                        className="block h-full rounded-full bg-sky-500/70"
+                        style={{ width: `${Math.round((Number(v) || 0) * 100)}%` }}
+                      />
+                    </span>
+                    <span className="w-8 text-right font-mono tabular-nums text-neutral-500">
+                      {Math.round((Number(v) || 0) * 100)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Added-skill evidence — skills not in the base list + the real CV text that backs each */}
+          {evidence.length > 0 && (
+            <div>
+              <p className="mb-0.5 text-neutral-500">
+                Skills added for this job{" "}
+                <span className="normal-case text-neutral-600">(each grounded in your real CV)</span>
+              </p>
+              <ul className="space-y-1">
+                {evidence.map((e, i) => (
+                  <li key={i} className="rounded-md border border-neutral-800/70 px-2 py-1">
+                    <span className="font-medium text-neutral-200">{e.skill}</span>
+                    {e.basis && (
+                      <span className="ml-2 rounded border border-neutral-700 px-1 py-0.5 text-[10px] uppercase tracking-wide text-neutral-400">
+                        {e.basis}
+                      </span>
+                    )}
+                    {e.evidence && <span className="mt-0.5 block text-neutral-500">from: “{e.evidence}”</span>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Genuine gaps left honest — the loop won't claim these */}
+          {unaddressed.length > 0 && (
+            <p className="text-neutral-500">
+              <span className="text-neutral-400">Still unaddressed (kept honest):</span> {unaddressed.join(", ")}
+            </p>
+          )}
+
+          {/* Tailored profile + traceable change notes */}
+          {content?.summary && (
             <p className="text-neutral-300">
               <span className="text-neutral-500">Profile: </span>
-              {draft.tailored_content_json.summary}
+              {content.summary}
             </p>
           )}
           {changes.length > 0 && (
@@ -330,7 +461,9 @@ function DraftCard({
               </ul>
             </div>
           )}
-          {notes?.rounds && notes.rounds.length > 0 && (
+
+          {/* Legacy critic line — only for pre-alignment-loop drafts (no alignment score) */}
+          {alignScore == null && notes?.rounds && notes.rounds.length > 0 && (
             <p className="text-neutral-500">
               Critic: {notes.rounds.map((r) => r.verdict).filter(Boolean).join(" → ") || "reviewed"}
               {notes.caught_before_enforce &&

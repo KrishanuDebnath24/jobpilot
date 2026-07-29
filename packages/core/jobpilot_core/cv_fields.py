@@ -8,15 +8,30 @@ code here, not merely by prompting the model:
 * **LOCKED (immutable, copied verbatim):** contact details; per-role employer name,
   job title, and employment dates/duration; education (institutions, qualifications,
   dates). These are factual claims that can never change.
-* **MODIFIABLE (profile-driven):** the professional summary, the skills list (emphasis
-  + ordering only — never invented), and experience **bullet phrasing** (reworded to
-  surface relevant real experience and the job's keywords, without changing the
-  underlying facts, scope, or dates), plus section ordering.
+* **MODIFIABLE (profile-driven):** the professional summary, the skills list, and
+  experience **bullet phrasing** (reworded to surface relevant real experience and the
+  job's keywords, without changing the underlying facts, scope, or dates), plus section
+  ordering.
 
 ``validate_locked`` proves the tailored draft's locked fields are byte-identical to the
 snapshot; ``enforce_locked`` re-imposes the snapshot verbatim (defense in depth, so an
 exported file can never carry drifted locked content); ``validate_no_fabricated_skills``
 catches skills that aren't grounded anywhere in the real resume.
+
+**Evidence-gated skills (the alignment loop).** The rewrite/critique loop is allowed to
+ADD a skill the base resume's skills list doesn't name — but only against a citation.
+For every added skill the rewriter must supply a ``skill_evidence`` entry naming the
+resume text that supports it and the basis on which it is claimed:
+
+* ``explicit``     — the skill is named in the resume (a different section/phrasing);
+* ``adjacent``     — entailed by named work (e.g. "Docker + ECS" -> containerisation);
+* ``transferable`` — the same competence under the job's vocabulary.
+
+``validate_skill_evidence`` re-checks every citation against the REAL resume text and
+rejects any skill whose evidence cannot be found there, so the freedom to re-label
+genuine experience never becomes the freedom to invent it. ``apply_evidence_gate`` is
+the enforcement arm: it drops the rejected skills. A skill already grounded by
+``validate_no_fabricated_skills`` needs no citation — that path is unchanged.
 """
 
 from __future__ import annotations
@@ -28,6 +43,22 @@ import re
 LOCKED_TOP_FIELDS = ("contact", "education")  # whole structures, immutable
 LOCKED_EXPERIENCE_FIELDS = ("title", "company", "dates")  # per role: who/what/when
 MODIFIABLE_FIELDS = ("summary", "skills", "experience.bullets", "section_order")
+
+# Sections carried through tailoring untouched in content, so the rendered CV keeps every
+# header the candidate's real CV had (certifications, projects, languages, ...).
+PASSTHROUGH_SECTIONS = ("certifications", "additional_sections")
+
+# How an added skill may be justified. Ordered loosest-evidence-last for review display.
+SKILL_BASES = ("explicit", "adjacent", "transferable")
+
+# An evidence citation must overlap the real resume text by at least this many content
+# words. Short citations ("Docker") are matched whole; longer ones tolerate the rewriter
+# paraphrasing a bullet, without letting a wholly invented sentence through.
+_MIN_EVIDENCE_OVERLAP = 0.6
+_STOPWORDS = {
+    "a", "an", "and", "the", "of", "to", "in", "on", "for", "with", "at", "by", "from",
+    "as", "is", "was", "were", "be", "been", "using", "used", "via", "our", "their",
+}
 
 
 def _norm(s: str | None) -> str:
@@ -149,3 +180,124 @@ def validate_tailored(tailored: dict, base_resume: dict, snapshot: dict) -> dict
         "violations": locked["violations"],
         "fabricated": skills["fabricated"],
     }
+
+
+# --------------------------------------------------------------------------- #
+# Evidence-gated skill admission — lets the alignment loop ADD a job-required skill
+# the base skills list doesn't name, but ONLY against a citation that is verifiably
+# in the real resume. This is the check that keeps "re-label real experience in the
+# job's vocabulary" from sliding into "claim a skill the candidate lacks".
+# --------------------------------------------------------------------------- #
+def _content_words(text: str) -> list[str]:
+    return [w for w in re.findall(r"[a-z0-9+#.]+", _norm(text)) if w not in _STOPWORDS]
+
+
+def _evidence_supported(quote: str, base_text: str) -> bool:
+    """Is ``quote`` actually present in the base resume? Exact substring wins; otherwise
+    at least ``_MIN_EVIDENCE_OVERLAP`` of its content words must appear, so a lightly
+    paraphrased citation passes but an invented one does not."""
+    q = _norm(quote)
+    if not q:
+        return False
+    if q in base_text:
+        return True
+    words = _content_words(quote)
+    if not words:
+        return False
+    hits = sum(1 for w in words if w in base_text)
+    return (hits / len(words)) >= _MIN_EVIDENCE_OVERLAP
+
+
+def _evidence_index(cv: dict) -> dict[str, dict]:
+    """``{normalized skill: evidence entry}`` from the draft's ``skill_evidence``."""
+    out: dict[str, dict] = {}
+    for item in cv.get("skill_evidence") or []:
+        if isinstance(item, dict) and item.get("skill"):
+            out.setdefault(_norm(item["skill"]), item)
+    return out
+
+
+def validate_skill_evidence(cv: dict, base_resume: dict) -> dict:
+    """``{ok, admitted, rejected}`` for the draft's skills list.
+
+    A skill is **admitted** when it is either already grounded in the real resume (the
+    pre-existing ``validate_no_fabricated_skills`` rule) or carries a ``skill_evidence``
+    citation whose quoted text is verifiably present in the resume, on a recognised
+    basis. Everything else is **rejected** with a reason — an added skill with no
+    citation, a citation quoting text the resume does not contain, or an unknown basis.
+    """
+    base_skills = {_norm(s) for s in (base_resume.get("skills") or [])}
+    base_text = _base_text(base_resume)
+    evidence = _evidence_index(cv)
+
+    admitted: list[dict] = []
+    rejected: list[dict] = []
+    for raw in cv.get("skills") or []:
+        n = _norm(raw)
+        if not n:
+            continue
+        if n in base_skills or n in base_text:
+            admitted.append({"skill": raw, "basis": "explicit", "evidence": None})
+            continue
+        ev = evidence.get(n)
+        if not ev:
+            rejected.append({"skill": raw, "reason": "added skill with no evidence citation"})
+            continue
+        basis = _norm(ev.get("basis"))
+        if basis not in SKILL_BASES:
+            rejected.append({"skill": raw, "reason": f"unknown evidence basis {ev.get('basis')!r}"})
+            continue
+        quote = ev.get("evidence") or ""
+        if not _evidence_supported(quote, base_text):
+            rejected.append({
+                "skill": raw,
+                "reason": "cited evidence does not appear in the real resume",
+                "claimed_evidence": quote,
+            })
+            continue
+        admitted.append({"skill": raw, "basis": basis, "evidence": quote})
+    return {"ok": not rejected, "admitted": admitted, "rejected": rejected}
+
+
+def apply_evidence_gate(cv: dict, base_resume: dict) -> dict:
+    """Return a copy of ``cv`` with every skill that failed :func:`validate_skill_evidence`
+    removed, and ``skill_evidence`` narrowed to the skills that survived. This is the
+    enforcement arm — the exported CV can only ever carry evidence-backed skills."""
+    result = validate_skill_evidence(cv, base_resume)
+    if result["ok"] and not (cv.get("skill_evidence") or []):
+        return cv
+    kept = {_norm(a["skill"]) for a in result["admitted"]}
+    out = copy.deepcopy(cv)
+    out["skills"] = [s for s in (out.get("skills") or []) if _norm(s) in kept]
+    out["skill_evidence"] = [
+        e for e in (out.get("skill_evidence") or [])
+        if isinstance(e, dict) and _norm(e.get("skill")) in kept
+    ]
+    return out
+
+
+def added_skills(cv: dict, base_resume: dict) -> list[str]:
+    """Skills on the draft that the base resume's skills list did not name — the surface
+    the reviewer should look hardest at."""
+    base_skills = {_norm(s) for s in (base_resume.get("skills") or [])}
+    return [s for s in (cv.get("skills") or []) if _norm(s) and _norm(s) not in base_skills]
+
+
+def carry_passthrough_sections(cv: dict, base_resume: dict) -> dict:
+    """Ensure every header the real CV had survives tailoring. Sections the rewriter did
+    not return are copied from the base resume verbatim, so certifications/projects/
+    languages can never be silently dropped from the rendered document."""
+    out = copy.deepcopy(cv) if isinstance(cv, dict) else {}
+    for key in PASSTHROUGH_SECTIONS:
+        if not out.get(key) and base_resume.get(key):
+            out[key] = copy.deepcopy(base_resume[key])
+    return out
+
+
+def finalize(cv: dict, base_resume: dict, snapshot: dict) -> dict:
+    """The single honest-by-construction exit used by the alignment loop:
+    locked fields re-imposed verbatim → evidence gate applied → original headers carried
+    through. Whatever the models emitted, what leaves this function is safe to export."""
+    return carry_passthrough_sections(
+        apply_evidence_gate(enforce_locked(cv, snapshot), base_resume), base_resume
+    )

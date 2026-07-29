@@ -1,10 +1,10 @@
 """Mass CV export (Phase 6.5, 6.5e) — deterministic render, runs in the Celery worker.
 
-Renders every **approved** tailored draft to an Irish-format, ATS-safe **PDF + DOCX**
-(``jobpilot_core.cv_render``, no LLM), verifies the PDF is machine-readable (real
-selectable text, not an image), stores the files via resume-mcp (under the user's
-storage prefix, so erasure wipes them), and records the refs on the draft. Only approved
-drafts export; rejected/draft_ready ones never produce files.
+Runs the **Tailor** (``jobpilot_core.tailor``, no LLM) over every **approved** aligned
+draft to lay it out as an A4 Irish-format, ATS-safe **PDF + DOCX**, verifies the PDF is
+machine-readable (real selectable text, not an image), stores the files via resume-mcp
+(under the user's storage prefix, so erasure wipes them), and records the refs on the
+draft. Only approved drafts export; rejected/draft_ready ones never produce files.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import base64
 import logging
 import uuid
 
-from jobpilot_core import cv_render
+from jobpilot_core import tailor
 
 from . import mcp_client
 
@@ -32,7 +32,7 @@ async def run_export(user_id: uuid.UUID, draft_ids: list[str] | None = None) -> 
         did = d["id"]
         try:
             cv = d.get("tailored_content_json") or {}
-            rendered = cv_render.render_both(cv)
+            rendered = tailor.render_both(cv)
             if not rendered["pdf_machine_readable"]:
                 errors[did] = "rendered PDF is not machine-readable"
                 continue

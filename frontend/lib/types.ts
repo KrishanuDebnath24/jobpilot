@@ -274,14 +274,52 @@ export type QueryTurn = {
   session_id: string;
 };
 
-// Phase 6.5: tailored CVs.
+// Phase 6.5: aligned CVs (Rewriter⇄Critic loop).
 export type CvChangeNote = { field: string; why?: string; grounded_in?: string };
-export type CvCriticIssue = { category: string; detail: string };
+// An added skill that isn't in the base skills list, with the resume text that supports it.
+export type CvSkillEvidence = { skill: string; basis?: string; evidence?: string };
+// A Critic issue. New alignment shape is {severity, field, problem, fix}; the legacy
+// critic used {category, detail}. Both kept optional so old + new drafts render.
+export type CvCriticIssue = {
+  severity?: string;
+  field?: string;
+  problem?: string;
+  fix?: string;
+  category?: string;
+  detail?: string;
+};
+// One rewrite→critique round of the alignment loop.
+export type CvAlignmentRound = {
+  round?: number;
+  verdict?: string;
+  alignment_score?: number;
+  dimension_scores?: Record<string, number>;
+  unaddressed_requirements?: string[];
+  issues?: CvCriticIssue[];
+  integrity_flags?: string[];
+  code_violations?: string[];
+  code_rejected_skills?: string[];
+  added_skills?: string[];
+};
 export type CvCriticNotes = {
-  rounds?: { verdict?: string; issues?: CvCriticIssue[] }[];
+  // New alignment-loop shape (jobpilot_core.cv_loop + cv_align_runner._notes).
+  aligned?: boolean;
+  alignment_score?: number;
+  threshold?: number;
+  rounds_run?: number;
+  max_rounds?: number;
+  final_verdict?: string;
+  dimension_scores?: Record<string, number>;
+  matched_requirements?: string[];
+  unaddressed_requirements?: string[];
+  integrity_flags?: string[];
+  added_skills?: string[];
+  skill_evidence?: CvSkillEvidence[];
+  change_notes?: CvChangeNote[];
+  rounds?: CvAlignmentRound[];
+  // Legacy (pre-alignment-loop drafts) — still read so old rows render.
   caught_before_enforce?: { violations: string[]; fabricated: string[] };
   final_ok?: boolean;
-  change_notes?: CvChangeNote[];
 } | null;
 export type TailoredContent = {
   contact?: { name?: string; email?: string; phone?: string; location?: string; links?: string[] };
@@ -289,6 +327,9 @@ export type TailoredContent = {
   skills?: string[];
   experience?: { title?: string; company?: string; dates?: string; bullets?: string[] }[];
   education?: { text?: string }[];
+  certifications?: string[];
+  additional_sections?: { heading?: string; items?: string[] }[];
+  skill_evidence?: CvSkillEvidence[];
   change_notes?: CvChangeNote[];
 } | null;
 export type CvDraft = {

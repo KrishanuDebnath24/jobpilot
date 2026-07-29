@@ -666,7 +666,8 @@ async def _resolve_draft_ids(user_id, body: CvActionRequest) -> list[str]:
 
 @app.post("/cv/tailor", tags=["cv"], status_code=status.HTTP_202_ACCEPTED, dependencies=[_rl_trigger])
 async def cv_tailor(body: CvTailorRequest, current_user=Depends(get_current_user)) -> dict:
-    """Queue tailoring for the selected jobs (Tailor + Critic, locked-safe). Only the
+    """Queue CV alignment for the selected jobs: the Rewriter⇄Critic loop runs per job
+    until the CV matches it (locked-safe, every added skill evidence-gated). Only the
     user's selected jobs are tailored — never the whole pool."""
     from .tasks import cv_tailor as task
 
