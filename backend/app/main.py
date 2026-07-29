@@ -140,8 +140,10 @@ class ScopeRequest(BaseModel):
 
 
 class ChatMessageRequest(BaseModel):
-    """Phase 6: one user turn to the Concierge."""
+    """Phase 6: one user turn to the Concierge. ``selected_job_ids`` is the user's current
+    dashboard selection, so 'tailor/analyze/delete my selected jobs' resolves to it."""
     text: str
+    selected_job_ids: list[str] | None = None
 
 
 class GateUpdateRequest(BaseModel):
@@ -619,7 +621,8 @@ async def post_chat_message(
     import uuid as _uuid
 
     try:
-        return await run_turn(current_user.id, _uuid.UUID(session_id), body.text)
+        return await run_turn(current_user.id, _uuid.UUID(session_id), body.text,
+                              selected_job_ids=body.selected_job_ids)
     except RuntimeError as exc:  # e.g. missing Anthropic key
         raise HTTPException(status_code=503, detail=str(exc))
 

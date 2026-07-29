@@ -1440,6 +1440,64 @@ async def latest_stage_runs(session: AsyncSession, user_id: uuid.UUID) -> dict[s
 # --------------------------------------------------------------------------- #
 # Erasure (GDPR) — hard delete + verification helpers
 # --------------------------------------------------------------------------- #
+async def cv_file_refs_for_jobs(
+    session: AsyncSession, user_id: uuid.UUID, job_ids: list[uuid.UUID]
+) -> list[str]:
+    """The storage refs (rendered pdf/docx) of CV drafts attached to ``job_ids``. Collected
+    BEFORE the jobs are deleted, because the ON DELETE CASCADE removes the ``cv_drafts``
+    rows and would otherwise orphan their files in object storage. Scoped to ``user_id``."""
+    if not job_ids:
+        return []
+    res = await session.execute(
+        select(models.CvDraft.pdf_ref, models.CvDraft.docx_ref).where(
+            models.CvDraft.user_id == user_id, models.CvDraft.job_id.in_(job_ids)
+        )
+    )
+    refs: list[str] = []
+    for pdf_ref, docx_ref in res.all():
+        if pdf_ref:
+            refs.append(pdf_ref)
+        if docx_ref:
+            refs.append(docx_ref)
+    return refs
+
+
+async def disqualified_job_ids(session: AsyncSession, user_id: uuid.UUID) -> list[uuid.UUID]:
+    """Ids of the caller's jobs whose current qualification decision is ``disqualified``.
+    Jobs with no qualification yet (unscored) are excluded — only an explicit disqualified
+    verdict qualifies. Resolved up front so the caller can clean up files, then delete."""
+    res = await session.execute(
+        select(models.Job.id).where(
+            models.Job.user_id == user_id,
+            models.Job.id.in_(
+                select(models.Qualification.job_id).where(
+                    models.Qualification.user_id == user_id,
+                    models.Qualification.decision == "disqualified",
+                )
+            ),
+        )
+    )
+    return [row[0] for row in res.all()]
+
+
+async def delete_jobs(
+    session: AsyncSession, user_id: uuid.UUID, job_ids: list[uuid.UUID]
+) -> int:
+    """Delete specific jobs owned by the user. Their children — qualification, analysis,
+    suggestions, and tailored CV drafts — cascade via each child's ON DELETE CASCADE FK
+    to ``jobs``. Scoped to ``user_id`` so a caller can only ever delete their own rows.
+    Rendered CV files are cleaned up separately (see ``cv_file_refs_for_jobs``), since the
+    cascade removes the draft rows but not their storage objects. Returns rows deleted."""
+    if not job_ids:
+        return 0
+    res = await session.execute(
+        delete(models.Job).where(
+            models.Job.user_id == user_id, models.Job.id.in_(job_ids)
+        )
+    )
+    return int(res.rowcount or 0)
+
+
 async def delete_user_cascade(session: AsyncSession, user_id: uuid.UUID) -> None:
     """Delete the users row; every user-owned table cascades via ON DELETE CASCADE."""
     await session.execute(delete(models.User).where(models.User.id == user_id))

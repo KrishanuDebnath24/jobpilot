@@ -252,7 +252,7 @@ export default function Dashboard() {
       {/* The two conversational agents, side by side: the Concierge acts; Ask answers
           (read-only). Distinct privilege sets — Ask has no action tools. */}
       <div className="mt-6 grid gap-4 lg:grid-cols-2">
-        <Chat onChanged={loadJobs} />
+        <Chat onChanged={loadJobs} selectedJobIds={[...selected]} />
         <Ask />
       </div>
       <div className="mt-4 grid gap-4 lg:grid-cols-2">

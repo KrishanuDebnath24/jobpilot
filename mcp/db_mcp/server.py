@@ -433,6 +433,48 @@ async def latest_stage_runs() -> dict:
         return {"stages": await repositories.latest_stage_runs(session, uid)}
 
 
+async def _delete_jobs_and_files(uid, job_ids: list) -> dict:
+    """Delete ``job_ids`` (children cascade) AND the rendered CV files those jobs' drafts
+    left in storage. DB first: refs are collected in the same transaction as the delete, so
+    they reflect exactly what is being removed; the files are then deleted best-effort.
+    Ordering is deliberate — a failed file delete only leaves a harmless orphaned object,
+    whereas deleting files first could strand a draft row pointing at a missing file."""
+    async with session_scope() as session:
+        refs = await repositories.cv_file_refs_for_jobs(session, uid, job_ids)
+        deleted = await repositories.delete_jobs(session, uid, job_ids)
+    files_deleted = 0
+    if refs:
+        storage = get_storage(settings)
+        for ref in refs:
+            try:
+                await asyncio.to_thread(storage.delete, ref)
+                files_deleted += 1
+            except Exception:  # noqa: BLE001 - a stuck file must not fail the delete
+                pass
+    return {"deleted": deleted, "files_deleted": files_deleted}
+
+
+@mcp.tool()
+async def delete_jobs(job_ids: list[str]) -> dict:
+    """Delete specific jobs owned by the caller (their qualification, analysis, suggestions
+    and CV drafts cascade; the drafts' rendered PDF/DOCX files are removed from storage
+    too). Scope comes from the trusted context — only the caller's own jobs can be deleted.
+    Returns ``{deleted, files_deleted}``."""
+    uid = require_user_id()
+    ids = [uuid.UUID(j) for j in (job_ids or [])]
+    return await _delete_jobs_and_files(uid, ids)
+
+
+@mcp.tool()
+async def delete_disqualified_jobs() -> dict:
+    """Delete every job the caller has marked disqualified (unscored jobs are kept). Children
+    cascade and their rendered CV files are removed. Returns ``{deleted, files_deleted}``."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        ids = await repositories.disqualified_job_ids(session, uid)
+    return await _delete_jobs_and_files(uid, ids)
+
+
 @mcp.tool()
 async def delete_user_data(user_id: str | None = None) -> dict:
     """GDPR erasure: hard-delete every row keyed to the caller (cascade) AND their

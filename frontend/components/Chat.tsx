@@ -6,10 +6,17 @@ import { createChatSession, getChatMessages, listChatSessions, postChatMessage }
 
 type Row = ChatMessage & { events?: ChatEventItem[] };
 
-/** Concierge chat: configure + run the pipeline, approve gates, apply to the resume —
- *  all by chat. The conversation is persisted server-side, so a reload/reconnect
- *  re-hydrates the transcript. */
-export default function Chat({ onChanged }: { onChanged?: () => void }) {
+/** Concierge chat: configure + run the pipeline, approve gates, tailor/prepare/analyze/
+ *  delete the SELECTED jobs, apply to the resume — all by chat. The current dashboard
+ *  selection is sent with each message so "my selected jobs" resolves server-side. The
+ *  conversation is persisted server-side, so a reload/reconnect re-hydrates the transcript. */
+export default function Chat({
+  onChanged,
+  selectedJobIds = [],
+}: {
+  onChanged?: () => void;
+  selectedJobIds?: string[];
+}) {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
   const [input, setInput] = useState("");
@@ -43,7 +50,7 @@ export default function Chat({ onChanged }: { onChanged?: () => void }) {
     setRows((r) => [...r, { id: `local-${Date.now()}`, role: "user", content: text, created_at: null }]);
     setBusy(true);
     try {
-      const turn = await postChatMessage(sessionId, text);
+      const turn = await postChatMessage(sessionId, text, selectedJobIds);
       setRows((r) => [
         ...r,
         {
@@ -60,14 +67,25 @@ export default function Chat({ onChanged }: { onChanged?: () => void }) {
     } finally {
       setBusy(false);
     }
-  }, [input, sessionId, busy, onChanged]);
+  }, [input, sessionId, busy, onChanged, selectedJobIds]);
 
   return (
     <section className="flex h-[32rem] flex-col rounded-2xl border border-neutral-800 bg-neutral-900/30">
       <div className="border-b border-neutral-800 px-4 py-2.5">
-        <h2 className="text-sm font-semibold text-neutral-200">Concierge</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold text-neutral-200">Concierge</h2>
+          {selectedJobIds.length > 0 && (
+            <span
+              className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-200"
+              title="These jobs are the target when you say 'my selected jobs'"
+            >
+              {selectedJobIds.length} selected
+            </span>
+          )}
+        </div>
         <p className="text-xs text-neutral-500">
-          Ask it to reconfigure and run your pipeline, review gates, or tailor your resume.
+          Reconfigure and run your pipeline, review gates, or act on your selected jobs —
+          “analyze/tailor/prepare/delete my selected jobs”, or “delete the disqualified ones”.
         </p>
       </div>
 

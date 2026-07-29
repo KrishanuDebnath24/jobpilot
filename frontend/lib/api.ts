@@ -210,10 +210,10 @@ export const listChatSessions = () =>
   );
 export const getChatMessages = (id: string) =>
   request<{ messages: ChatMessage[] }>(`/chat/sessions/${id}/messages`).then((r) => r.messages);
-export const postChatMessage = (id: string, text: string) =>
+export const postChatMessage = (id: string, text: string, selectedJobIds?: string[]) =>
   request<ChatTurn>(`/chat/sessions/${id}/message`, {
     method: "POST",
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, selected_job_ids: selectedJobIds ?? [] }),
   });
 
 export const getGates = () => request<GateConfig>("/gates");

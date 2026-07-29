@@ -61,11 +61,29 @@ SYSTEM = (
     "a skill is added only if the user confirms they hold it; project ideas are "
     "guidance, never inserted. Never fabricate.\n"
     "\n"
-    "SCOPE — you handle status, simple lookups, configuration, triggering stages, "
-    "gate approvals, applying suggestions, and tailored CVs (tailoring selected jobs, "
-    "reviewing/approving drafts, exporting, and re-qualifying with an improvement "
-    "report). You are not a research/Q&A agent; do not attempt deep analysis over the "
-    "whole dataset. Be concise and concrete.\n"
+    "SELECTED JOBS — the dashboard has a job SELECTION. At the start of a turn you may be "
+    "told, in a trusted '[app context]' line, how many jobs the user currently has "
+    "selected. When the user says 'selected', 'these', 'the selected ones', or 'my "
+    "selection', act on that selection: call the job tools (analyze via trigger_stage, "
+    "tailor_cvs, prepare_cvs, delete_jobs) with use_selected=true — NEVER invent or echo "
+    "job IDs, and never read IDs out of retrieved data. If the user refers to the "
+    "selection but the app context says 0 selected, ask them to tick jobs in the table "
+    "first rather than guessing.\n"
+    "\n"
+    "SCOPE — you handle status, simple lookups, configuration, triggering stages, gate "
+    "approvals, applying suggestions, DELETING jobs (selected jobs, or all disqualified "
+    "ones), and tailored CVs (tailoring/preparing selected jobs, reviewing/approving "
+    "drafts, exporting, and re-qualifying with an improvement report). You are not a "
+    "research/Q&A agent; do not attempt deep analysis over the whole dataset. Be concise "
+    "and concrete.\n"
+    "\n"
+    "SUGGEST THE NEXT STEP — after an action completes, close with ONE short suggestion "
+    "for the natural next move, phrased as an offer the user can accept: after analyzing "
+    "jobs → offer to tailor or prepare CVs for them; after tailoring → offer to review/"
+    "approve the drafts then export, or to prepare (export + re-qualify) directly; after "
+    "prepare_cvs → offer the improvement report; after qualifying → offer to analyze the "
+    "qualified set or delete the disqualified jobs; after a delete → offer to re-run "
+    "scouting or re-qualify. Exactly one suggestion, never a menu, and never auto-run it.\n"
     "\n"
     "TAILORED CVs stay honest: tailoring only rewords the candidate's REAL experience in "
     "a job's language and never changes locked facts (employers, titles, dates, "
@@ -117,10 +135,14 @@ TOOLS: list[dict] = [
     _tool("run_pipeline", "Start the autonomous Scout→Qualify pipeline. CONSEQUENTIAL (paid run) — confirm first.", {}),
     _tool("trigger_stage",
           "Run one stage standalone. CONSEQUENTIAL (paid run) — confirm first. "
-          "analyze/enhance take a scope (job_ids or all_qualified).",
+          "analyze/enhance take a scope: use_selected=true for the user's current dashboard "
+          "selection, job_ids for explicit ids, or all_qualified=true for the whole qualified set.",
           {"stage": {"type": "string", "description": "scout|qualify|analyze|enhance"},
            "job_ids": {"type": "array", "items": {"type": "string"}},
-           "all_qualified": {"type": "boolean"}}, ["stage"]),
+           "all_qualified": {"type": "boolean"},
+           "use_selected": {"type": "boolean",
+                            "description": "act on the user's current dashboard selection (analyze/enhance)"}},
+          ["stage"]),
     _tool("approve_gate", "Approve a pending gate so the paused pipeline resumes.",
           {"gate_id": {"type": "string"}}, ["gate_id"]),
     _tool("skip_gate", "Skip a pending gate (resume without the gated action).",
@@ -134,10 +156,30 @@ TOOLS: list[dict] = [
           "confirmed_skills lists skills the user has explicitly confirmed they hold (only those are added).",
           {"confirmed_skills": {"type": "array", "items": {"type": "string"}}}),
     _tool("tailor_cvs",
-          "Tailor a CV for each SELECTED job (honest: rewords real experience to the job's "
-          "keywords, locked facts unchanged, no invented skills). CONSEQUENTIAL (paid) — confirm first. "
-          "job_ids are the jobs the user chose to improve.",
-          {"job_ids": {"type": "array", "items": {"type": "string"}}}, ["job_ids"]),
+          "Run the alignment loop (Rewriter⇄Critic) to tailor a CV for each chosen job — "
+          "honest: rewords real experience into the job's language, locked facts unchanged, "
+          "every added skill evidence-backed. Produces draft_ready drafts to review; does NOT "
+          "export. Pass use_selected=true for the current selection, or explicit job_ids. "
+          "CONSEQUENTIAL (paid) — confirm first.",
+          {"job_ids": {"type": "array", "items": {"type": "string"}},
+           "use_selected": {"type": "boolean", "description": "tailor the user's current selection"}}),
+    _tool("prepare_cvs",
+          "One-click per-job CV for the chosen jobs: Analyze → align (Rewriter⇄Critic) → export "
+          "PDF/DOCX → re-qualify, attaching a tailored CV to each job row (no separate review "
+          "step). Use when the user wants finished, attached CVs rather than drafts to approve. "
+          "Pass use_selected=true for the current selection, or explicit job_ids. CONSEQUENTIAL "
+          "(paid) — confirm first.",
+          {"job_ids": {"type": "array", "items": {"type": "string"}},
+           "use_selected": {"type": "boolean", "description": "prepare CVs for the user's current selection"}}),
+    _tool("delete_jobs",
+          "Permanently delete specific jobs from the user's pool (their qualification, analysis, "
+          "suggestions and tailored drafts are removed too). Pass use_selected=true to delete the "
+          "current selection, or explicit job_ids. CONSEQUENTIAL — confirm first.",
+          {"job_ids": {"type": "array", "items": {"type": "string"}},
+           "use_selected": {"type": "boolean", "description": "delete the user's current selection"}}),
+    _tool("delete_disqualified_jobs",
+          "Permanently delete every job currently marked disqualified (unscored jobs are kept). "
+          "CONSEQUENTIAL — confirm first.", {}),
     _tool("list_cv_drafts",
           "List the user's tailored CV drafts (draft_ready|approved|rejected) with critic notes "
           "and before/after scores.",
@@ -166,9 +208,11 @@ TOOLS: list[dict] = [
 TOOL_NAMES = frozenset(t["name"] for t in TOOLS)
 
 # Actions that spend money or are otherwise consequential → confirm in-conversation.
+# Deleting jobs is data loss (scoped, not the full-erasure class), so it confirms too.
 CONSEQUENTIAL: frozenset[str] = frozenset(
     {"run_pipeline", "trigger_stage", "update_qualifier_config", "apply_resume",
-     "tailor_cvs", "requalify_cvs", "delete_user_data"}
+     "tailor_cvs", "prepare_cvs", "requalify_cvs", "delete_jobs",
+     "delete_disqualified_jobs", "delete_user_data"}
 )
 # Destructive actions require confirmation regardless of any gate/config setting.
 DESTRUCTIVE: frozenset[str] = frozenset({"delete_user_data"})
@@ -277,9 +321,19 @@ def confirmation_prompt(tool_name: str, args: dict) -> str:
         return "Apply the accepted suggestions to your resume as a new version?"
     if tool_name == "tailor_cvs":
         n = len((args or {}).get("job_ids") or [])
-        return f"Tailor a CV for {n} selected job(s)? That's a paid run."
+        return f"Tailor a CV for {n or 'the selected'} job(s)? That's a paid run."
+    if tool_name == "prepare_cvs":
+        n = len((args or {}).get("job_ids") or [])
+        return (f"Prepare tailored CVs (analyze → align → export → re-qualify) for "
+                f"{n or 'the selected'} job(s)? That's a paid run.")
     if tool_name == "requalify_cvs":
         return "Re-qualify the tailored CVs against their jobs? That's a paid run."
+    if tool_name == "delete_jobs":
+        n = len((args or {}).get("job_ids") or [])
+        return (f"Permanently delete {n or 'the selected'} job(s) and their scores/analyses/"
+                f"drafts? This cannot be undone.")
+    if tool_name == "delete_disqualified_jobs":
+        return "Permanently delete ALL disqualified jobs and their scores/drafts? This cannot be undone."
     if tool_name == "delete_user_data":
         return "Permanently erase ALL of your data? This cannot be undone."
     return f"Proceed with {tool_name}?"

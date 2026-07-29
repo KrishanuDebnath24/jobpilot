@@ -39,16 +39,23 @@ _ROUTES: dict[str, tuple[str, str, object, bool]] = {
     "update_gate": ("config", "update_gate_config", None, False),
     "get_pipeline_status": ("pipeline", "get_pipeline_status", None, True),
     "run_pipeline": ("pipeline", "run_full_pipeline", lambda a: {}, False),
-    "trigger_stage": ("pipeline", "trigger_stage", None, False),
+    "trigger_stage": ("pipeline", "trigger_stage",
+                      lambda a: {k: v for k, v in a.items() if k != "use_selected"}, False),
     "approve_gate": ("pipeline", "approve_gate", None, False),
     "skip_gate": ("pipeline", "skip_gate", None, False),
     "list_cv_drafts": ("db", "get_cv_drafts", None, True),  # Phase 6.5: the user's own drafts (data)
+    "delete_jobs": ("db", "delete_jobs", lambda a: {"job_ids": a.get("job_ids") or []}, False),
+    "delete_disqualified_jobs": ("db", "delete_disqualified_jobs", lambda a: {}, False),
     "delete_user_data": ("db", "delete_user_data", lambda a: {}, False),
 }
 _LOCAL = {"prepare_resume_apply", "apply_resume"}
 # Phase 6.5 CV-flow tools handled locally (enqueue a task or a scoped db-mcp write).
-_CV_LOCAL = {"tailor_cvs", "export_cvs", "requalify_cvs", "approve_cv_drafts",
+_CV_LOCAL = {"tailor_cvs", "prepare_cvs", "export_cvs", "requalify_cvs", "approve_cv_drafts",
              "reject_cv_drafts", "cv_improvement_report"}
+# Job-scoped tools whose target can be the user's current dashboard selection: when the
+# model passes use_selected=true (and no explicit job_ids), the executor substitutes the
+# selection it was constructed with — the model never has to echo opaque job IDs.
+_SELECTION_SCOPED = {"tailor_cvs", "prepare_cvs", "delete_jobs", "trigger_stage"}
 
 _SERVICES = {
     "db": mcp_client.db_mcp,
@@ -66,21 +73,41 @@ class ConciergeExecutor:
     """Dispatch a Concierge tool call under the trust boundary. ``user_id`` is fixed at
     construction from the session; a tool argument can never change it."""
 
-    def __init__(self, user_id: uuid.UUID, call=None):
+    def __init__(self, user_id: uuid.UUID, call=None, selected_job_ids: list[str] | None = None):
         self.user_id = user_id
         self._call = call or _default_call
+        # The user's current dashboard selection, from the authenticated request (trusted
+        # context, not retrieved data). Job-scoped tools resolve "selected" against this.
+        self.selected_job_ids = list(selected_job_ids or [])
+
+    def _apply_selection(self, name: str, args: dict) -> dict:
+        """For a selection-scoped tool called with ``use_selected`` and no explicit
+        ``job_ids``, substitute the current selection so both the confirmation prompt and
+        the eventual action target exactly what the user picked in the UI."""
+        if name in _SELECTION_SCOPED and args.get("use_selected") and not args.get("job_ids"):
+            return {**args, "job_ids": list(self.selected_job_ids)}
+        return args
 
     async def execute(self, name: str, args: dict, confirmed: bool = False) -> tuple[dict, bool]:
         """Returns ``(result, wrap_as_data)``. A consequential/destructive tool called
-        without ``confirmed`` returns a ``confirmation_required`` result and performs
-        NO action."""
+        without ``confirmed`` returns a ``confirmation_required`` result (carrying the
+        selection-resolved ``resolved_args``) and performs NO action."""
         args = dict(args or {})
         args.pop("user_id", None)  # trust boundary: identity never comes from tool args
         if name not in concierge.TOOL_NAMES:
             return {"error": f"unknown tool {name!r}"}, False
+        # Resolve "selected" BEFORE authorization so the confirm prompt names the real
+        # target and the held action fires on exactly those ids.
+        args = self._apply_selection(name, args)
+        # "Act on selected" but nothing is selected → don't confirm-and-no-op; tell the
+        # agent so it can ask the user to pick jobs first.
+        if name in _SELECTION_SCOPED and args.get("use_selected") and not args.get("job_ids"):
+            return {"status": "no_selection",
+                    "note": "No jobs are selected — ask the user to tick jobs in the table first."}, False
         if concierge.authorize(name, confirmed) == "confirm":
             return {"status": "confirmation_required",
-                    "prompt": concierge.confirmation_prompt(name, args)}, False
+                    "prompt": concierge.confirmation_prompt(name, args),
+                    "resolved_args": args}, False
 
         if name == "prepare_resume_apply":
             from .apply_runner import prepare_apply
@@ -111,6 +138,11 @@ class ConciergeExecutor:
             from .tasks import cv_tailor
             job_ids = list(args.get("job_ids") or [])
             cv_tailor.delay(str(self.user_id), job_ids)
+            return {"status": "queued", "job_count": len(job_ids)}, False
+        if name == "prepare_cvs":
+            from .tasks import cv_prepare
+            job_ids = list(args.get("job_ids") or [])
+            cv_prepare.delay(str(self.user_id), job_ids)
             return {"status": "queued", "job_count": len(job_ids)}, False
         if name == "export_cvs":
             from .tasks import cv_export
@@ -189,9 +221,24 @@ def _confirm_reply(tool: str, result: dict) -> str:
             return f"Done — created a new resume version ({result.get('applied_rewrites', 0)} rewrite(s); added: {added})."
         return f"Nothing applied — {result.get('reason', 'no accepted suggestions')}."
     if tool == "tailor_cvs":
-        return f"Tailoring started for {result.get('job_count', 0)} job(s) — I'll have drafts ready to review shortly."
+        return (f"Tailoring started for {result.get('job_count', 0)} job(s) — I'll have drafts "
+                f"ready to review shortly. Want me to export and re-qualify them once they're done?")
+    if tool == "prepare_cvs":
+        return (f"Preparing CVs for {result.get('job_count', 0)} job(s): analyze → align → export "
+                f"→ re-qualify. They'll attach to the job rows shortly — then I can show you the "
+                f"improvement report.")
     if tool == "requalify_cvs":
         return "Re-qualification started — I'll report the before/after deltas when it's done."
+    if tool == "delete_jobs":
+        files = result.get("files_deleted") or 0
+        extra = f" and {files} attached CV file(s)" if files else ""
+        return (f"Done — deleted {result.get('deleted', 0)} job(s){extra} and everything under "
+                f"them. Want me to re-run scouting to refill the pool?")
+    if tool == "delete_disqualified_jobs":
+        files = result.get("files_deleted") or 0
+        extra = f" ({files} attached CV file(s) removed)" if files else ""
+        return (f"Done — removed {result.get('deleted', 0)} disqualified job(s){extra}. Want me "
+                f"to re-qualify what's left, or analyze the qualified set?")
     if tool == "delete_user_data":
         return "Done — all of your data has been erased."
     return f"Done — {tool}."
@@ -213,18 +260,41 @@ async def _safe_execute(executor: "ConciergeExecutor", name: str, args: dict, co
         return {"error": f"{type(exc).__name__}: {exc}"}, False
 
 
-async def run_turn(user_id: uuid.UUID, chat_session_id: uuid.UUID, user_text: str) -> dict:
+def _selection_preface(selected_job_ids: list[str]) -> str:
+    """A trusted, per-turn context line telling the agent how many jobs are selected. Kept
+    OUT of the cached system prompt (which is byte-stable) and OUT of the persisted
+    transcript, so it never accumulates across turns and never breaks the prompt cache."""
+    n = len(selected_job_ids)
+    if n == 0:
+        return ("[app context — trusted] The user has NO jobs selected right now. If they "
+                "refer to 'selected' jobs, ask them to tick jobs in the table first.\n\n")
+    return (f"[app context — trusted] The user has {n} job(s) selected in the dashboard. "
+            f"To act on the selection, call job tools with use_selected=true — do not echo "
+            f"the ids.\n\n")
+
+
+async def run_turn(
+    user_id: uuid.UUID,
+    chat_session_id: uuid.UUID,
+    user_text: str,
+    selected_job_ids: list[str] | None = None,
+) -> dict:
     """Run one Concierge turn. Persists the exchange, drives the tool-use loop, and
-    returns the reply plus a list of tool-call events (for streaming). A pending
-    consequential action from the previous turn, confirmed by an explicit yes, executes
-    on the fast path (no LLM call) — deterministic and free."""
+    returns the reply plus a list of tool-call events (for streaming). ``selected_job_ids``
+    is the user's current dashboard selection (trusted request context); job-scoped tools
+    resolve "selected" against it. A pending consequential action from the previous turn,
+    confirmed by an explicit yes, executes on the fast path (no LLM call) — deterministic
+    and free."""
     settings = get_settings()
+    selected = list(selected_job_ids or [])
     history = (await mcp_client.db_mcp(
         user_id, "get_messages", {"chat_session_id": str(chat_session_id)}))["messages"]
-    executor = ConciergeExecutor(user_id)
+    executor = ConciergeExecutor(user_id, selected_job_ids=selected)
     await _persist(user_id, chat_session_id, "user", user_text)
 
-    # Fast path: the user is confirming a consequential action proposed last turn.
+    # Fast path: the user is confirming a consequential action proposed last turn. The
+    # pending args already carry the selection resolved at propose time, so the confirmed
+    # action fires on exactly what was described.
     pending = _last_pending(history)
     if pending and concierge.confirms_action(pending["tool"], user_text):
         result, _ = await _safe_execute(executor, pending["tool"], pending["args"], confirmed=True)
@@ -234,7 +304,10 @@ async def run_turn(user_id: uuid.UUID, chat_session_id: uuid.UUID, user_text: st
         return {"reply": reply, "events": [{"tool": pending["tool"], "status": "confirmed"}],
                 "pending": None}
 
-    messages = _to_anthropic_messages(history) + [{"role": "user", "content": user_text}]
+    # Prefix the turn (for the model only) with the current selection; the persisted user
+    # message above stays the raw text.
+    turn_text = _selection_preface(selected) + user_text
+    messages = _to_anthropic_messages(history) + [{"role": "user", "content": turn_text}]
     client = get_client(settings)
     events_out: list[dict] = []
     new_pending: dict | None = None
@@ -262,7 +335,12 @@ async def run_turn(user_id: uuid.UUID, chat_session_id: uuid.UUID, user_text: st
                 events_out.append({"tool": tu.name,
                                    "status": result.get("status", "ok") if isinstance(result, dict) else "ok"})
                 if isinstance(result, dict) and result.get("status") == "confirmation_required":
-                    new_pending = {"tool": tu.name, "args": tu.input or {}}
+                    # Store the selection-RESOLVED args so the confirmed run targets exactly
+                    # what the confirm prompt described (not the raw use_selected marker).
+                    new_pending = {"tool": tu.name, "args": result.get("resolved_args") or (tu.input or {})}
+                    # resolved_args is bookkeeping (may hold job UUIDs) — keep it out of the
+                    # model's view; the prompt text alone is what it should relay.
+                    result = {k: v for k, v in result.items() if k != "resolved_args"}
                 content = concierge.wrap_retrieved(tu.name, json.dumps(result)) if is_data else json.dumps(result)
                 tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": content})
             messages.append({"role": "user", "content": tool_results})
