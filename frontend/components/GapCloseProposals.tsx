@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   GapClose,
   GapCloseKind,
@@ -229,16 +229,20 @@ function ItemRow({
 function JobProposals({
   suggestion,
   title,
+  open,
+  onToggleOpen,
   onReviewed,
 }: {
   suggestion: Suggestion;
   title: string;
+  /** Accordion state, owned by the list so only one job's proposals are ever expanded. */
+  open: boolean;
+  onToggleOpen: () => void;
   onReviewed: () => Promise<void> | void;
 }) {
   const gc = suggestion.gap_close_json;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [open, setOpen] = useState(true);
   // Clicks not yet confirmed by the server, keyed "kind:id". Applied over the stored state so
   // the row responds on click; dropped once the refresh lands, reverted if the write fails.
   const [pending, setPending] = useState<Record<string, boolean | null>>({});
@@ -304,7 +308,7 @@ function JobProposals({
   return (
     <div className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
       <div className="flex flex-wrap items-center gap-2">
-        <button onClick={() => setOpen(!open)} className="text-sm font-medium text-neutral-100">
+        <button onClick={onToggleOpen} className="text-sm font-medium text-neutral-100">
           {open ? "▾" : "▸"} {title}
         </button>
         <span
@@ -388,6 +392,11 @@ export default function GapCloseProposals({
   // View-only: suggestion ids cleared from the list. Nothing is deleted, and a job reappears
   // by itself if it stops being fully reviewed (e.g. its proposals were regenerated).
   const [hidden, setHidden] = useState<Set<string>>(new Set());
+  // Accordion: one job's proposals expanded at a time. These cards used to all render open,
+  // so the first one is opened for you when a set arrives — otherwise the panel would look
+  // empty after a run. Collapsing it does NOT spring back open.
+  const [openJobId, setOpenJobId] = useState<string | null>(null);
+  const seenAny = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -423,6 +432,15 @@ export default function GapCloseProposals({
   );
   const hiddenCount = withProposals.length - visible.length;
 
+  // Open the first card the very first time proposals show up (e.g. on page load with a set
+  // already stored). Guarded by a ref so a deliberate collapse is never undone.
+  useEffect(() => {
+    if (!seenAny.current && visible.length > 0) {
+      seenAny.current = true;
+      setOpenJobId(visible[0].id);
+    }
+  }, [visible]);
+
   /* The runner is a Celery task with no pipeline_runs row, so there's nothing to poll by id.
    * Instead: snapshot a fingerprint of the stored proposal sets, trigger, and wait for it to
    * change. That detects a regenerate (same job count, different content) as well as a first
@@ -442,6 +460,9 @@ export default function GapCloseProposals({
           setRows(fresh);
           setProposed(true);
           setHidden(new Set());   // fresh proposals deserve a fresh look
+          // Jump straight to the first job that has something to review.
+          const first = fresh.find((s) => s.job_id && countTotal(s.gap_close_json) > 0);
+          if (first) setOpenJobId(first.id);
           setMsg("Proposals ready — review each item below.");
           return;
         }
@@ -554,6 +575,8 @@ export default function GapCloseProposals({
                 key={s.id}
                 suggestion={s}
                 title={jobTitleById(s.job_id as string)}
+                open={openJobId === s.id}
+                onToggleOpen={() => setOpenJobId((cur) => (cur === s.id ? null : s.id))}
                 onReviewed={refresh}
               />
             ))}

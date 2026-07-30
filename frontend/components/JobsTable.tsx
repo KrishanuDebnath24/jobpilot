@@ -243,18 +243,22 @@ function JobRow({
   selected,
   onToggleSelect,
   cvDraft,
+  open,
+  onToggleOpen,
 }: {
   job: Job;
   selected?: boolean;
   onToggleSelect?: (id: string) => void;
   cvDraft?: CvDraft | null;
+  /** Accordion: the open row is owned by the table so only one can be expanded. */
+  open: boolean;
+  onToggleOpen: () => void;
 }) {
-  const [open, setOpen] = useState(false);
   const colSpan = onToggleSelect ? 7 : 6;
   return (
     <>
       <tr
-        onClick={() => setOpen((o) => !o)}
+        onClick={onToggleOpen}
         className="cursor-pointer border-t border-neutral-800/70 transition hover:bg-neutral-900/50"
       >
         {onToggleSelect && (
@@ -311,6 +315,9 @@ export default function JobsTable({
   onToggleSelect?: (id: string) => void;
   cvDraftByJobId?: Record<string, CvDraft>;
 }) {
+  // Accordion: one expanded row at a time, so opening a job closes whichever was open.
+  const [openId, setOpenId] = useState<string | null>(null);
+
   if (jobs.length === 0) {
     return (
       <div className="rounded-xl border border-dashed border-neutral-800 py-16 text-center text-sm text-neutral-500">
@@ -340,6 +347,8 @@ export default function JobsTable({
               selected={selected?.has(job.id)}
               onToggleSelect={onToggleSelect}
               cvDraft={cvDraftByJobId?.[job.id] ?? null}
+              open={openId === job.id}
+              onToggleOpen={() => setOpenId((cur) => (cur === job.id ? null : job.id))}
             />
           ))}
         </tbody>

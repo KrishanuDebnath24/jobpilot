@@ -155,6 +155,10 @@ export default function TailoredCVs({
   // long list is obvious.
   const [fresh, setFresh] = useState<Set<string>>(new Set());
   const [op, setOp] = useState<Op | null>(null);
+  // Accordion: at most one draft expanded, and at most one editor open (which implies its
+  // card is expanded). Owned here rather than per-card so opening one closes the rest.
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const poll = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async () => {
@@ -521,6 +525,20 @@ export default function TailoredCVs({
             title={jobTitleById(d.job_id)}
             picked={picked.has(d.id)}
             isNew={fresh.has(d.id)}
+            open={openId === d.id}
+            editing={editingId === d.id}
+            onToggleOpen={() =>
+              setOpenId((cur) => {
+                const next = cur === d.id ? null : d.id;
+                // Collapsing a card (or moving to another) must not leave a stray editor open.
+                if (next !== d.id) setEditingId(null);
+                return next;
+              })
+            }
+            onToggleEdit={() => {
+              setOpenId(d.id);                       // editing always shows the card
+              setEditingId((cur) => (cur === d.id ? null : d.id));
+            }}
             onPick={() => togglePick(d.id)}
             onApprove={() => run("approve1", () => approveCvDrafts([d.id]))}
             onReject={() => run("reject1", () => rejectCvDrafts([d.id]))}
@@ -718,6 +736,10 @@ function DraftCard({
   title,
   picked,
   isNew = false,
+  open,
+  editing,
+  onToggleOpen,
+  onToggleEdit,
   onPick,
   onApprove,
   onReject,
@@ -728,14 +750,17 @@ function DraftCard({
   title: string;
   picked: boolean;
   isNew?: boolean;
+  /** Accordion state, owned by the list so only one card is ever expanded. */
+  open: boolean;
+  editing: boolean;
+  onToggleOpen: () => void;
+  onToggleEdit: () => void;
   onPick: () => void;
   onApprove: () => void;
   onReject: () => void;
   onChanged: () => Promise<void> | void;
   busy: boolean;
 }) {
-  const [open, setOpen] = useState(false);
-  const [editing, setEditing] = useState(false);
   const notes = draft.critic_notes_json;
   const content = draft.tailored_content_json;
   const attested = notes?.user_attested;
@@ -829,16 +854,10 @@ function DraftCard({
           </span>
         )}
         <div className="ml-auto flex items-center gap-1.5">
-          <button onClick={() => setOpen((o) => !o)} className="text-xs text-neutral-400 hover:text-neutral-200">
+          <button onClick={onToggleOpen} className="text-xs text-neutral-400 hover:text-neutral-200">
             {open ? "Hide" : "Review"}
           </button>
-          <button
-            onClick={() => {
-              setEditing((e) => !e);
-              setOpen(true);
-            }}
-            className="text-xs text-sky-300 hover:text-sky-200"
-          >
+          <button onClick={onToggleEdit} className="text-xs text-sky-300 hover:text-sky-200">
             {editing ? "Done editing" : "Edit"}
           </button>
           {draft.status === "draft_ready" && (
