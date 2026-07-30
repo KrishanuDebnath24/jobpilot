@@ -210,6 +210,41 @@ class CvIdsRequest(BaseModel):
     draft_ids: list[str] | None = None
 
 
+class GapCloseItemPatch(BaseModel):
+    """Phase 6.6: one item of the user's review of a gap-close proposal set. ``accepted``
+    None leaves it undecided; the text fields let the user edit the wording before
+    vouching for it. Unknown kinds/ids are ignored server-side."""
+    kind: str
+    id: str
+    accepted: bool | None = None
+    skill: str | None = None
+    text: str | None = None
+    after: str | None = None
+    role_ref: str | None = None
+    interview_prep: str | None = None
+
+
+class GapCloseReviewRequest(BaseModel):
+    items: list[GapCloseItemPatch]
+
+
+class CvDraftEditRequest(BaseModel):
+    """Phase 6.6: deterministic edits to one attached draft (no LLM). Adding a skill the
+    résumé doesn't evidence is recorded as ``user_confirmed`` — the candidate's own word."""
+    add_skills: list[str] | None = None
+    remove_skills: list[str] | None = None
+    add_bullets: list[dict] | None = None     # [{"text", "role_ref"?, "role_index"?}]
+    remove_bullets: list[str] | None = None
+
+
+class CvDraftRewordRequest(BaseModel):
+    """Phase 6.6: one focused model call rewording the summary or a single role's bullets."""
+    target: str = "summary"                   # "summary" | "role"
+    instruction: str
+    role_index: int | None = None
+    role_ref: str | None = None
+
+
 # --------------------------------------------------------------------------- #
 # System
 # --------------------------------------------------------------------------- #
@@ -735,6 +770,34 @@ async def cv_prepare(body: CvTailorRequest, current_user=Depends(get_current_use
     return {"task_id": t.id, "status": "queued", "job_count": len(body.job_ids)}
 
 
+@app.post("/cv/gap-close", tags=["cv"], status_code=status.HTTP_202_ACCEPTED, dependencies=[_rl_trigger])
+async def cv_gap_close(body: CvTailorRequest, current_user=Depends(get_current_user)) -> dict:
+    """Phase 6.6: propose gap-closing CV content for the selected jobs — skills the résumé
+    never mentions, aggressive bullet rewrites, and brand-new bullets. These are PROPOSALS
+    only: nothing reaches a CV until the user accepts items individually, and an accepted
+    item is recorded as the candidate's own assertion (``user_confirmed``)."""
+    from .tasks import cv_gap_close as task
+
+    t = task.delay(str(current_user.id), body.job_ids)
+    return {"task_id": t.id, "status": "queued", "job_count": len(body.job_ids)}
+
+
+@app.post("/suggestions/{suggestion_id}/gap-close/review", tags=["cv"])
+async def review_gap_close(
+    suggestion_id: str, body: GapCloseReviewRequest, current_user=Depends(get_current_user)
+) -> dict:
+    """Accept / reject / edit individual gap-close proposals. Accepting is the candidate
+    attesting they can back the item in an interview — that is what admits it past the
+    evidence gate on the Tailor-only path. Leaves the row's ``status`` untouched, so
+    apply-to-resume keeps reading only the honest Enhancer buckets."""
+    out = await mcp_client.db_mcp(
+        current_user.id, "set_gap_close_items",
+        {"suggestion_id": suggestion_id, "items": [i.model_dump() for i in body.items]})
+    if not out.get("suggestion"):
+        raise HTTPException(status_code=404, detail="suggestion not found")
+    return out
+
+
 @app.get("/cv/drafts", tags=["cv"])
 async def cv_drafts(status: str | None = None, current_user=Depends(get_current_user)) -> dict:
     return await mcp_client.db_mcp(current_user.id, "get_cv_drafts", {"status": status})
@@ -743,6 +806,40 @@ async def cv_drafts(status: str | None = None, current_user=Depends(get_current_
 @app.get("/cv/drafts/{draft_id}", tags=["cv"])
 async def cv_draft(draft_id: str, current_user=Depends(get_current_user)) -> dict:
     return await mcp_client.db_mcp(current_user.id, "get_cv_draft", {"draft_id": draft_id})
+
+
+@app.post("/cv/drafts/{draft_id}/edit", tags=["cv"])
+async def cv_draft_edit(
+    draft_id: str, body: CvDraftEditRequest, current_user=Depends(get_current_user)
+) -> dict:
+    """Phase 6.6: add/remove skills and bullets on one draft before approving it. NO LLM.
+    The draft returns to ``draft_ready`` and its stale PDF/DOCX detach, so an edit can never
+    ship inside an already-exported file."""
+    from .cv_draft_edit_runner import edit_draft
+
+    try:
+        return await edit_draft(
+            current_user.id, draft_id,
+            add_skills=body.add_skills, remove_skills=body.remove_skills,
+            add_bullets=body.add_bullets, remove_bullets=body.remove_bullets)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="draft not found")
+
+
+@app.post("/cv/drafts/{draft_id}/reword", tags=["cv"], dependencies=[_rl_trigger])
+async def cv_draft_reword(
+    draft_id: str, body: CvDraftRewordRequest, current_user=Depends(get_current_user)
+) -> dict:
+    """Phase 6.6: reword one draft's summary or a single role's bullets to a free-text
+    instruction — one focused model call, not a full re-tailor."""
+    from .cv_draft_edit_runner import reword_draft
+
+    try:
+        return await reword_draft(
+            current_user.id, draft_id, target=body.target, instruction=body.instruction,
+            role_index=body.role_index, role_ref=body.role_ref)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="draft not found")
 
 
 @app.post("/cv/approve", tags=["cv"])

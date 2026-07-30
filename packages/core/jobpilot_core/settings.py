@@ -84,6 +84,11 @@ class Settings(BaseSettings):
     # The Enhancer emits three buckets (skills/projects/bullet_rewrites) — it needs
     # more room than the extraction default so its output isn't truncated mid-bucket.
     enhancer_max_tokens: int = 3000
+    # The Gap-closer (same Sonnet tier as the Enhancer) emits three buckets where every
+    # item also carries an interview talking point, so it needs more room than the
+    # Enhancer. Bounded per run by gap_close_max_jobs.
+    gap_closer_max_tokens: int = 4000
+    gap_close_max_jobs: int = 20  # bound a gap-close selection (spend guard)
     analyze_max_jobs: int = 200  # hard cap on jobs analyzed per run (spend guard)
     # Selected/single mode runs synchronous cached calls; at/above this count a run
     # switches to the Batch API (50% cheaper, non-interactive).

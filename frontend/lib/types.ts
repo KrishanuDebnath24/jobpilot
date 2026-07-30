@@ -100,8 +100,44 @@ export type Suggestion = {
       }
     | null;
   bullet_rewrites_json: { bullet_rewrites?: BulletRewrite[] } | null;
+  gap_close_json: GapClose | null;
   status: "proposed" | "accepted" | "dismissed";
   created_at: string | null;
+};
+
+/** Phase 6.6 — the Gap-closer's unconstrained proposals + per-item review state.
+ *  `accepted: null` = undecided, `true` = the candidate vouched for it (which is what
+ *  admits it past the evidence gate), `false` = rejected. */
+export type GapCloseItemBase = {
+  id: string;
+  accepted: boolean | null;
+  closes?: string;
+  interview_prep?: string;
+  user_edited?: boolean;
+};
+export type GapCloseSkill = GapCloseItemBase & { skill: string; in_resume?: boolean };
+export type GapCloseRewrite = GapCloseItemBase & {
+  role_ref?: string;
+  before?: string;
+  after: string;
+};
+export type GapCloseNewBullet = GapCloseItemBase & { role_ref?: string; text: string };
+export type GapClose = {
+  claimed_skills?: GapCloseSkill[];
+  bullet_rewrites?: GapCloseRewrite[];
+  new_bullets?: GapCloseNewBullet[];
+};
+export type GapCloseKind = "claimed_skills" | "bullet_rewrites" | "new_bullets";
+/** One entry of a review submission — accept/reject plus any edited wording. */
+export type GapClosePatch = {
+  kind: GapCloseKind;
+  id: string;
+  accepted?: boolean | null;
+  skill?: string;
+  text?: string;
+  after?: string;
+  role_ref?: string;
+  interview_prep?: string;
 };
 
 export type RunCounts = Record<string, unknown> & {
@@ -317,6 +353,14 @@ export type CvCriticNotes = {
   skill_evidence?: CvSkillEvidence[];
   change_notes?: CvChangeNote[];
   rounds?: CvAlignmentRound[];
+  // Phase 6.6: what the candidate personally vouched for on this draft (absent on drafts
+  // built purely from résumé-grounded content, so honest drafts render exactly as before).
+  user_attested?: {
+    skills?: string[];
+    new_bullets?: { role_ref?: string; text?: string }[];
+    bullet_rewrites?: { role_ref?: string; after?: string }[];
+    note?: string;
+  };
   // Legacy (pre-alignment-loop drafts) — still read so old rows render.
   caught_before_enforce?: { violations: string[]; fabricated: string[] };
   final_ok?: boolean;

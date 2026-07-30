@@ -17,6 +17,7 @@ import LoginGate from "./LoginGate";
 import PipelineLive from "./PipelineLive";
 import JobsTable from "./JobsTable";
 import Suggestions from "./Suggestions";
+import GapCloseProposals from "./GapCloseProposals";
 import Chat from "./Chat";
 import Ask from "./Ask";
 import Gates from "./Gates";
@@ -89,6 +90,9 @@ export default function Dashboard() {
   // too, while applying suggestions — an assembled version — never affects this).
   const [cvDrafts, setCvDrafts] = useState<CvDraft[]>([]);
   const [resumeId, setResumeId] = useState<string | null>(null);
+  // Bumped after a Concierge turn so the Tailored-CVs panel reloads immediately (its
+  // drafts change synchronously now — no need to wait for its 5s poll or a page refresh).
+  const [cvRefresh, setCvRefresh] = useState(0);
 
   const loadCvContext = useCallback(async () => {
     try {
@@ -143,6 +147,15 @@ export default function Dashboard() {
       loadingJobs.current = false;
     }
   }, []);
+
+  // A Concierge action can change jobs AND CV drafts (tailor/edit/qualify/delete), so refresh
+  // the table, the per-row CV context, and signal the Tailored-CVs panel to reload — no manual
+  // page refresh.
+  const onConciergeChanged = useCallback(() => {
+    loadJobs();
+    loadCvContext();
+    setCvRefresh((k) => k + 1);
+  }, [loadJobs, loadCvContext]);
 
   useEffect(() => {
     (async () => {
@@ -252,7 +265,7 @@ export default function Dashboard() {
       {/* The two conversational agents, side by side: the Concierge acts; Ask answers
           (read-only). Distinct privilege sets — Ask has no action tools. */}
       <div className="mt-6 grid gap-4 lg:grid-cols-2">
-        <Chat onChanged={loadJobs} selectedJobIds={[...selected]} />
+        <Chat onChanged={onConciergeChanged} selectedJobIds={[...selected]} />
         <Ask />
       </div>
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
@@ -418,9 +431,17 @@ export default function Dashboard() {
         jobTitleById={(id) => jobs.find((j) => j.id === id)?.title ?? "Job"}
       />
 
+      {/* Phase 6.6 — sits between the honest suggestions and Tailored CVs because that is
+          its place in the flow: propose aggressively, vouch item by item, then tailor. */}
+      <GapCloseProposals
+        selectedJobIds={[...selected]}
+        jobTitleById={(id) => jobs.find((j) => j.id === id)?.title ?? "Job"}
+      />
+
       <TailoredCVs
         selectedJobIds={[...selected]}
         jobTitleById={(id) => jobs.find((j) => j.id === id)?.title ?? "Job"}
+        refreshSignal={cvRefresh}
       />
 
       {settings.open && (

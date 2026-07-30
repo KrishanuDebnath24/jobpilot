@@ -203,6 +203,10 @@ class Suggestion(Base):
     skills_to_add: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
     projects_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     bullet_rewrites_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # The Gap-closer's unconstrained proposal set + per-item accept state (Phase 6.6).
+    # Separate from the honest buckets above so an enhance re-run can't wipe it and so
+    # per-item acceptance never touches ``status`` (which drives apply-to-resume).
+    gap_close_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="proposed")
     # Phase 7: semantic-search vector over the suggestion text (NULL until embedded).
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)

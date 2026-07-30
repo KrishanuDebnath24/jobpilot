@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 
-from . import cv_fields
+from . import cv_edit, cv_fields
 from .cv_critic import critique_cv, is_aligned
 from .cv_rewriter import rewrite_cv
 from .llm import LLMUsage
@@ -68,8 +68,16 @@ async def align_cv(
     job: dict,
     analysis: dict,
     settings: Settings,
+    *,
+    attested: dict | None = None,
 ) -> dict:
     """Run the rewrite⇄critique loop for one job.
+
+    ``attested`` carries Gap-closer proposals the candidate accepted item by item. Both
+    agents receive it: the Rewriter as content to weave in, the Critic as claims whose
+    support is already settled. It MUST reach the Critic — an attested claim has no résumé
+    citation, so a Critic that hasn't been told would flag it as overclaiming, and
+    :func:`cv_critic.is_aligned` treats any integrity flag as a hard block.
 
     Returns ``{cv, aligned, alignment_score, rounds, critique, usage}`` where ``cv`` has
     already been through the code gate and is safe to persist and export.
@@ -84,7 +92,7 @@ async def align_cv(
                   cache_read=res.usage.cache_read_input_tokens,
                   cache_creation=res.usage.cache_creation_input_tokens)
 
-    res = await rewrite_cv(base_resume, snapshot, job, analysis, settings)
+    res = await rewrite_cv(base_resume, snapshot, job, analysis, settings, attested=attested)
     _track(rw_usage, res)
     if not res.data:
         raise RuntimeError("rewriter returned no CV")
@@ -95,11 +103,15 @@ async def align_cv(
 
     for n in range(1, max_rounds + 1):
         # Make the draft honest BEFORE it is judged, and tell the Critic what code caught.
+        # On the attested path, force the candidate's confirmed items in first: an attested
+        # skill carries no résumé citation, so without its user_confirmed basis the evidence
+        # gate inside finalize would delete it and the Critic would grade the wrong document.
         findings = _code_findings(draft, base_resume, snapshot)
-        cv = cv_fields.finalize(draft, base_resume, snapshot)
+        cv = (cv_edit.apply_attested(draft, base_resume, snapshot, attested) if attested
+              else cv_fields.finalize(draft, base_resume, snapshot))
 
         cres = await critique_cv(base_resume, snapshot, job, analysis, cv, settings,
-                                 code_findings=findings)
+                                 code_findings=findings, attested=attested)
         _track(cr_usage, cres)
         critique = cres.data or {}
         rounds.append(_round_record(n, critique, findings, cv, base_resume))
@@ -124,7 +136,7 @@ async def align_cv(
             break
 
         res = await rewrite_cv(base_resume, snapshot, job, analysis, settings,
-                               critique=critique, previous=cv)
+                               critique=critique, previous=cv, attested=attested)
         _track(rw_usage, res)
         if not res.data:  # keep the best draft we already have rather than failing the job
             logger.warning("cv_loop.rewrite empty job=%s round=%d — stopping early",

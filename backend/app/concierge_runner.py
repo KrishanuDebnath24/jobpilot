@@ -19,13 +19,37 @@ import json
 import logging
 import uuid
 
-from jobpilot_core import concierge
+from jobpilot_core import concierge, cv_digest, cv_edit, cv_fields
 from jobpilot_core.llm import get_client
 from jobpilot_core.settings import get_settings
 
 from . import mcp_client
 
 logger = logging.getLogger("jobpilot.concierge")
+
+# Per-job CV Q&A/edit tools, handled locally (reads + deterministic edits + one focused
+# reword). They target ONE job resolved by role+company or selection — never an id.
+_CV_QUERY_LOCAL = {"explain_job", "show_cv", "edit_cv", "reword_cv"}
+
+# Words to ignore when matching a free-text "role at company" to a job.
+_JOBREF_STOP = {"at", "the", "a", "an", "role", "roles", "job", "jobs", "position", "for",
+                "to", "cv", "my", "this", "that", "of", "in", "with"}
+
+
+def _match_jobs(jobs: list[dict], ref: str) -> list[dict]:
+    """Jobs whose title+company contains every significant word of ``ref`` (a free-text
+    'Backend Engineer at Stripe'). Deterministic, so resolving a job by role+company costs
+    no tokens and never needs a job id from the user."""
+    toks = [t for t in "".join(c if c.isalnum() or c.isspace() else " " for c in (ref or "").lower()).split()
+            if len(t) > 1 and t not in _JOBREF_STOP]
+    if not toks:
+        return []
+    out = []
+    for j in jobs:
+        hay = f"{j.get('title') or ''} {j.get('company') or ''}".lower()
+        if all(t in hay for t in toks):
+            out.append(j)
+    return out
 
 # tool -> (service, mcp_tool, arg_mapper|None, wrap_result_as_data)
 _ROUTES: dict[str, tuple[str, str, object, bool]] = {
@@ -39,8 +63,8 @@ _ROUTES: dict[str, tuple[str, str, object, bool]] = {
     "update_gate": ("config", "update_gate_config", None, False),
     "get_pipeline_status": ("pipeline", "get_pipeline_status", None, True),
     "run_pipeline": ("pipeline", "run_full_pipeline", lambda a: {}, False),
-    "trigger_stage": ("pipeline", "trigger_stage",
-                      lambda a: {k: v for k, v in a.items() if k != "use_selected"}, False),
+    # trigger_stage is handled locally (see _run_stage): qualify/analyze/enhance run
+    # synchronously in the turn; scout stays on the worker (a crawl can run for minutes).
     "approve_gate": ("pipeline", "approve_gate", None, False),
     "skip_gate": ("pipeline", "skip_gate", None, False),
     "list_cv_drafts": ("db", "get_cv_drafts", None, True),  # Phase 6.5: the user's own drafts (data)
@@ -80,13 +104,24 @@ class ConciergeExecutor:
         # context, not retrieved data). Job-scoped tools resolve "selected" against this.
         self.selected_job_ids = list(selected_job_ids or [])
 
-    def _apply_selection(self, name: str, args: dict) -> dict:
-        """For a selection-scoped tool called with ``use_selected`` and no explicit
-        ``job_ids``, substitute the current selection so both the confirmation prompt and
-        the eventual action target exactly what the user picked in the UI."""
-        if name in _SELECTION_SCOPED and args.get("use_selected") and not args.get("job_ids"):
-            return {**args, "job_ids": list(self.selected_job_ids)}
-        return args
+    async def _resolve_targets(self, name: str, args: dict) -> tuple[dict, dict | None]:
+        """Resolve which jobs a selection-scoped action targets — from explicit ``job_ids``,
+        the dashboard ``use_selected`` set, or a free-text ``job_ref`` (role+company) — so the
+        user never has to give an id. Returns ``(args_with_job_ids, error)``: on a job_ref that
+        matches nothing, ``error`` is a helpful note; ambiguity is left to the caller (a batch
+        action legitimately spans several matches, and the confirm prompt shows the count)."""
+        if name not in _SELECTION_SCOPED or args.get("job_ids"):
+            return args, None
+        if args.get("use_selected"):
+            return {**args, "job_ids": list(self.selected_job_ids)}, None
+        ref = (args.get("job_ref") or "").strip()
+        if ref:
+            matches = _match_jobs(await self._all_jobs(), ref)
+            if not matches:
+                return args, {"status": "no_match",
+                              "note": f"No job matches '{ref}'. Try the exact role and company."}
+            return {**args, "job_ids": [m["id"] for m in matches]}, None
+        return args, None
 
     async def execute(self, name: str, args: dict, confirmed: bool = False) -> tuple[dict, bool]:
         """Returns ``(result, wrap_as_data)``. A consequential/destructive tool called
@@ -96,9 +131,15 @@ class ConciergeExecutor:
         args.pop("user_id", None)  # trust boundary: identity never comes from tool args
         if name not in concierge.TOOL_NAMES:
             return {"error": f"unknown tool {name!r}"}, False
-        # Resolve "selected" BEFORE authorization so the confirm prompt names the real
-        # target and the held action fires on exactly those ids.
-        args = self._apply_selection(name, args)
+        # Per-job CV Q&A/edit tools resolve their own target (role+company or selection) and
+        # need no confirmation (reads, reversible edits) — handle before the paid-action gate.
+        if name in _CV_QUERY_LOCAL:
+            return await self._cv_query(name, args)
+        # Resolve the target jobs (selection or role+company) BEFORE authorization so the
+        # confirm prompt names the real target and the held action fires on exactly those ids.
+        args, ref_err = await self._resolve_targets(name, args)
+        if ref_err:
+            return ref_err, False
         # "Act on selected" but nothing is selected → don't confirm-and-no-op; tell the
         # agent so it can ask the user to pick jobs first.
         if name in _SELECTION_SCOPED and args.get("use_selected") and not args.get("job_ids"):
@@ -115,6 +156,8 @@ class ConciergeExecutor:
         if name == "apply_resume":
             from .apply_runner import apply_to_resume
             return await apply_to_resume(self.user_id, args.get("confirmed_skills")), False
+        if name == "trigger_stage":
+            return await self._run_stage(args)
         if name in _CV_LOCAL:
             return await self._cv(name, args)
 
@@ -131,27 +174,58 @@ class ConciergeExecutor:
             return [d["id"] for d in drafts]
         return []
 
+    async def _run_stage(self, args: dict) -> tuple[dict, bool]:
+        """Run a pipeline stage. qualify/analyze/enhance are bounded, so they run
+        SYNCHRONOUSLY in the turn and return a real summary. scout is an unbounded crawl,
+        so it stays on the worker (reported as started). Result carries ``stage`` so the
+        confirmation reply can phrase it."""
+        stage = (args.get("stage") or "").lower()
+        job_ids = list(args.get("job_ids") or []) or None
+        all_qualified = bool(args.get("all_qualified"))
+        if stage == "qualify":
+            from .qualify_runner import run_qualify_tracked
+            return {"stage": "qualify", "status": "done", **(await run_qualify_tracked(self.user_id))}, False
+        if stage == "analyze":
+            from .analyze_runner import run_analyze_tracked
+            s = await run_analyze_tracked(self.user_id, job_ids=job_ids, all_qualified=all_qualified)
+            return {"stage": "analyze", "status": "done", "analyzed": s.get("analyzed", 0),
+                    "errors": s.get("errors") or {}}, False
+        if stage == "enhance":
+            from .enhance_runner import run_enhance_tracked
+            s = await run_enhance_tracked(self.user_id, job_ids=job_ids, all_qualified=all_qualified)
+            return {"stage": "enhance", "status": "done", "suggestions": s.get("suggestions", 0),
+                    "errors": s.get("errors") or {}}, False
+        if stage == "scout":
+            res = await self._call(self.user_id, "pipeline", "trigger_stage", {"stage": "scout"})
+            return {"stage": "scout", **(res if isinstance(res, dict) else {})}, False
+        return {"error": f"unknown stage {stage!r} (expected scout|qualify|analyze|enhance)"}, False
+
     async def _cv(self, name: str, args: dict) -> tuple[dict, bool]:
-        """Phase 6.5 CV tools: tailoring/export/re-qualify enqueue a task; approve/reject
-        are scoped db-mcp writes; the report is a grounded read of recorded scores."""
+        """Phase 6.5 CV tools. Tailoring/export/re-qualify run SYNCHRONOUSLY here (awaited in
+        the chat turn) so the user gets a real 'done' summary, not a 'queued' ticket — the
+        scope is bounded (selected jobs / a draft subset), so it completes within the turn.
+        approve/reject are scoped db-mcp writes; the report reads recorded scores."""
         if name == "tailor_cvs":
-            from .tasks import cv_tailor
-            job_ids = list(args.get("job_ids") or [])
-            cv_tailor.delay(str(self.user_id), job_ids)
-            return {"status": "queued", "job_count": len(job_ids)}, False
+            from .cv_align_runner import run_align
+            s = await run_align(self.user_id, list(args.get("job_ids") or []))
+            return {"status": "done", "tailored": s.get("tailored", 0),
+                    "aligned": s.get("aligned", 0), "errors": s.get("errors") or {}}, False
         if name == "prepare_cvs":
-            from .tasks import cv_prepare
-            job_ids = list(args.get("job_ids") or [])
-            cv_prepare.delay(str(self.user_id), job_ids)
-            return {"status": "queued", "job_count": len(job_ids)}, False
+            from .cv_prepare_runner import run_prepare_cvs
+            s = await run_prepare_cvs(self.user_id, list(args.get("job_ids") or []))
+            return {"status": "done", "tailored": s.get("tailored", 0), "aligned": s.get("aligned", 0),
+                    "exported": s.get("exported", 0), "requalified": s.get("requalified", 0),
+                    "errors": s.get("errors") or {}}, False
         if name == "export_cvs":
-            from .tasks import cv_export
-            cv_export.delay(str(self.user_id), args.get("draft_ids"))
-            return {"status": "queued"}, False
+            from .cv_export_runner import run_export
+            s = await run_export(self.user_id, args.get("draft_ids"))
+            return {"status": "done", "exported": s.get("exported", 0), "errors": s.get("errors") or {}}, False
         if name == "requalify_cvs":
-            from .tasks import cv_requalify
-            cv_requalify.delay(str(self.user_id), args.get("draft_ids"))
-            return {"status": "queued"}, False
+            from .requalify_runner import run_requalify
+            s = await run_requalify(self.user_id, args.get("draft_ids"))
+            return {"status": "done", "requalified": s.get("requalified", 0),
+                    "improved": s.get("improved", 0), "worse": s.get("worse", 0),
+                    "unchanged": s.get("unchanged", 0)}, False
         if name in ("approve_cv_drafts", "reject_cv_drafts"):
             status = "approved" if name == "approve_cv_drafts" else "rejected"
             ids = await self._resolve_cv_ids(args)
@@ -179,6 +253,136 @@ class ConciergeExecutor:
         rows.sort(key=lambda r: (r["delta"] if r["delta"] is not None else -1), reverse=True)
         return {"report": rows, "improved": improved, "total": len(rows)}
 
+    # ----------------------------------------------------------------------- #
+    # Per-job CV Q&A + editing (role+company resolution; reads + cheap edits)
+    # ----------------------------------------------------------------------- #
+    async def _all_jobs(self) -> list[dict]:
+        res = await self._call(self.user_id, "db", "get_qualified_jobs", {"limit": 5000})
+        return res.get("jobs", []) if isinstance(res, dict) else []
+
+    async def _resolve_single_job(self, args: dict) -> tuple[dict | None, dict | None]:
+        """Resolve exactly ONE target job from job_ids, the selection, or a free-text
+        role+company ``job_ref`` — never asking the user for an id. Returns ``(job, error)``:
+        exactly one is non-None."""
+        jobs = await self._all_jobs()
+        by_id = {j.get("id"): j for j in jobs}
+        ids = list(args.get("job_ids") or [])
+        if not ids and args.get("use_selected"):
+            ids = list(self.selected_job_ids)
+        if ids:
+            if len(ids) == 1 and ids[0] in by_id:
+                return by_id[ids[0]], None
+            if len(ids) > 1:
+                return None, {"status": "ambiguous",
+                              "note": "That points to several jobs — name one role and company."}
+            return None, {"status": "not_found", "note": "I couldn't find that job."}
+        ref = (args.get("job_ref") or "").strip()
+        if ref:
+            matches = _match_jobs(jobs, ref)
+            if len(matches) == 1:
+                return matches[0], None
+            if not matches:
+                return None, {"status": "no_match",
+                              "note": f"No job matches '{ref}'. Try the exact role and company."}
+            return None, {"status": "ambiguous",
+                          "candidates": [f"{m.get('title')} @ {m.get('company')}" for m in matches[:6]],
+                          "note": "Several jobs match — which role and company?"}
+        return None, {"status": "need_job",
+                      "note": "Which job? Give me the role and company (e.g. 'the Backend role at Stripe')."}
+
+    async def _analysis_for(self, job_id: str) -> dict | None:
+        res = await self._call(self.user_id, "db", "get_analyses", {})
+        for a in (res.get("analyses") if isinstance(res, dict) else []) or []:
+            if a.get("job_id") == job_id:
+                ex = a.get("extracted_json") or {}
+                return {**ex, "gaps_vs_resume": ex.get("gaps_vs_resume") or (a.get("gaps_json") or {}).get("gaps")}
+        return None
+
+    async def _draft_for(self, job_id: str) -> dict | None:
+        res = await self._call(self.user_id, "db", "get_cv_drafts", {})
+        for d in (res.get("drafts") if isinstance(res, dict) else []) or []:
+            if d.get("job_id") == job_id:
+                return d
+        return None
+
+    async def _base_resume(self) -> dict:
+        wrap = (await self._call(self.user_id, "resume", "get_base_resume", {})) or {}
+        return (wrap.get("resume") or {}).get("structured") or {}
+
+    async def _cv_query(self, name: str, args: dict) -> tuple[dict, bool]:
+        job, err = await self._resolve_single_job(args)
+        if err:
+            return err, False
+        if name == "explain_job":
+            analysis = await self._analysis_for(job["id"])
+            digest = cv_digest.job_digest(job, analysis)
+            if not analysis:
+                digest["note"] = "This job isn't analyzed yet — say 'analyze it' for the full breakdown."
+            return digest, True
+        if name == "show_cv":
+            draft = await self._draft_for(job["id"])
+            if not draft:
+                return {"status": "no_cv",
+                        "note": f"No tailored CV is attached to {job.get('title')} @ {job.get('company')} "
+                                f"yet — say 'tailor it' or 'prepare a CV' first."}, False
+            return cv_digest.cv_sections(draft.get("tailored_content_json") or {}, job), True
+        if name in ("edit_cv", "reword_cv"):
+            return await self._mutate_cv(name, args, job)
+        return {"error": f"unhandled cv-query tool {name!r}"}, False
+
+    async def _mutate_cv(self, name: str, args: dict, job: dict) -> tuple[dict, bool]:
+        draft = await self._draft_for(job["id"])
+        if not draft:
+            return {"status": "no_cv",
+                    "note": f"No CV attached to {job.get('title')} @ {job.get('company')} yet — "
+                            f"tailor or prepare one first, then I can edit it."}, False
+        base = await self._base_resume()
+        snapshot = draft.get("locked_snapshot_json") or cv_fields.extract_locked_snapshot(base)
+        content = draft.get("tailored_content_json") or {}
+        target_label = f"{job.get('title')} @ {job.get('company')}"
+
+        if name == "edit_cv":
+            out = cv_edit.edit_tailored_cv(
+                content, base, snapshot,
+                add_skills=args.get("add_skills"), remove_skills=args.get("remove_skills"),
+                add_bullets=args.get("add_bullets"), remove_bullets=args.get("remove_bullets"))
+            new_content, changes, warnings = out["content"], out["changes"], out["warnings"]
+            if not changes:
+                return {"status": "no_change", "job": target_label,
+                        "warnings": warnings or ["nothing matched that edit"]}, False
+        else:  # reword_cv — one focused model call
+            from jobpilot_core import cv_rewriter
+            settings = get_settings()
+            analysis = await self._analysis_for(job["id"]) or {}
+            target = "role" if (args.get("target") or "").lower() == "role" else "summary"
+            role_index = 0
+            if target == "role":
+                exp = content.get("experience") or []
+                role_index = cv_edit._match_role(exp, args.get("role_ref"), None) or 0
+            res = await cv_rewriter.reword_section(
+                base, snapshot, job, analysis, content, target=target,
+                instruction=args.get("instruction") or "", role_index=role_index, settings=settings)
+            data = res.data or {}
+            spliced = dict(content)
+            if target == "summary" and data.get("summary"):
+                spliced["summary"] = data["summary"]
+            elif target == "role" and data.get("bullets"):
+                exp = [dict(e) for e in (spliced.get("experience") or [])]
+                if role_index < len(exp):
+                    exp[role_index]["bullets"] = data["bullets"]
+                    spliced["experience"] = exp
+            new_content = cv_fields.finalize(spliced, base, snapshot)
+            changes = [f"reworded the {'summary' if target == 'summary' else 'bullets'} "
+                       f"for {target_label}"]
+            warnings = []
+
+        await self._call(self.user_id, "db", "set_cv_draft_content",
+                         {"draft_id": draft["id"], "tailored_content_json": new_content})
+        return {"status": "edited", "job": target_label, "changes": changes,
+                "warnings": warnings,
+                "next": "The draft is back to draft_ready — review it, then say "
+                        "'approve and export' to re-attach the updated CV."}, False
+
 
 # --------------------------------------------------------------------------- #
 # Turn loop
@@ -204,15 +408,31 @@ def _to_anthropic_messages(history: list[dict]) -> list[dict]:
 
 
 def _confirm_reply(tool: str, result: dict) -> str:
-    """A short, honest summary for the (LLM-free) confirmation turn."""
+    """A short, honest summary for the (LLM-free) confirmation turn. Most actions now run
+    synchronously, so this reports what ACTUALLY happened, not a queue ticket."""
+    if isinstance(result, dict) and result.get("error"):
+        return f"That didn't complete — {result['error']}"
+    errs = (result.get("errors") or {}) if isinstance(result, dict) else {}
+    err_tail = f" ({len(errs)} error(s))" if errs else ""
     if tool == "run_pipeline":
         pid = result.get("pipeline_id")
         if result.get("rejected"):
             return f"A pipeline is already running ({result.get('active_pipeline_id')})."
         return f"Done — the pipeline is queued ({pid})." if pid else "Pipeline queued."
     if tool == "trigger_stage":
-        return f"Done — the {result.get('stage')} stage is queued." if result.get("pipeline_id") \
-            else f"Couldn't start that stage: {result.get('reason') or result}."
+        stage = result.get("stage")
+        if stage == "qualify":
+            return (f"Done — re-qualified the pool: {result.get('qualified', 0)} qualified, "
+                    f"{result.get('disqualified', 0)} not (scored {result.get('scored', 0)}, "
+                    f"skipped {result.get('skipped', 0)}). Jobs with an exported tailored CV are "
+                    f"scored against that CV, otherwise your uploaded résumé.{err_tail}")
+        if stage == "analyze":
+            return f"Done — analyzed {result.get('analyzed', 0)} job(s).{err_tail} Want tailored CVs or suggestions next?"
+        if stage == "enhance":
+            return f"Done — generated {result.get('suggestions', 0)} suggestion set(s).{err_tail}"
+        if stage == "scout":
+            return "Scouting started in the background — new jobs will appear shortly (crawls can take a few minutes)."
+        return f"Done — {stage}.{err_tail}"
     if tool == "update_qualifier_config":
         return "Done — updated your qualifier scoring config."
     if tool == "apply_resume":
@@ -221,14 +441,17 @@ def _confirm_reply(tool: str, result: dict) -> str:
             return f"Done — created a new resume version ({result.get('applied_rewrites', 0)} rewrite(s); added: {added})."
         return f"Nothing applied — {result.get('reason', 'no accepted suggestions')}."
     if tool == "tailor_cvs":
-        return (f"Tailoring started for {result.get('job_count', 0)} job(s) — I'll have drafts "
-                f"ready to review shortly. Want me to export and re-qualify them once they're done?")
+        return (f"Done — tailored {result.get('tailored', 0)} CV(s) "
+                f"({result.get('aligned', 0)} cleared the alignment bar).{err_tail} Review them, then "
+                f"say 'approve and export' to attach.")
     if tool == "prepare_cvs":
-        return (f"Preparing CVs for {result.get('job_count', 0)} job(s): analyze → align → export "
-                f"→ re-qualify. They'll attach to the job rows shortly — then I can show you the "
-                f"improvement report.")
+        return (f"Done — prepared {result.get('tailored', 0)} CV(s), exported {result.get('exported', 0)}, "
+                f"re-qualified {result.get('requalified', 0)}.{err_tail} They're attached to the job rows — "
+                f"ask for the improvement report to see the lift.")
     if tool == "requalify_cvs":
-        return "Re-qualification started — I'll report the before/after deltas when it's done."
+        return (f"Done — re-qualified {result.get('requalified', 0)} CV(s): "
+                f"{result.get('improved', 0)} improved, {result.get('worse', 0)} lower, "
+                f"{result.get('unchanged', 0)} unchanged.")
     if tool == "delete_jobs":
         files = result.get("files_deleted") or 0
         extra = f" and {files} attached CV file(s)" if files else ""

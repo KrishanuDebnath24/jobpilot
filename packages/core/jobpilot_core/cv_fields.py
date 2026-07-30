@@ -49,7 +49,13 @@ MODIFIABLE_FIELDS = ("summary", "skills", "experience.bullets", "section_order")
 PASSTHROUGH_SECTIONS = ("certifications", "additional_sections")
 
 # How an added skill may be justified. Ordered loosest-evidence-last for review display.
-SKILL_BASES = ("explicit", "adjacent", "transferable")
+# ``user_confirmed`` is different in kind from the other three: the candidate has explicitly
+# asserted (via chat) that they hold the skill, so the CANDIDATE is the guarantor of truth,
+# not a résumé citation — the code does NOT check it against résumé text. It stays a distinct,
+# named basis so the draft's evidence trail shows plainly which skills are user-asserted vs
+# résumé-grounded (auditable, not silent).
+USER_CONFIRMED = "user_confirmed"
+SKILL_BASES = ("explicit", "adjacent", "transferable", USER_CONFIRMED)
 
 # An evidence citation must overlap the real resume text by at least this many content
 # words. Short citations ("Docker") are matched whole; longer ones tolerate the rewriter
@@ -246,6 +252,12 @@ def validate_skill_evidence(cv: dict, base_resume: dict) -> dict:
         basis = _norm(ev.get("basis"))
         if basis not in SKILL_BASES:
             rejected.append({"skill": raw, "reason": f"unknown evidence basis {ev.get('basis')!r}"})
+            continue
+        # User-asserted: the candidate is the guarantor, so no résumé-text check — but it is
+        # kept as its own basis so the trail shows it was user-confirmed, not résumé-grounded.
+        if basis == USER_CONFIRMED:
+            admitted.append({"skill": raw, "basis": basis,
+                             "evidence": ev.get("evidence") or "user-confirmed"})
             continue
         quote = ev.get("evidence") or ""
         if not _evidence_supported(quote, base_text):

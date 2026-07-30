@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from jobpilot_core import cv_fields
+from jobpilot_core import cv_fields, gap_closer
 from jobpilot_core.cv_loop import align_cv
 from jobpilot_core.settings import get_settings
 
@@ -54,6 +54,20 @@ async def _jobs_by_id(user_id: uuid.UUID) -> dict[str, dict]:
     return {j["id"]: j for j in jobs}
 
 
+async def _attested_by_job(user_id: uuid.UUID) -> dict[str, dict]:
+    """Per job, the Gap-closer proposals the user ACCEPTED (Phase 6.6). Jobs with no
+    proposals, or proposals nobody accepted, are absent — those run the ordinary
+    evidence-gated loop with no prompt change at all."""
+    suggestions = (await mcp_client.db_mcp(user_id, "get_suggestions", {}))["suggestions"]
+    out: dict[str, dict] = {}
+    for s in suggestions:
+        jid, gc = s.get("job_id"), s.get("gap_close_json")
+        if not jid or not gc or gap_closer.is_empty(gc):
+            continue
+        out[jid] = gap_closer.accepted_items(gc)
+    return out
+
+
 async def _ensure_analyses(user_id: uuid.UUID, job_ids: list[str]) -> dict[str, dict]:
     """Analyses for the selection, analysing any job that doesn't have one yet. The
     Analyzer already scopes to selected ids, so this costs only the missing jobs."""
@@ -68,11 +82,36 @@ async def _ensure_analyses(user_id: uuid.UUID, job_ids: list[str]) -> dict[str, 
     return await _analyses_by_job(user_id)
 
 
-def _notes(result: dict, cv: dict, base: dict, settings) -> dict:
+def _attested_trail(attested: dict | None) -> dict:
+    """What the user personally vouched for on this draft, recorded so the review UI and
+    the exported audit trail can distinguish it from résumé-grounded content. An empty
+    attested set records nothing, keeping legacy/honest drafts byte-identical."""
+    att = attested or {}
+    skills = [it.get("skill") for it in (att.get("claimed_skills") or [])
+              if isinstance(it, dict) and it.get("skill")]
+    new_bullets = [{"role_ref": it.get("role_ref"), "text": it.get("text")}
+                   for it in (att.get("new_bullets") or []) if isinstance(it, dict)]
+    rewrites = [{"role_ref": it.get("role_ref"), "after": it.get("after")}
+                for it in (att.get("bullet_rewrites") or []) if isinstance(it, dict)]
+    if not (skills or new_bullets or rewrites):
+        return {}
+    return {
+        "user_attested": {
+            "skills": skills,
+            "new_bullets": new_bullets,
+            "bullet_rewrites": rewrites,
+            "note": "The candidate confirmed these items themselves; they are not backed by "
+                    "résumé citations. Interview prep is on the candidate.",
+        }
+    }
+
+
+def _notes(result: dict, cv: dict, base: dict, settings, attested: dict | None = None) -> dict:
     """The review trail persisted on the draft — how aligned, over how many rounds, and
     what was added or rejected along the way."""
     critique = result.get("critique") or {}
     return {
+        **_attested_trail(attested),
         "aligned": result["aligned"],
         "alignment_score": result["alignment_score"],
         "threshold": settings.cv_alignment_threshold,
@@ -90,24 +129,35 @@ def _notes(result: dict, cv: dict, base: dict, settings) -> dict:
     }
 
 
-async def run_align(user_id: uuid.UUID, job_ids: list[str]) -> dict:
+async def run_align(user_id: uuid.UUID, job_ids: list[str], *, use_attested: bool = True) -> dict:
     """Align a CV to each selected job via the Rewriter⇄Critic loop. Persists one
-    ``draft_ready`` cv_draft per job. Per-job error isolation; bounded selection."""
+    ``draft_ready`` cv_draft per job. Per-job error isolation; bounded selection.
+
+    ``use_attested`` decides whether accepted Gap-closer proposals are folded in. It is on
+    for the **Tailor only** path (and the Concierge's tailor tool), which is the reviewed,
+    human-gated route the attested flow was built for. The one-click **Prepare CVs** chain
+    passes ``False``: it auto-approves and exports without a review stop, so content whose
+    only warrant is the candidate's say-so must never ride it. That keeps Prepare CVs
+    byte-for-byte the behaviour it had before Phase 6.6.
+    """
     settings = get_settings()
     job_ids = list(dict.fromkeys(job_ids))[: settings.cv_tailor_max_jobs]
     if not job_ids:
-        return {"aligned": 0, "tailored": 0, "drafts": [], "errors": {}, "llm_usage": {}}
+        return {"aligned": 0, "tailored": 0, "attested": 0, "drafts": [], "errors": {},
+                "llm_usage": {}}
 
     base, base_version = await _base_resume(user_id)
     snapshot = cv_fields.extract_locked_snapshot(base)
     analyses = await _ensure_analyses(user_id, job_ids)
     jobs = await _jobs_by_id(user_id)
+    attested_by_job = await _attested_by_job(user_id) if use_attested else {}
 
     drafts: list[dict] = []
     errors: dict[str, str] = {}
     cost = 0.0
     rounds_total = 0
     fully_aligned = 0
+    attested_jobs = 0
 
     for jid in job_ids:
         job = jobs.get(jid)
@@ -118,19 +168,21 @@ async def run_align(user_id: uuid.UUID, job_ids: list[str]) -> dict:
         if not analysis:
             errors[jid] = "no analysis could be produced for this job"
             continue
+        attested = attested_by_job.get(jid)
         try:
-            result = await align_cv(base, snapshot, job, analysis, settings)
+            result = await align_cv(base, snapshot, job, analysis, settings, attested=attested)
             cv = result["cv"]
             cost += sum(u.cost_usd for u in result["usage"].values())
             rounds_total += len(result["rounds"])
             fully_aligned += 1 if result["aligned"] else 0
+            attested_jobs += 1 if attested else 0
 
             saved = await mcp_client.db_mcp(user_id, "create_cv_draft", {
                 "job_id": jid,
                 "tailored_content_json": cv,
                 "locked_snapshot_json": snapshot,
                 "base_resume_version": base_version,
-                "critic_notes_json": _notes(result, cv, base, settings),
+                "critic_notes_json": _notes(result, cv, base, settings, attested),
                 "before_score": (job.get("qualification") or {}).get("score"),
             })
             drafts.append({
@@ -139,6 +191,7 @@ async def run_align(user_id: uuid.UUID, job_ids: list[str]) -> dict:
                 "aligned": result["aligned"],
                 "alignment_score": result["alignment_score"],
                 "rounds": len(result["rounds"]),
+                "attested": bool(attested),
             })
         except Exception as exc:  # noqa: BLE001 - one bad job must not sink the batch
             errors[jid] = f"{type(exc).__name__}: {exc}"
@@ -147,6 +200,7 @@ async def run_align(user_id: uuid.UUID, job_ids: list[str]) -> dict:
     summary = {
         "tailored": len(drafts),          # drafts produced (the historical key)
         "aligned": fully_aligned,         # how many cleared the alignment bar
+        "attested": attested_jobs,        # of those, how many carried user-attested content
         "drafts": drafts,
         "errors": errors,
         "llm_usage": {
@@ -156,8 +210,8 @@ async def run_align(user_id: uuid.UUID, job_ids: list[str]) -> dict:
             "estimated_cost_usd": round(cost, 6),
         },
     }
-    logger.info("cv_align.summary drafts=%d aligned=%d rounds=%d errors=%d cost=%.6f",
-                len(drafts), fully_aligned, rounds_total, len(errors), cost)
+    logger.info("cv_align.summary drafts=%d aligned=%d attested=%d rounds=%d errors=%d cost=%.6f",
+                len(drafts), fully_aligned, attested_jobs, rounds_total, len(errors), cost)
     return summary
 
 

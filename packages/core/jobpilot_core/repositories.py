@@ -5,6 +5,7 @@ user_id embedded in caller-supplied payloads.
 
 from __future__ import annotations
 
+import copy
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -592,6 +593,7 @@ def suggestion_to_dict(s: models.Suggestion) -> dict:
         "skills_to_add": list(s.skills_to_add or []),
         "projects_json": s.projects_json,
         "bullet_rewrites_json": s.bullet_rewrites_json,
+        "gap_close_json": s.gap_close_json,
         "status": s.status,
         "created_at": _iso(s.created_at),
     }
@@ -664,6 +666,85 @@ async def upsert_suggestion(
         session.add(s)
     await session.flush()
     return s
+
+
+async def upsert_gap_close(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    job_id: uuid.UUID,
+    gap_close: dict,
+) -> models.Suggestion:
+    """Persist the Gap-closer's proposal set for one job (Phase 6.6), replacing any prior
+    set for that job so regenerating can't stack stale items.
+
+    Shares the (user, job) suggestions row with the honest Enhancer buckets but writes only
+    ``gap_close_json`` — the honest columns and ``status`` are left exactly as they were, so
+    apply-to-resume is unaffected. Creates the row if the user ran gap-close before ever
+    running Analyze & suggest."""
+    existing = (
+        await session.execute(
+            select(models.Suggestion).where(
+                models.Suggestion.user_id == user_id, models.Suggestion.job_id == job_id
+            )
+        )
+    ).scalar_one_or_none()
+    s = existing or models.Suggestion(user_id=user_id, job_id=job_id, skills_to_add=[])
+    s.gap_close_json = gap_close
+    if existing is None:
+        session.add(s)
+    await session.flush()
+    return s
+
+
+async def set_gap_close_items(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    suggestion_id: uuid.UUID,
+    items: list[dict],
+) -> models.Suggestion | None:
+    """Apply the user's per-item review to a stored proposal set.
+
+    Each entry is ``{"kind": ..., "id": ..., "accepted": bool|None, <edited fields>}``.
+    Accept state and any edited text are written **in place** on the matching item, so the
+    accepted set is always self-describing — a downstream reader never has to merge an
+    edit history to know what the user actually endorsed. Unknown kinds/ids are ignored
+    (a stale UI can't corrupt the set), and ``status`` is deliberately untouched.
+    """
+    suggestion = (
+        await session.execute(
+            select(models.Suggestion).where(
+                models.Suggestion.user_id == user_id,
+                models.Suggestion.id == suggestion_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if suggestion is None:
+        return None
+
+    # JSONB is mutated by replacement, not in place — SQLAlchemy won't see attribute-level
+    # mutation of a nested dict, so build a new structure and reassign.
+    gc = copy.deepcopy(suggestion.gap_close_json or {})
+    editable = ("skill", "closes", "interview_prep", "before", "after", "text", "role_ref")
+    for patch in items or []:
+        if not isinstance(patch, dict):
+            continue
+        kind, item_id = patch.get("kind"), patch.get("id")
+        bucket = gc.get(kind)
+        if not isinstance(bucket, list):
+            continue
+        for item in bucket:
+            if not isinstance(item, dict) or item.get("id") != item_id:
+                continue
+            if "accepted" in patch:
+                item["accepted"] = patch["accepted"]
+            for field in editable:
+                if field in patch and patch[field] is not None:
+                    item[field] = patch[field]
+                    item["user_edited"] = True
+            break
+    suggestion.gap_close_json = gc
+    await session.flush()
+    return suggestion
 
 
 async def get_analyses(session: AsyncSession, user_id: uuid.UUID) -> list[dict]:
@@ -1193,6 +1274,28 @@ async def set_cv_draft_after_score(
     d = await get_cv_draft(session, user_id, draft_id)
     if d is not None:
         d.after_score = after_score
+        await session.flush()
+    return d
+
+
+async def set_cv_draft_content(
+    session: AsyncSession, user_id: uuid.UUID, draft_id: uuid.UUID, tailored_content_json: dict
+) -> models.CvDraft | None:
+    """Overwrite a draft's tailored content (after an in-place chat edit) and RESET it to
+    ``draft_ready`` so it must be re-approved before it re-attaches — a change to an
+    already-approved/exported CV can never silently ship. Also DETACHES the stale rendered
+    files (clears ``pdf_ref``/``docx_ref``) and the ``after_score``: the previously exported
+    PDF/DOCX no longer matches the edited content, so until the user re-exports, the job
+    falls back to the base résumé for scoring (``select_effective_resume`` needs ``pdf_ref``)
+    and there's no downloadable file that misrepresents the draft. A re-export overwrites the
+    same deterministic keys, so no orphan accumulates."""
+    d = await get_cv_draft(session, user_id, draft_id)
+    if d is not None:
+        d.tailored_content_json = tailored_content_json
+        d.status = "draft_ready"
+        d.after_score = None
+        d.pdf_ref = None
+        d.docx_ref = None
         await session.flush()
     return d
 

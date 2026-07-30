@@ -5,6 +5,8 @@ import type {
   CostReport,
   CvDraft,
   CvReport,
+  GapClose,
+  GapClosePatch,
   GateConfig,
   Job,
   PendingGate,
@@ -19,6 +21,7 @@ import type {
   SearchConfigProposal,
   StructuredResume,
   Suggestion,
+  TailoredContent,
 } from "./types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -274,6 +277,47 @@ export const prepareCvs = (job_ids: string[]) =>
     method: "POST",
     body: JSON.stringify({ job_ids }),
   });
+
+// --- Phase 6.6: gap-close proposals + per-draft editing ---
+/** Propose gap-closing CV content per selected job (skills the résumé never mentions,
+ *  aggressive rewrites, new bullets). Proposals only — accepting each item is what lets it
+ *  reach a CV, and only via "Tailor only". */
+export const gapCloseCvs = (job_ids: string[]) =>
+  request<{ task_id: string; job_count: number }>("/cv/gap-close", {
+    method: "POST",
+    body: JSON.stringify({ job_ids }),
+  });
+/** Accept / reject / edit individual gap-close proposals. Accepting = the candidate attests
+ *  they can back the item in an interview. */
+export const reviewGapClose = (suggestionId: string, items: GapClosePatch[]) =>
+  request<{ suggestion: { id: string; gap_close_json: GapClose | null } }>(
+    `/suggestions/${suggestionId}/gap-close/review`,
+    { method: "POST", body: JSON.stringify({ items }) },
+  );
+/** Structural edits to one draft (no LLM): add/remove skills and bullets. Resets the draft
+ *  to draft_ready and detaches its stale PDF/DOCX. */
+export const editCvDraft = (
+  draftId: string,
+  body: {
+    add_skills?: string[];
+    remove_skills?: string[];
+    add_bullets?: { text: string; role_ref?: string; role_index?: number }[];
+    remove_bullets?: string[];
+  },
+) =>
+  request<{ status: string; changes: string[]; warnings: string[]; content: TailoredContent }>(
+    `/cv/drafts/${draftId}/edit`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+/** Reword one draft's summary or a single role's bullets to a free-text instruction. */
+export const rewordCvDraft = (
+  draftId: string,
+  body: { target: "summary" | "role"; instruction: string; role_index?: number; role_ref?: string },
+) =>
+  request<{ status: string; changes: string[]; warnings: string[]; content: TailoredContent }>(
+    `/cv/drafts/${draftId}/reword`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
 
 /** Fetch a file with the auth header and return a blob object URL (+ its content type),
  *  usable as both an <iframe> src (view) and an <a download> href. Caller revokes the URL. */

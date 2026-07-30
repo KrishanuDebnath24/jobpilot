@@ -5,20 +5,128 @@ import type { CvDraft, CvReport } from "@/lib/types";
 import {
   approveCvDrafts,
   downloadCv,
+  editCvDraft,
   exportCvs,
   getCvDrafts,
   getCvReport,
   prepareCvs,
   rejectCvDrafts,
   requalifyCvs,
+  rewordCvDraft,
   tailorCvs,
 } from "@/lib/api";
+import StageStrip, { type Stage } from "./StageStrip";
 
 const STATUS_STYLE: Record<string, string> = {
   draft_ready: "border-amber-500/30 bg-amber-500/10 text-amber-200",
   approved: "border-emerald-500/30 bg-emerald-500/10 text-emerald-200",
   rejected: "border-rose-500/30 bg-rose-500/10 text-rose-200",
 };
+
+/* ---------------------------------------------------------------------------- *
+ * Tracking the fire-and-forget actions.
+ *
+ * /cv/tailor, /cv/prepare, /cv/export and /cv/requalify all answer 202 the moment the task
+ * is queued, so "await the request" tells us nothing about the work. Instead each action
+ * records what the world looked like before it started, and the existing 5s draft poll is
+ * used to notice the result landing. Purely a view concern — no endpoint or task behaviour
+ * is touched.
+ * ---------------------------------------------------------------------------- */
+type OpKind = "tailor" | "prepare" | "export" | "requalify";
+
+type Op = {
+  kind: OpKind;
+  title: string;
+  startedAt: number;
+  jobCount: number;
+  /** Draft ids present before the action fired — anything new is this action's output. */
+  before: string[];
+  /** Drafts this action should produce files/scores for (export & re-qualify). */
+  targets: string[];
+  /** Stage keys observed as complete. */
+  done: string[];
+  /** Set once we stop watching, so the strip can say so instead of pulsing forever. */
+  timedOut?: boolean;
+};
+
+const OP_STAGES: Record<OpKind, Stage[]> = {
+  // Mirrors run_prepare_cvs: analyze → align → approve → export → re-qualify.
+  prepare: [
+    { key: "analyze", label: "analyze", unobservable: true },
+    { key: "align", label: "align (Rewriter⇄Critic)" },
+    { key: "approve", label: "approve", unobservable: true },
+    { key: "export", label: "export PDF/DOCX" },
+    { key: "requalify", label: "re-qualify" },
+  ],
+  tailor: [
+    { key: "analyze", label: "analyze if needed", unobservable: true },
+    { key: "align", label: "align (Rewriter⇄Critic)" },
+    { key: "draft", label: "draft ready to review" },
+  ],
+  export: [{ key: "export", label: "render PDF/DOCX" }],
+  requalify: [{ key: "requalify", label: "re-score against the job" }],
+};
+
+const OP_TITLE: Record<OpKind, string> = {
+  prepare: "Preparing CVs",
+  tailor: "Tailoring",
+  export: "Exporting",
+  requalify: "Re-qualifying",
+};
+
+/** How long to keep watching before admitting we've stopped following it. */
+const OP_WATCH_MS = 8 * 60 * 1000;
+
+/** Which stages of `op` the polled drafts now prove are finished. */
+function observeOp(op: Op, drafts: CvDraft[]): string[] {
+  const done = new Set(op.done);
+  const before = new Set(op.before);
+  const created = drafts.filter((d) => !before.has(d.id));
+
+  if (op.kind === "tailor" || op.kind === "prepare") {
+    // A new draft proves the loop finished for ONE job, so only tick the stage once every
+    // selected job has produced one — otherwise a 5-job batch would look finished after the
+    // first. Partial progress is reported in the strip's note instead.
+    if (created.length >= Math.max(1, op.jobCount)) {
+      done.add("align");
+      if (op.kind === "tailor") done.add("draft");
+    }
+  }
+  if (op.kind === "prepare") {
+    if (created.some((d) => d.status === "approved")) done.add("approve");
+    if (created.some((d) => d.pdf_ref)) done.add("export");
+    if (created.some((d) => d.after_score !== null)) done.add("requalify");
+  }
+  // Batch stages tick only when EVERY target has landed — one finished file out of five is
+  // not a finished export. Partial counts are surfaced in the strip's note instead.
+  if (op.kind === "export" && op.targets.length > 0) {
+    if (op.targets.every((id) => drafts.find((d) => d.id === id)?.pdf_ref)) done.add("export");
+  }
+  if (op.kind === "requalify" && op.targets.length > 0) {
+    if (op.targets.every((id) => drafts.find((d) => d.id === id)?.after_score != null)) {
+      done.add("requalify");
+    }
+  }
+  return [...done];
+}
+
+/** How many of a batch op's targets have visibly landed — for the progress note. */
+function opLanded(op: Op, drafts: CvDraft[]): number {
+  if (op.kind === "export") {
+    return op.targets.filter((id) => drafts.find((d) => d.id === id)?.pdf_ref).length;
+  }
+  if (op.kind === "requalify") {
+    return op.targets.filter((id) => drafts.find((d) => d.id === id)?.after_score != null).length;
+  }
+  const before = new Set(op.before);
+  return drafts.filter((d) => !before.has(d.id)).length;
+}
+
+/** An op is finished when every stage we can actually verify has been verified. */
+function opComplete(op: Op): boolean {
+  const observable = OP_STAGES[op.kind].filter((s) => !s.unobservable).map((s) => s.key);
+  return observable.length > 0 && observable.every((k) => op.done.includes(k));
+}
 
 /** Aligned-CV review + approval (Phase 6.5). A Rewriter⇄Critic loop reshapes each selected
  *  job's CV until the Critic scores it aligned (or the round cap is hit) → review the
@@ -29,15 +137,24 @@ const STATUS_STYLE: Record<string, string> = {
 export default function TailoredCVs({
   selectedJobIds,
   jobTitleById,
+  refreshSignal = 0,
 }: {
   selectedJobIds: string[];
   jobTitleById: (id: string) => string;
+  refreshSignal?: number;
 }) {
   const [drafts, setDrafts] = useState<CvDraft[]>([]);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [report, setReport] = useState<CvReport | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // View-only: draft ids the user has cleared from the list. Never a delete — the drafts and
+  // their files are untouched, and "Show all" brings them straight back.
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
+  // Drafts that appeared during the most recent action, highlighted so a new arrival in a
+  // long list is obvious.
+  const [fresh, setFresh] = useState<Set<string>>(new Set());
+  const [op, setOp] = useState<Op | null>(null);
   const poll = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async () => {
@@ -56,6 +173,12 @@ export default function TailoredCVs({
     };
   }, [load]);
 
+  // Reload immediately when a Concierge action changed drafts (edit/tailor/prepare/approve),
+  // so the user sees the update without waiting for the poll or refreshing the page.
+  useEffect(() => {
+    if (refreshSignal) load();
+  }, [refreshSignal, load]);
+
   const run = useCallback(
     async (label: string, fn: () => Promise<unknown>) => {
       setBusy(label);
@@ -72,6 +195,54 @@ export default function TailoredCVs({
     [load],
   );
 
+  /** Fire one of the queued actions and keep reporting it until the drafts prove it landed. */
+  const startOp = useCallback(
+    async (kind: OpKind, jobCount: number, targets: string[], fn: () => Promise<unknown>) => {
+      setBusy(kind);
+      setError(null);
+      setFresh(new Set());
+      const before = drafts.map((d) => d.id);
+      try {
+        await fn();
+        setOp({
+          kind, title: OP_TITLE[kind], startedAt: Date.now(),
+          jobCount, before, targets, done: [],
+        });
+        await load();
+      } catch (e) {
+        setError(String(e));
+        setOp(null);
+      } finally {
+        setBusy(null);
+      }
+    },
+    [drafts, load],
+  );
+
+  // Watch the polled drafts for evidence the running action has progressed. Runs on every
+  // draft refresh, so the strip advances in step with the poll already in place.
+  useEffect(() => {
+    if (!op || op.timedOut) return;
+    const done = observeOp(op, drafts);
+    const changed = done.length !== op.done.length;
+    const next = changed ? { ...op, done } : op;
+
+    if (changed) {
+      const before = new Set(op.before);
+      const created = drafts.filter((d) => !before.has(d.id)).map((d) => d.id);
+      if (created.length) setFresh(new Set(created));
+    }
+    if (opComplete(next)) {
+      setOp(null);           // resolved — drop the strip, the results are on screen
+      return;
+    }
+    if (Date.now() - op.startedAt > OP_WATCH_MS) {
+      setOp({ ...next, timedOut: true });
+      return;
+    }
+    if (changed) setOp(next);
+  }, [drafts, op]);
+
   const togglePick = (id: string) =>
     setPicked((prev) => {
       const next = new Set(prev);
@@ -87,20 +258,50 @@ export default function TailoredCVs({
   );
   const allReadyPicked = draftReady.length > 0 && pickedReady.length === draftReady.length;
 
+  // Approved drafts with no rendered file — the ones that genuinely need exporting. Editing a
+  // draft clears its pdf_ref on purpose (the old file no longer matches the content), so an
+  // edited draft correctly reappears here. Everything else already has an identical file:
+  // re-rendering it is free of tokens but still pointless work, so it needs an explicit ask.
+  const needsExport = useMemo(() => approved.filter((d) => !d.pdf_ref), [approved]);
+  const alreadyExported = approved.length - needsExport.length;
+
+  // Approved drafts with no after_score — the ones re-qualify hasn't scored yet. Unlike
+  // export this one really does cost money (gate-passers go to an LLM refine pass), so the
+  // default must not silently re-bill drafts that already have a score. Editing a draft also
+  // clears after_score, so an edited draft correctly needs re-scoring again.
+  const needsScore = useMemo(() => approved.filter((d) => d.after_score == null), [approved]);
+  const alreadyScored = approved.length - needsScore.length;
+
+  // "Finished" = decided one way or the other, so it no longer needs your attention.
+  const finished = useMemo(() => drafts.filter((d) => d.status !== "draft_ready"), [drafts]);
+  // A hidden id is only honoured while that draft is STILL finished: re-tailoring upserts the
+  // same row back to draft_ready, and a fresh draft must never stay invisible because an
+  // older version of it was cleared.
+  const visible = useMemo(
+    () => drafts.filter((d) => !(hidden.has(d.id) && d.status !== "draft_ready")),
+    [drafts, hidden],
+  );
+  const hiddenCount = drafts.length - visible.length;
+
   return (
     <section className="mt-6 rounded-2xl border border-neutral-800 bg-neutral-900/30 p-4">
       <div className="flex flex-wrap items-center gap-2">
         <div>
           <h2 className="text-sm font-semibold text-neutral-200">Tailored CVs</h2>
-          <p className="text-xs text-neutral-500">
+          <p className="max-w-3xl text-xs text-neutral-500">
             “Prepare CVs” runs analyze → tailor → export for the selected jobs and attaches an
             honest, job-specific CV to each job row (locked facts never change). The qualifier then
-            scores those jobs against their attached CV.
+            scores those jobs against their attached CV. It stays strictly résumé-evidenced and
+            ignores gap-close proposals. “Tailor only” stops at a reviewable draft and{" "}
+            <span className="text-amber-300/90">does</span> fold in any gap-close item you accepted
+            — edit each draft, then approve and export yourself.
           </p>
         </div>
         <button
-          onClick={() => run("prepare", () => prepareCvs(selectedJobIds))}
-          disabled={!!busy || selectedJobIds.length === 0}
+          onClick={() =>
+            startOp("prepare", selectedJobIds.length, [], () => prepareCvs(selectedJobIds))
+          }
+          disabled={!!busy || !!op || selectedJobIds.length === 0}
           className="ml-auto rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-1.5 text-sm text-sky-200 transition hover:bg-sky-500/20 disabled:opacity-40"
           title={
             selectedJobIds.length === 0
@@ -108,19 +309,46 @@ export default function TailoredCVs({
               : "Analyze → align (Rewriter⇄Critic) → export, then the CV attaches to each job row"
           }
         >
-          {busy === "prepare"
-            ? "Preparing CVs…"
+          {op?.kind === "prepare"
+            ? `Preparing ${op.jobCount} …`
             : `Prepare CVs for ${selectedJobIds.length} selected`}
         </button>
         <button
-          onClick={() => run("tailor", () => tailorCvs(selectedJobIds))}
-          disabled={!!busy || selectedJobIds.length === 0}
+          onClick={() =>
+            startOp("tailor", selectedJobIds.length, [], () => tailorCvs(selectedJobIds))
+          }
+          disabled={!!busy || !!op || selectedJobIds.length === 0}
           className="rounded-lg border border-neutral-700 px-3 py-1.5 text-sm text-neutral-200 transition hover:border-neutral-500 disabled:opacity-40"
           title={selectedJobIds.length === 0 ? "Select jobs in the table first" : "Tailor only (review, then approve/export yourself)"}
         >
-          {busy === "tailor" ? "Tailoring…" : "Tailor only"}
+          {op?.kind === "tailor" ? `Tailoring ${op.jobCount} …` : "Tailor only"}
         </button>
       </div>
+
+      {op && (
+        <StageStrip
+          title={op.timedOut ? `${op.title} — still running in the background` : `${op.title}…`}
+          stages={OP_STAGES[op.kind]}
+          startedAt={op.timedOut ? null : op.startedAt}
+          stateOf={(k) => {
+            if (op.done.includes(k)) return "done";
+            const keys = OP_STAGES[op.kind].map((s) => s.key);
+            const firstOpen = keys.find((x) => !op.done.includes(x));
+            return k === firstOpen ? "active" : "pending";
+          }}
+          note={
+            op.timedOut
+              ? "Not watching any more — the worker may still finish it. The list refreshes every 5s."
+              : [
+                  op.jobCount > 0
+                    ? `${opLanded(op, drafts)} of ${op.jobCount} draft(s) in`
+                    : `${opLanded(op, drafts)} of ${op.targets.length} done`,
+                  "◌ = can't be observed from here, so it is never ticked",
+                ].join(" · ")
+          }
+          onDismiss={() => setOp(null)}
+        />
+      )}
 
       {drafts.length > 0 && (
         <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-neutral-800 pt-3 text-xs">
@@ -152,27 +380,96 @@ export default function TailoredCVs({
             Reject selected
           </button>
           <span className="mx-1 h-4 w-px bg-neutral-700" />
+          {/* Sends only the ids that lack a file, via the draft_ids parameter /cv/export
+              already accepts — so the count means "will be rendered", not "is approved". */}
           <button
-            onClick={() => run("export", () => exportCvs())}
-            disabled={!!busy || approved.length === 0}
+            onClick={() =>
+              startOp("export", 0, needsExport.map((d) => d.id), () =>
+                exportCvs(needsExport.map((d) => d.id)),
+              )
+            }
+            disabled={!!busy || !!op || needsExport.length === 0}
             className="rounded-md border border-neutral-700 px-2 py-1 text-neutral-200 disabled:opacity-40"
+            title={
+              needsExport.length === 0
+                ? "Every approved draft already has a PDF/DOCX"
+                : `Render ${needsExport.length} approved draft(s) that have no file yet`
+            }
           >
-            Export approved ({approved.length})
+            {op?.kind === "export"
+              ? `Exporting ${op.targets.length}…`
+              : `Export approved (${needsExport.length})`}
           </button>
+          {alreadyExported > 0 && (
+            <button
+              onClick={() => startOp("export", 0, approved.map((d) => d.id), () => exportCvs())}
+              disabled={!!busy || !!op}
+              className="rounded-md border border-neutral-800 px-2 py-1 text-neutral-500 hover:border-neutral-600 hover:text-neutral-300 disabled:opacity-40"
+              title={`Re-render all ${approved.length} approved draft(s), including the ${alreadyExported} that already have files. No LLM cost — the renderer is deterministic.`}
+            >
+              Re-render all ({approved.length})
+            </button>
+          )}
+          {/* Scoped by default: re-qualify bills an LLM refine pass per gate-passer, so the
+              plain click must never re-score drafts that already carry an after_score. */}
           <button
-            onClick={() => run("requalify", () => requalifyCvs())}
-            disabled={!!busy || approved.length === 0}
+            onClick={() =>
+              startOp("requalify", 0, needsScore.map((d) => d.id), () =>
+                requalifyCvs(needsScore.map((d) => d.id)),
+              )
+            }
+            disabled={!!busy || !!op || needsScore.length === 0}
             className="rounded-md border border-neutral-700 px-2 py-1 text-neutral-200 disabled:opacity-40"
+            title={
+              needsScore.length === 0
+                ? "Every approved draft already has an after-score"
+                : `Score ${needsScore.length} approved draft(s) that have no after-score yet`
+            }
           >
-            Re-qualify approved
+            {op?.kind === "requalify"
+              ? `Re-qualifying ${op.targets.length}…`
+              : `Re-qualify approved (${needsScore.length})`}
           </button>
+          {alreadyScored > 0 && (
+            <button
+              onClick={() =>
+                startOp("requalify", 0, approved.map((d) => d.id), () => requalifyCvs())
+              }
+              disabled={!!busy || !!op}
+              className="rounded-md border border-neutral-800 px-2 py-1 text-neutral-500 hover:border-amber-500/40 hover:text-amber-200 disabled:opacity-40"
+              title={`Re-score all ${approved.length} approved draft(s), including the ${alreadyScored} already scored. COSTS TOKENS — use after changing your qualifier config (weights, threshold, must-haves), so every draft is judged by the new rules.`}
+            >
+              Re-score all ({approved.length}) · costs tokens
+            </button>
+          )}
           <button
             onClick={() => run("report", async () => setReport(await getCvReport()))}
             disabled={!!busy}
             className="rounded-md border border-neutral-700 px-2 py-1 text-neutral-200 disabled:opacity-40"
           >
-            Improvement report
+            {busy === "report" ? "Loading…" : "Improvement report"}
           </button>
+
+          {/* Clearing the view. Never a delete — the drafts and their exported files are
+              untouched, and a cleared draft reappears by itself if it goes back to
+              draft_ready (an edit or a re-tailor), so nothing can hide unfinished work. */}
+          <span className="mx-1 h-4 w-px bg-neutral-700" />
+          <button
+            onClick={() => setHidden(new Set(finished.map((d) => d.id)))}
+            disabled={finished.length === 0 || hiddenCount === finished.length}
+            className="rounded-md border border-neutral-700 px-2 py-1 text-neutral-400 hover:border-neutral-500 disabled:opacity-40"
+            title="Hide approved and rejected drafts from this list — view only, nothing is deleted"
+          >
+            Clear finished from view ({finished.length})
+          </button>
+          {hiddenCount > 0 && (
+            <button
+              onClick={() => setHidden(new Set())}
+              className="rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-sky-200"
+            >
+              Show all ({hiddenCount} hidden)
+            </button>
+          )}
         </div>
       )}
 
@@ -207,18 +504,27 @@ export default function TailoredCVs({
       <div className="mt-3 space-y-2">
         {drafts.length === 0 && (
           <p className="py-4 text-center text-sm text-neutral-500">
-            No tailored drafts yet. Select jobs in the table, then “Tailor selected”.
+            {op
+              ? "Working… the first draft will appear here as soon as it lands."
+              : "No tailored drafts yet. Select jobs in the table, then “Tailor selected”."}
           </p>
         )}
-        {drafts.map((d) => (
+        {drafts.length > 0 && visible.length === 0 && (
+          <p className="py-4 text-center text-sm text-neutral-500">
+            Everything here is finished and cleared from view — “Show all” to bring it back.
+          </p>
+        )}
+        {visible.map((d) => (
           <DraftCard
             key={d.id}
             draft={d}
             title={jobTitleById(d.job_id)}
             picked={picked.has(d.id)}
+            isNew={fresh.has(d.id)}
             onPick={() => togglePick(d.id)}
             onApprove={() => run("approve1", () => approveCvDrafts([d.id]))}
             onReject={() => run("reject1", () => rejectCvDrafts([d.id]))}
+            onChanged={load}
             busy={!!busy}
           />
         ))}
@@ -227,26 +533,216 @@ export default function TailoredCVs({
   );
 }
 
+/** Direct edits to one draft before approving it (Phase 6.6).
+ *
+ *  Add/remove is deterministic and costs nothing; only "reword" spends a model call, and
+ *  only on the one section named. Every edit sends the draft back to `draft_ready` and
+ *  detaches its rendered PDF/DOCX server-side, so an edit can never end up hidden inside an
+ *  already-exported file — which is why the panel is offered on approved drafts too. */
+function DraftEditor({
+  draft,
+  onChanged,
+}: {
+  draft: CvDraft;
+  onChanged: () => Promise<void> | void;
+}) {
+  const content = draft.tailored_content_json;
+  const roles = content?.experience ?? [];
+  const [skill, setSkill] = useState("");
+  const [bullet, setBullet] = useState<Record<number, string>>({});
+  const [target, setTarget] = useState<string>("summary");
+  const [instruction, setInstruction] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  const act = async (label: string, fn: () => Promise<{ status: string; changes: string[]; warnings: string[] }>) => {
+    setBusy(label);
+    setNote(null);
+    try {
+      const res = await fn();
+      const parts = [...(res.changes ?? []), ...(res.warnings ?? [])];
+      setNote(parts.length ? parts.join(" · ") : res.status);
+      await onChanged();
+    } catch (e) {
+      setNote(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="rounded-md border border-sky-500/20 bg-sky-500/[0.03] p-2">
+      <p className="mb-2 text-neutral-400">
+        Edit before approving — employer, title, dates and education are locked and can’t be
+        changed here. A skill your résumé doesn’t evidence is recorded as{" "}
+        <span className="text-amber-300">user-confirmed</span> (your word, not a citation).
+      </p>
+
+      {/* --- skills --- */}
+      <p className="mb-1 text-neutral-500">Skills</p>
+      <div className="mb-2 flex flex-wrap gap-1">
+        {(content?.skills ?? []).map((s) => (
+          <span
+            key={s}
+            className="inline-flex items-center gap-1 rounded-md border border-neutral-700 bg-neutral-900 px-1.5 py-0.5 text-neutral-200"
+          >
+            {s}
+            <button
+              disabled={!!busy}
+              title={`Remove ${s}`}
+              onClick={() => act("rm-skill", () => editCvDraft(draft.id, { remove_skills: [s] }))}
+              className="text-neutral-500 hover:text-rose-300 disabled:opacity-40"
+            >
+              ✕
+            </button>
+          </span>
+        ))}
+      </div>
+      <div className="mb-3 flex gap-1.5">
+        <input
+          value={skill}
+          onChange={(e) => setSkill(e.target.value)}
+          placeholder="add a skill…"
+          className="min-w-0 flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-neutral-100 outline-none focus:border-sky-500/60"
+        />
+        <button
+          disabled={!!busy || !skill.trim()}
+          onClick={() =>
+            act("add-skill", async () => {
+              const r = await editCvDraft(draft.id, { add_skills: [skill.trim()] });
+              setSkill("");
+              return r;
+            })
+          }
+          className="rounded-md border border-neutral-700 px-2 py-1 text-neutral-200 disabled:opacity-40"
+        >
+          Add
+        </button>
+      </div>
+
+      {/* --- bullets, per role (locked header shown for context only) --- */}
+      {roles.map((role, i) => (
+        <div key={i} className="mb-3">
+          <p className="mb-1 text-neutral-500">
+            {role.title} @ {role.company}{" "}
+            <span className="text-neutral-600">({role.dates} — locked)</span>
+          </p>
+          <ul className="mb-1 space-y-1">
+            {(role.bullets ?? []).map((b, bi) => (
+              <li key={bi} className="flex items-start gap-1.5">
+                <span className="min-w-0 flex-1 text-neutral-300">• {b}</span>
+                <button
+                  disabled={!!busy}
+                  title="Remove this bullet"
+                  onClick={() => act("rm-bullet", () => editCvDraft(draft.id, { remove_bullets: [b] }))}
+                  className="shrink-0 text-neutral-500 hover:text-rose-300 disabled:opacity-40"
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+          <div className="flex gap-1.5">
+            <input
+              value={bullet[i] ?? ""}
+              onChange={(e) => setBullet({ ...bullet, [i]: e.target.value })}
+              placeholder={`add a bullet to ${role.company ?? "this role"}…`}
+              className="min-w-0 flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-neutral-100 outline-none focus:border-sky-500/60"
+            />
+            <button
+              disabled={!!busy || !(bullet[i] ?? "").trim()}
+              onClick={() =>
+                act("add-bullet", async () => {
+                  const r = await editCvDraft(draft.id, {
+                    add_bullets: [{ text: (bullet[i] ?? "").trim(), role_index: i }],
+                  });
+                  setBullet({ ...bullet, [i]: "" });
+                  return r;
+                })
+              }
+              className="rounded-md border border-neutral-700 px-2 py-1 text-neutral-200 disabled:opacity-40"
+            >
+              Add
+            </button>
+          </div>
+        </div>
+      ))}
+
+      {/* --- reword: the one path that spends a model call --- */}
+      <p className="mb-1 text-neutral-500">Reword to an instruction (one model call)</p>
+      <div className="flex flex-wrap gap-1.5">
+        <select
+          value={target}
+          onChange={(e) => setTarget(e.target.value)}
+          className="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-neutral-200 outline-none"
+        >
+          <option value="summary">Profile / summary</option>
+          {roles.map((role, i) => (
+            <option key={i} value={String(i)}>
+              Bullets — {role.company ?? `role ${i + 1}`}
+            </option>
+          ))}
+        </select>
+        <input
+          value={instruction}
+          onChange={(e) => setInstruction(e.target.value)}
+          placeholder="e.g. emphasise Kubernetes and platform ownership"
+          className="min-w-0 flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-neutral-100 outline-none focus:border-sky-500/60"
+        />
+        <button
+          disabled={!!busy || !instruction.trim()}
+          onClick={() =>
+            act("reword", async () => {
+              const r = await rewordCvDraft(draft.id, {
+                target: target === "summary" ? "summary" : "role",
+                instruction: instruction.trim(),
+                ...(target === "summary" ? {} : { role_index: Number(target) }),
+              });
+              setInstruction("");
+              return r;
+            })
+          }
+          className="rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-sky-200 disabled:opacity-40"
+        >
+          {busy === "reword" ? "Rewording…" : "Reword"}
+        </button>
+      </div>
+
+      {note && <p className="mt-2 text-neutral-400">{note}</p>}
+    </div>
+  );
+}
+
 function DraftCard({
   draft,
   title,
   picked,
+  isNew = false,
   onPick,
   onApprove,
   onReject,
+  onChanged,
   busy,
 }: {
   draft: CvDraft;
   title: string;
   picked: boolean;
+  isNew?: boolean;
   onPick: () => void;
   onApprove: () => void;
   onReject: () => void;
+  onChanged: () => Promise<void> | void;
   busy: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
   const notes = draft.critic_notes_json;
   const content = draft.tailored_content_json;
+  const attested = notes?.user_attested;
+  const attestedCount =
+    (attested?.skills?.length ?? 0) +
+    (attested?.new_bullets?.length ?? 0) +
+    (attested?.bullet_rewrites?.length ?? 0);
   const changes = content?.change_notes ?? notes?.change_notes ?? [];
   // Locked facts are enforced in code (finalize) on every draft — always safe. Legacy rows
   // carried an explicit final_ok; default to true for alignment-loop rows.
@@ -264,12 +760,21 @@ function DraftCard({
   const unaddressed = notes?.unaddressed_requirements ?? [];
 
   return (
-    <div className="rounded-lg border border-neutral-800 bg-neutral-950/40 p-3">
+    <div
+      className={`rounded-lg border bg-neutral-950/40 p-3 transition ${
+        isNew ? "border-sky-500/50 ring-1 ring-sky-500/20" : "border-neutral-800"
+      }`}
+    >
       <div className="flex flex-wrap items-center gap-2">
         {draft.status === "draft_ready" && (
           <input type="checkbox" checked={picked} onChange={onPick} className="accent-sky-500" />
         )}
         <span className="text-sm font-medium text-neutral-200">{title}</span>
+        {isNew && (
+          <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-200">
+            new
+          </span>
+        )}
         <span className={`rounded-md border px-1.5 py-0.5 text-[10px] ${STATUS_STYLE[draft.status]}`}>
           {draft.status.replace("_", " ")}
         </span>
@@ -315,9 +820,26 @@ function DraftCard({
             {draft.after_score != null && ` → ${Math.round(draft.after_score * 100)}`}
           </span>
         )}
+        {attestedCount > 0 && (
+          <span
+            className="rounded-md border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-200"
+            title="Includes content you vouched for yourself, not backed by résumé citations"
+          >
+            {attestedCount} self-attested
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-1.5">
           <button onClick={() => setOpen((o) => !o)} className="text-xs text-neutral-400 hover:text-neutral-200">
             {open ? "Hide" : "Review"}
+          </button>
+          <button
+            onClick={() => {
+              setEditing((e) => !e);
+              setOpen(true);
+            }}
+            className="text-xs text-sky-300 hover:text-sky-200"
+          >
+            {editing ? "Done editing" : "Edit"}
           </button>
           {draft.status === "draft_ready" && (
             <>
@@ -358,6 +880,36 @@ function DraftCard({
 
       {open && (
         <div className="mt-2 space-y-3 border-t border-neutral-800 pt-2 text-xs">
+          {editing && <DraftEditor draft={draft} onChanged={onChanged} />}
+
+          {/* What the candidate vouched for themselves — kept visually distinct from the
+              evidence-backed block below, because the warrant is different in kind. */}
+          {attestedCount > 0 && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/[0.06] p-2">
+              <p className="mb-1 font-medium text-amber-200">
+                You vouched for these ({attestedCount}) — no résumé citation backs them
+              </p>
+              {(attested?.skills?.length ?? 0) > 0 && (
+                <p className="text-amber-100/80">Skills: {attested?.skills?.join(", ")}</p>
+              )}
+              {(attested?.new_bullets ?? []).map((b, i) => (
+                <p key={`nb${i}`} className="mt-0.5 text-amber-100/80">
+                  + {b.role_ref ? `[${b.role_ref}] ` : ""}
+                  {b.text}
+                </p>
+              ))}
+              {(attested?.bullet_rewrites ?? []).map((b, i) => (
+                <p key={`rw${i}`} className="mt-0.5 text-amber-100/80">
+                  ↻ {b.role_ref ? `[${b.role_ref}] ` : ""}
+                  {b.after}
+                </p>
+              ))}
+              <p className="mt-1 text-neutral-500">
+                {attested?.note ?? "Interview prep on these is on you."}
+              </p>
+            </div>
+          )}
+
           {/* Alignment summary — how well, over how many rounds */}
           {alignScore != null && (
             <p className="text-neutral-400">

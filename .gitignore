@@ -40,4 +40,8 @@ miniodata/
 # --- Local storage backend + personal data (never commit resumes) ---
 .storage/
 *.resume
+# Loose résumé files dropped in for local testing — real people's personal data, and the
+# extension-based rules above don't catch a plain .pdf/.docx sitting in a folder.
+Resume/
+resumes/
 

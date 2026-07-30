@@ -81,12 +81,15 @@ async def test_selection_resolves_across_the_job_tools(tool):
     assert result["resolved_args"]["job_ids"] == ["j1"]
 
 
-async def test_trigger_stage_strips_use_selected_before_dispatch():
+async def test_trigger_stage_resolves_selection_before_confirming():
+    # trigger_stage(analyze) now runs the runner synchronously on confirm, so verify the
+    # selection is resolved into resolved_args at the confirmation step (before any run).
     ex, calls = _executor(selected=["j1", "j2"])
-    await ex.execute("trigger_stage", {"stage": "analyze", "use_selected": True}, confirmed=True)
-    dispatched = [a for s, t, a in calls if t == "trigger_stage"][0]
-    assert "use_selected" not in dispatched              # not a real MCP arg
-    assert dispatched["stage"] == "analyze" and dispatched["job_ids"] == ["j1", "j2"]
+    result, _ = await ex.execute("trigger_stage", {"stage": "analyze", "use_selected": True}, confirmed=False)
+    assert result["status"] == "confirmation_required"
+    assert result["resolved_args"]["stage"] == "analyze"
+    assert result["resolved_args"]["job_ids"] == ["j1", "j2"]
+    assert not calls  # nothing runs while awaiting the user's yes
 
 
 # --------------------------------------------------------------------------- #

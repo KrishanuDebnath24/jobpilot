@@ -32,7 +32,10 @@ async def run_prepare_cvs(user_id: uuid.UUID, job_ids: list[str]) -> dict:
                 "drafts": [], "errors": {}}
 
     analyze = await run_analyze(user_id, job_ids=job_ids)
-    align = await run_align(user_id, job_ids)
+    # use_attested=False: this chain auto-approves and exports with no review stop, so it
+    # stays on the strictly evidence-gated path. Accepted Gap-closer proposals (Phase 6.6)
+    # are deliberately ignored here and only ride the reviewed "Tailor only" route.
+    align = await run_align(user_id, job_ids, use_attested=False)
     drafts = align.get("drafts", [])
     draft_ids = [d["draft_id"] for d in drafts]
 

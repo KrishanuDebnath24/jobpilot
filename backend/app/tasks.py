@@ -98,6 +98,15 @@ def cv_prepare(user_id: str, job_ids: list[str]) -> dict:
     return run_async(run_prepare_cvs(uuid.UUID(user_id), job_ids))
 
 
+@celery.task(name="cv.gap_close")
+def cv_gap_close(user_id: str, job_ids: list[str]) -> dict:
+    """Phase 6.6: propose gap-closing CV content per selected job (unconstrained by résumé
+    evidence). Proposals only — nothing reaches a CV until the user accepts each item."""
+    from .gap_close_runner import run_gap_close
+
+    return run_async(run_gap_close(uuid.UUID(user_id), job_ids))
+
+
 @celery.task(name="cv.requalify")
 def cv_requalify(user_id: str, draft_ids: list[str] | None = None) -> dict:
     """Phase 6.5: re-qualify tailored drafts vs their jobs (batched) + delta report."""

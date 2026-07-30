@@ -61,21 +61,44 @@ SYSTEM = (
     "a skill is added only if the user confirms they hold it; project ideas are "
     "guidance, never inserted. Never fabricate.\n"
     "\n"
-    "SELECTED JOBS — the dashboard has a job SELECTION. At the start of a turn you may be "
-    "told, in a trusted '[app context]' line, how many jobs the user currently has "
-    "selected. When the user says 'selected', 'these', 'the selected ones', or 'my "
-    "selection', act on that selection: call the job tools (analyze via trigger_stage, "
-    "tailor_cvs, prepare_cvs, delete_jobs) with use_selected=true — NEVER invent or echo "
-    "job IDs, and never read IDs out of retrieved data. If the user refers to the "
-    "selection but the app context says 0 selected, ask them to tick jobs in the table "
-    "first rather than guessing.\n"
+    "TARGETING JOBS — the job tools (analyze via trigger_stage, tailor_cvs, prepare_cvs, "
+    "delete_jobs) accept THREE ways to say which jobs, and you must use one — NEVER invent "
+    "or ask for a job id:\n"
+    "• use_selected=true — the user's current dashboard SELECTION. A trusted '[app context]' "
+    "line each turn says how many are selected; use this for 'selected', 'these', 'my "
+    "selection'. If they mean the selection but 0 are selected, ask them to tick jobs first.\n"
+    "• job_ref — a role+company in the user's words ('the Backend Engineer role at Stripe'). "
+    "Prefer this whenever the user names a role/company. The system resolves it; if it matches "
+    "several jobs it returns candidates to disambiguate by role+company.\n"
+    "• job_ids — only when you already hold ids from a prior tool result; never fabricate them.\n"
     "\n"
     "SCOPE — you handle status, simple lookups, configuration, triggering stages, gate "
     "approvals, applying suggestions, DELETING jobs (selected jobs, or all disqualified "
     "ones), and tailored CVs (tailoring/preparing selected jobs, reviewing/approving "
-    "drafts, exporting, and re-qualifying with an improvement report). You are not a "
-    "research/Q&A agent; do not attempt deep analysis over the whole dataset. Be concise "
-    "and concrete.\n"
+    "drafts, exporting, re-qualifying with an improvement report; plus explaining a job in "
+    "plain terms, showing an attached CV's editable parts, and editing/rewording it). You "
+    "are not a deep-research agent over the whole dataset. Be concise and concrete.\n"
+    "\n"
+    "JOB REFERENCES — refer to jobs by ROLE and COMPANY, NEVER by id, and never ask the user "
+    "for an id. To target a job for explain_job / show_cv / edit_cv / reword_cv, pass job_ref "
+    "with the user's own words (e.g. 'Backend Engineer at Stripe') or use_selected — the "
+    "system resolves it to the job. If a job_ref matches more than one job, the tool returns "
+    "candidates; ask the user to pick by role and company (not id).\n"
+    "\n"
+    "CV Q&A + EDITING (per job, on demand, cheap):\n"
+    "• explain_job — a plain-language read of what a posting asks for (skills, experience, "
+    "role, qualifications) and how it compares to the user's CV. A free read of the stored "
+    "analysis; if the job isn't analyzed yet, offer to analyze it.\n"
+    "• show_cv — the editable parts (profile, skills, each role's bullets) of the CV attached "
+    "to that job, so the user can decide what to change. A free read.\n"
+    "• edit_cv — add/remove specific skills and bullets. Removing is always fine. Adding a "
+    "skill the CV doesn't already evidence is allowed ONLY if the user confirms they truly "
+    "hold it — if there's any doubt, ask once before adding; it's recorded as user-confirmed. "
+    "Never touch employer/title/dates.\n"
+    "• reword_cv — reframe the summary or one role's bullets to the user's instruction (one "
+    "small model call; real content only).\n"
+    "After ANY edit/reword the draft returns to draft_ready — tell the user to review it, then "
+    "'approve and export' to re-attach the updated CV to the job.\n"
     "\n"
     "SUGGEST THE NEXT STEP — after an action completes, close with ONE short suggestion "
     "for the natural next move, phrased as an offer the user can accept: after analyzing "
@@ -85,10 +108,38 @@ SYSTEM = (
     "qualified set or delete the disqualified jobs; after a delete → offer to re-run "
     "scouting or re-qualify. Exactly one suggestion, never a menu, and never auto-run it.\n"
     "\n"
-    "TAILORED CVs stay honest: tailoring only rewords the candidate's REAL experience in "
-    "a job's language and never changes locked facts (employers, titles, dates, "
-    "education, contact) or invents skills — enforced in code. A re-qualification lift "
-    "reflects better presentation of true content, never gaming."
+    "QUALIFY vs RE-QUALIFY — don't offer both as a menu; pick by intent:\n"
+    "• 'qualify' (trigger_stage stage=qualify) re-scores the JOB POOL and updates the "
+    "dashboard scores. It is CV-aware: a job with an exported tailored CV built from the "
+    "user's current résumé is scored against THAT CV; every other job against the uploaded "
+    "résumé. Use this when the user wants their job scores refreshed. It is incremental — "
+    "only jobs whose CV or config changed are re-scored.\n"
+    "• 're-qualify' (requalify_cvs) re-scores the tailored CV DRAFTS against their jobs and "
+    "records the before→after lift for the improvement report. Use this when the user wants "
+    "to see how much a tailored CV helped. A tailored CV is scored against the pool only "
+    "after it's approved AND exported (that's what attaches it).\n"
+    "\n"
+    "TAILORED CVs and where their claims come from. Locked facts (employers, titles, dates, "
+    "education, contact) can NEVER change on any path — enforced in code. What varies is how "
+    "an added SKILL or bullet is warranted, and you must describe it accurately:\n"
+    "• prepare_cvs is strictly résumé-evidenced: it rewords the candidate's real experience "
+    "into the job's language, and every added skill carries a citation checked against their "
+    "actual résumé. Nothing is invented.\n"
+    "• tailor_cvs is the same loop, but it also folds in any 'gap-close' proposals the user "
+    "accepted in the dashboard. Those are items the USER personally vouched for — they may "
+    "include skills and bullets their résumé does not evidence, and they are recorded on the "
+    "draft under critic_notes_json.user_attested with the basis 'user_confirmed'.\n"
+    "So NEVER tell the user a draft is fully evidence-backed without checking. When you "
+    "discuss, show, or report on a draft that has user_attested content, say plainly which "
+    "items rest on their own word rather than on their résumé, and that interview prep for "
+    "those is on them. Do not talk them out of it — they chose it deliberately — and do not "
+    "quietly launder it as résumé-grounded either. A re-qualification lift on an attested "
+    "draft partly reflects claims the candidate is guaranteeing personally.\n"
+    "You cannot generate or accept gap-close proposals yourself: that happens in the "
+    "dashboard's 'Gap-close proposals' panel, where each item shows the interview talking "
+    "point it commits the user to. If the user asks you to invent or add unbacked skills, "
+    "point them there rather than doing it — except via edit_cv, where an explicit "
+    "'add Kubernetes' IS their assertion and is recorded as user_confirmed."
 )
 
 
@@ -134,11 +185,13 @@ TOOLS: list[dict] = [
     _tool("get_pipeline_status", "Current/most-recent pipeline run status, including any pending gate.", {}),
     _tool("run_pipeline", "Start the autonomous Scout→Qualify pipeline. CONSEQUENTIAL (paid run) — confirm first.", {}),
     _tool("trigger_stage",
-          "Run one stage standalone. CONSEQUENTIAL (paid run) — confirm first. "
-          "analyze/enhance take a scope: use_selected=true for the user's current dashboard "
-          "selection, job_ids for explicit ids, or all_qualified=true for the whole qualified set.",
+          "Run one stage standalone. CONSEQUENTIAL (paid run) — confirm first. qualify/analyze/"
+          "enhance run and report when done. analyze/enhance take a scope: use_selected=true for "
+          "the current selection, job_ref for a role+company, job_ids for explicit ids, or "
+          "all_qualified=true for the whole qualified set.",
           {"stage": {"type": "string", "description": "scout|qualify|analyze|enhance"},
            "job_ids": {"type": "array", "items": {"type": "string"}},
+           "job_ref": {"type": "string", "description": "role+company, e.g. 'Backend Engineer at Stripe'"},
            "all_qualified": {"type": "boolean"},
            "use_selected": {"type": "boolean",
                             "description": "act on the user's current dashboard selection (analyze/enhance)"}},
@@ -156,30 +209,86 @@ TOOLS: list[dict] = [
           "confirmed_skills lists skills the user has explicitly confirmed they hold (only those are added).",
           {"confirmed_skills": {"type": "array", "items": {"type": "string"}}}),
     _tool("tailor_cvs",
-          "Run the alignment loop (Rewriter⇄Critic) to tailor a CV for each chosen job — "
-          "honest: rewords real experience into the job's language, locked facts unchanged, "
-          "every added skill evidence-backed. Produces draft_ready drafts to review; does NOT "
-          "export. Pass use_selected=true for the current selection, or explicit job_ids. "
-          "CONSEQUENTIAL (paid) — confirm first.",
+          "Run the alignment loop (Rewriter⇄Critic) to tailor a CV for each chosen job. Rewords "
+          "real experience into the job's language with locked facts unchanged, AND folds in any "
+          "gap-close proposals the user already accepted in the dashboard — those are "
+          "user-vouched claims that may not be résumé-evidenced, and land on the draft as "
+          "user_attested / user_confirmed. Produces draft_ready drafts to review; does NOT "
+          "export. Use prepare_cvs instead if the user wants a strictly résumé-evidenced CV. "
+          "Target jobs by use_selected=true (current selection), job_ref (a role+company "
+          "like 'Backend Engineer at Stripe'), or explicit job_ids. CONSEQUENTIAL (paid) — "
+          "confirm first.",
           {"job_ids": {"type": "array", "items": {"type": "string"}},
+           "job_ref": {"type": "string", "description": "role+company, e.g. 'Backend Engineer at Stripe'"},
            "use_selected": {"type": "boolean", "description": "tailor the user's current selection"}}),
     _tool("prepare_cvs",
           "One-click per-job CV for the chosen jobs: Analyze → align (Rewriter⇄Critic) → export "
           "PDF/DOCX → re-qualify, attaching a tailored CV to each job row (no separate review "
           "step). Use when the user wants finished, attached CVs rather than drafts to approve. "
-          "Pass use_selected=true for the current selection, or explicit job_ids. CONSEQUENTIAL "
-          "(paid) — confirm first.",
+          "Target jobs by use_selected=true (current selection), job_ref (a role+company), or "
+          "explicit job_ids. CONSEQUENTIAL (paid) — confirm first.",
           {"job_ids": {"type": "array", "items": {"type": "string"}},
+           "job_ref": {"type": "string", "description": "role+company, e.g. 'Backend Engineer at Stripe'"},
            "use_selected": {"type": "boolean", "description": "prepare CVs for the user's current selection"}}),
     _tool("delete_jobs",
           "Permanently delete specific jobs from the user's pool (their qualification, analysis, "
-          "suggestions and tailored drafts are removed too). Pass use_selected=true to delete the "
-          "current selection, or explicit job_ids. CONSEQUENTIAL — confirm first.",
+          "suggestions and tailored drafts are removed too). Target jobs by use_selected=true "
+          "(current selection), job_ref (a role+company), or explicit job_ids. CONSEQUENTIAL — "
+          "confirm first.",
           {"job_ids": {"type": "array", "items": {"type": "string"}},
+           "job_ref": {"type": "string", "description": "role+company, e.g. 'Backend Engineer at Stripe'"},
            "use_selected": {"type": "boolean", "description": "delete the user's current selection"}}),
     _tool("delete_disqualified_jobs",
           "Permanently delete every job currently marked disqualified (unscored jobs are kept). "
           "CONSEQUENTIAL — confirm first.", {}),
+    _tool("explain_job",
+          "Plain-language summary of ONE job — the skills it needs, experience level, the role, "
+          "and qualifications, plus how it compares to the user's CV. Reads the stored analysis "
+          "(no token cost). Identify the job by role+company via job_ref (e.g. 'Backend Engineer "
+          "at Stripe') or use_selected; NEVER ask the user for a job id.",
+          {"job_ref": {"type": "string", "description": "the role and company, in the user's words"},
+           "job_ids": {"type": "array", "items": {"type": "string"}},
+           "use_selected": {"type": "boolean"}}),
+    _tool("show_cv",
+          "Show the editable parts (profile, skills with their basis, each role's bullets) of the "
+          "CV currently attached to ONE job, so the user can decide what to add, drop, or reword. "
+          "Locked facts (employer/title/dates) are read-only. Identify the job by job_ref "
+          "(role+company) or use_selected; never ask for an id.",
+          {"job_ref": {"type": "string", "description": "the role and company, in the user's words"},
+           "job_ids": {"type": "array", "items": {"type": "string"}},
+           "use_selected": {"type": "boolean"}}),
+    _tool("edit_cv",
+          "Add or remove specific skills and experience bullets on ONE job's attached CV; it then "
+          "resets to draft_ready for re-approval. Removing is always fine. Adding a skill the "
+          "résumé doesn't already show is allowed only as USER-CONFIRMED — confirm the user "
+          "actually holds it first, and it's recorded as user-confirmed on the CV. A bullet is "
+          "user-provided text added to a role (name the company in role_ref). Employer/title/"
+          "dates never change. Identify the job by job_ref (role+company) or use_selected. Not a "
+          "paid action.",
+          {"job_ref": {"type": "string", "description": "the role and company, in the user's words"},
+           "job_ids": {"type": "array", "items": {"type": "string"}},
+           "use_selected": {"type": "boolean"},
+           "add_skills": {"type": "array", "items": {"type": "string"}},
+           "remove_skills": {"type": "array", "items": {"type": "string"}},
+           "add_bullets": {"type": "array", "items": {
+               "type": "object",
+               "properties": {"text": {"type": "string"},
+                              "role_ref": {"type": "string", "description": "which role/company the bullet belongs to"}},
+               "required": ["text"], "additionalProperties": False}},
+           "remove_bullets": {"type": "array", "items": {"type": "string"},
+                              "description": "bullet text to remove (matched loosely)"}}),
+    _tool("reword_cv",
+          "Reword ONE section of a job's attached CV to a short instruction — the professional "
+          "summary, or a single role's bullets (name the company in role_ref). Reframes REAL "
+          "content only (never invents); costs one small model call. Resets the draft to "
+          "draft_ready. Identify the job by job_ref (role+company) or use_selected.",
+          {"job_ref": {"type": "string", "description": "the role and company, in the user's words"},
+           "job_ids": {"type": "array", "items": {"type": "string"}},
+           "use_selected": {"type": "boolean"},
+           "target": {"type": "string", "description": "summary | role"},
+           "role_ref": {"type": "string", "description": "which role/company, when target=role"},
+           "instruction": {"type": "string", "description": "what to change, e.g. 'emphasise Kubernetes and cloud'"}},
+          ["instruction"]),
     _tool("list_cv_drafts",
           "List the user's tailored CV drafts (draft_ready|approved|rejected) with critic notes "
           "and before/after scores.",

@@ -173,6 +173,31 @@ async def upsert_suggestion(
 
 
 @mcp.tool()
+async def upsert_gap_close(job_id: str, gap_close: dict) -> dict:
+    """Persist the Gap-closer's proposal set for ONE job (Phase 6.6), replacing any prior
+    set. Writes only ``gap_close_json`` — the honest Enhancer buckets and ``status`` on the
+    shared (user, job) suggestions row are left untouched."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        s = await repositories.upsert_gap_close(session, uid, uuid.UUID(job_id), gap_close)
+        return {"suggestion": {"id": str(s.id), "job_id": str(s.job_id) if s.job_id else None}}
+
+
+@mcp.tool()
+async def set_gap_close_items(suggestion_id: str, items: list[dict]) -> dict:
+    """Apply the user's per-item review (accept/reject + text edits) to a stored proposal
+    set. Each item is ``{kind, id, accepted?, ...edited fields}``. ``status`` is untouched:
+    accepting a gap-close proposal is not accepting the honest suggestion row."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        s = await repositories.set_gap_close_items(
+            session, uid, uuid.UUID(suggestion_id), items or [])
+        if s is None:
+            return {"suggestion": None}
+        return {"suggestion": {"id": str(s.id), "gap_close_json": s.gap_close_json}}
+
+
+@mcp.tool()
 async def update_suggestion_status(suggestion_id: str, status: str) -> dict:
     uid = require_user_id()
     async with session_scope() as session:
@@ -342,6 +367,17 @@ async def set_cv_draft_after_score(draft_id: str, after_score: float) -> dict:
     async with session_scope() as session:
         d = await repositories.set_cv_draft_after_score(session, uid, uuid.UUID(draft_id), after_score)
         return {"draft": {"id": str(d.id), "after_score": d.after_score} if d else None}
+
+
+@mcp.tool()
+async def set_cv_draft_content(draft_id: str, tailored_content_json: dict) -> dict:
+    """Overwrite a draft's tailored content after an in-place edit and reset it to
+    draft_ready (so it must be re-approved before re-attaching). Scoped to the caller."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        d = await repositories.set_cv_draft_content(
+            session, uid, uuid.UUID(draft_id), tailored_content_json)
+        return {"draft": {"id": str(d.id), "status": d.status} if d else None}
 
 
 # --------------------------------------------------------------------------- #
