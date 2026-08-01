@@ -127,6 +127,22 @@ async def create_resume_version(
 
 
 @mcp.tool()
+async def delete_assembled_versions(keep_id: str | None = None) -> dict:
+    """Delete the caller's assembled apply-to-resume versions, optionally keeping one.
+
+    Only ``source='assembled'`` rows are eligible — uploaded resumes can never be removed
+    by this tool, so the working resume is safe regardless of what the caller passes.
+    Assembled versions hold no stored file (synthetic ``file_ref``), so there is no
+    storage object to clean up. Returns ``{deleted: n}``."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        deleted = await repositories.delete_assembled_resumes(
+            session, uid, uuid.UUID(keep_id) if keep_id else None
+        )
+        return {"deleted": deleted}
+
+
+@mcp.tool()
 async def list_resume_versions() -> dict:
     """All of the caller's resume versions (upload + assembled), newest first."""
     uid = require_user_id()

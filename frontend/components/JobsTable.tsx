@@ -326,9 +326,11 @@ export default function JobsTable({
     );
   }
   return (
-    <div className="overflow-x-auto rounded-xl border border-neutral-800">
+    /* The list scrolls inside itself rather than pushing the page down — with 100+ jobs the
+       filters and everything below stay reachable. The header is sticky against THIS box. */
+    <div className="max-h-[70vh] overflow-auto rounded-xl border border-neutral-800">
       <table className="w-full min-w-[720px] text-left text-sm">
-        <thead className="sticky top-0 bg-neutral-900/80 text-xs uppercase tracking-wide text-neutral-500 backdrop-blur">
+        <thead className="sticky top-0 z-10 bg-neutral-900/95 text-xs uppercase tracking-wide text-neutral-500 backdrop-blur">
           <tr>
             {onToggleSelect && <th className="py-2.5 pl-4 pr-1 font-medium"> </th>}
             <th className={`py-2.5 pr-2 font-medium ${onToggleSelect ? "pl-1" : "pl-4"}`}>Score</th>

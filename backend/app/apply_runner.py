@@ -21,9 +21,16 @@ logger = logging.getLogger("jobpilot.apply")
 
 
 async def _load(user_id: uuid.UUID) -> tuple[dict, list[dict], str | None]:
-    wrap = (await mcp_client.resume_mcp(user_id, "get_structured_resume", {}))["resume"]
+    """Base = the latest *uploaded* resume, never a previous assembled version.
+
+    Applying twice therefore re-derives from the same source instead of compounding on
+    its own output: each assembled version is an independent render of (upload + accepted
+    suggestions), which is what makes the previous one safely disposable. Building on the
+    last assembled version would also silently drop rewrites, since their ``before`` text
+    no longer matches once an earlier pass has already rewritten it."""
+    wrap = (await mcp_client.resume_mcp(user_id, "get_base_resume", {}))["resume"]
     if not wrap or not wrap.get("structured"):
-        raise RuntimeError("no resume on file — upload a resume before applying suggestions")
+        raise RuntimeError("no uploaded resume on file — upload a resume before applying suggestions")
     suggestions = (await mcp_client.db_mcp(user_id, "get_suggestions", {}))["suggestions"]
     accepted = [s for s in suggestions if s.get("status") == "accepted"]
     return wrap["structured"], accepted, wrap.get("id")
@@ -67,9 +74,19 @@ async def apply_to_resume(
         "label": label or "Tailored from accepted suggestions",
         "parent_id": parent_id,
     })
-    logger.info("apply.done resume_id=%s rewrites=%d added=%d withheld=%d",
-                created.get("resume", {}).get("id"), len(result["applied_rewrites"]),
-                len(result["added_skills"]), len(result["withheld_skills"]))
+    # Keep exactly one assembled version: the one just written. Older ones are stale
+    # renders of the same upload + the same accepted set, so nothing is lost that this
+    # version doesn't already contain. Only after the new row exists, so a failure here
+    # leaves the user with more versions rather than none. Uploads are never eligible.
+    new_id = (created.get("resume") or {}).get("id")
+    pruned = 0
+    if new_id:
+        pruned = (await mcp_client.resume_mcp(
+            user_id, "delete_assembled_versions", {"keep_id": new_id}
+        )).get("deleted", 0)
+    logger.info("apply.done resume_id=%s rewrites=%d added=%d withheld=%d pruned=%d",
+                new_id, len(result["applied_rewrites"]),
+                len(result["added_skills"]), len(result["withheld_skills"]), pruned)
     return {
         "applied": True,
         "resume": created.get("resume"),
@@ -77,4 +94,5 @@ async def apply_to_resume(
         "added_skills": result["added_skills"],
         "withheld_skills": result["withheld_skills"],
         "project_guidance_count": len(result["project_guidance"]),
+        "pruned_versions": pruned,
     }

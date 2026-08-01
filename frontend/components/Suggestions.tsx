@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { PipelineRun, Suggestion } from "@/lib/types";
 import {
   getAnalyzeRuns,
@@ -63,10 +63,15 @@ function StatusPill({ status }: { status: Suggestion["status"] }) {
 function SuggestionCard({
   s,
   title,
+  open,
+  onToggleOpen,
   onStatus,
 }: {
   s: Suggestion;
   title: string;
+  /** Accordion state, owned by the list so only one job's suggestions are ever expanded. */
+  open: boolean;
+  onToggleOpen: () => void;
   onStatus: (id: string, status: "accepted" | "dismissed") => void;
 }) {
   const detail = s.projects_json?.skills_detail ?? [];
@@ -74,11 +79,27 @@ function SuggestionCard({
   const rewrites = s.bullet_rewrites_json?.bullet_rewrites ?? [];
   const agg = s.projects_json?.aggregate;
   const dim = s.status === "dismissed";
+  // Collapsed cards still say what's inside them, so you can triage without expanding.
+  const counts = [
+    detail.length && `${detail.length} skill${detail.length === 1 ? "" : "s"}`,
+    projects.length && `${projects.length} project${projects.length === 1 ? "" : "s"}`,
+    rewrites.length && `${rewrites.length} rewrite${rewrites.length === 1 ? "" : "s"}`,
+  ].filter(Boolean) as string[];
   return (
     <div className={`rounded-xl border border-neutral-800 bg-neutral-950/40 p-4 ${dim ? "opacity-50" : ""}`}>
-      <div className="mb-3 flex items-center gap-2">
-        <h4 className="text-sm font-medium text-neutral-100">{title}</h4>
+      <div className={`flex flex-wrap items-center gap-2 ${open ? "mb-3" : ""}`}>
+        <button
+          onClick={onToggleOpen}
+          aria-expanded={open}
+          className="flex min-w-0 items-center gap-2 text-left text-sm font-medium text-neutral-100"
+        >
+          <span className="text-neutral-500">{open ? "▾" : "▸"}</span>
+          <span className="truncate">{title}</span>
+        </button>
         <StatusPill status={s.status} />
+        <span className="rounded-full border border-neutral-700 px-2 py-0.5 text-[10px] text-neutral-500">
+          {counts.length > 0 ? counts.join(" · ") : "nothing to show"}
+        </span>
         <div className="ml-auto flex gap-1.5">
           <button
             onClick={() => onStatus(s.id, "accepted")}
@@ -95,85 +116,89 @@ function SuggestionCard({
         </div>
       </div>
 
-      {agg && (
-        <div className="mb-3 grid gap-3 rounded-lg border border-neutral-800/70 bg-neutral-900/30 p-3 sm:grid-cols-2">
-          <p className="text-xs text-neutral-500 sm:col-span-2">
-            Frequencies {agg.basis ?? `computed from ${agg.total_jobs ?? 0} jobs`}
-            {agg.snippet_jobs ? (
-              <span className="text-neutral-600"> — {agg.snippet_jobs} snippet-only job(s) excluded</span>
-            ) : null}
-          </p>
-          <div>
-            <p className="mb-1.5 text-xs uppercase tracking-wide text-neutral-500">
-              Recurring gaps ({agg.full_text_jobs ?? agg.total_jobs} full-text jobs)
-            </p>
-            <Bar rows={agg.recurring_gaps} />
-          </div>
-          <div>
-            <p className="mb-1.5 text-xs uppercase tracking-wide text-neutral-500">Most-required skills</p>
-            <Bar rows={agg.skill_frequency} />
-          </div>
-          {agg.certification_frequency && agg.certification_frequency.length > 0 && (
-            <div className="sm:col-span-2">
-              <p className="mb-1.5 text-xs uppercase tracking-wide text-neutral-500">Certifications requested</p>
-              <Bar rows={agg.certification_frequency} />
+      {open && (
+        <>
+          {agg && (
+            <div className="mb-3 grid gap-3 rounded-lg border border-neutral-800/70 bg-neutral-900/30 p-3 sm:grid-cols-2">
+              <p className="text-xs text-neutral-500 sm:col-span-2">
+                Frequencies {agg.basis ?? `computed from ${agg.total_jobs ?? 0} jobs`}
+                {agg.snippet_jobs ? (
+                  <span className="text-neutral-600"> — {agg.snippet_jobs} snippet-only job(s) excluded</span>
+                ) : null}
+              </p>
+              <div>
+                <p className="mb-1.5 text-xs uppercase tracking-wide text-neutral-500">
+                  Recurring gaps ({agg.full_text_jobs ?? agg.total_jobs} full-text jobs)
+                </p>
+                <Bar rows={agg.recurring_gaps} />
+              </div>
+              <div>
+                <p className="mb-1.5 text-xs uppercase tracking-wide text-neutral-500">Most-required skills</p>
+                <Bar rows={agg.skill_frequency} />
+              </div>
+              {agg.certification_frequency && agg.certification_frequency.length > 0 && (
+                <div className="sm:col-span-2">
+                  <p className="mb-1.5 text-xs uppercase tracking-wide text-neutral-500">Certifications requested</p>
+                  <Bar rows={agg.certification_frequency} />
+                </div>
+              )}
             </div>
           )}
-        </div>
-      )}
 
-      {detail.length > 0 && (
-        <div className="mb-3">
-          <p className="mb-1.5 text-xs uppercase tracking-wide text-neutral-500">
-            Skills to add <span className="normal-case text-neutral-600">(only if truthfully held)</span>
-          </p>
-          <ul className="space-y-1.5 text-sm text-neutral-300">
-            {detail.map((sk, i) => (
-              <li key={i} className="rounded-md border border-neutral-800/70 px-2.5 py-1.5">
-                <span className="font-medium text-neutral-100">{sk.skill}</span>
-                {sk.frequency && <span className="ml-2 text-xs text-emerald-300">{sk.frequency}</span>}
-                {sk.why && <span className="block text-xs text-neutral-400">why: {sk.why}</span>}
-                {sk.truthful_basis && (
-                  <span className="block text-xs text-neutral-500">basis: {sk.truthful_basis}</span>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+          {detail.length > 0 && (
+            <div className="mb-3">
+              <p className="mb-1.5 text-xs uppercase tracking-wide text-neutral-500">
+                Skills to add <span className="normal-case text-neutral-600">(only if truthfully held)</span>
+              </p>
+              <ul className="space-y-1.5 text-sm text-neutral-300">
+                {detail.map((sk, i) => (
+                  <li key={i} className="rounded-md border border-neutral-800/70 px-2.5 py-1.5">
+                    <span className="font-medium text-neutral-100">{sk.skill}</span>
+                    {sk.frequency && <span className="ml-2 text-xs text-emerald-300">{sk.frequency}</span>}
+                    {sk.why && <span className="block text-xs text-neutral-400">why: {sk.why}</span>}
+                    {sk.truthful_basis && (
+                      <span className="block text-xs text-neutral-500">basis: {sk.truthful_basis}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
-      {projects.length > 0 && (
-        <div className="mb-3">
-          <p className="mb-1.5 text-xs uppercase tracking-wide text-neutral-500">
-            Projects to build a real gap skill
-          </p>
-          <ul className="space-y-1.5 text-sm text-neutral-300">
-            {projects.map((p, i) => (
-              <li key={i} className="rounded-md border border-neutral-800/70 px-2.5 py-1.5">
-                <span className="font-medium text-neutral-100">{p.title}</span>
-                <span className="ml-2 text-xs text-amber-300">builds: {p.builds_skill}</span>
-                <span className="block text-xs text-neutral-400">{p.description}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+          {projects.length > 0 && (
+            <div className="mb-3">
+              <p className="mb-1.5 text-xs uppercase tracking-wide text-neutral-500">
+                Projects to build a real gap skill
+              </p>
+              <ul className="space-y-1.5 text-sm text-neutral-300">
+                {projects.map((p, i) => (
+                  <li key={i} className="rounded-md border border-neutral-800/70 px-2.5 py-1.5">
+                    <span className="font-medium text-neutral-100">{p.title}</span>
+                    <span className="ml-2 text-xs text-amber-300">builds: {p.builds_skill}</span>
+                    <span className="block text-xs text-neutral-400">{p.description}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
-      {rewrites.length > 0 && (
-        <div>
-          <p className="mb-1.5 text-xs uppercase tracking-wide text-neutral-500">
-            Bullet rewrites <span className="normal-case text-neutral-600">(reframe genuine experience)</span>
-          </p>
-          <ul className="space-y-2 text-sm">
-            {rewrites.map((r, i) => (
-              <li key={i} className="rounded-md border border-neutral-800/70 px-2.5 py-1.5">
-                <p className="text-neutral-500 line-through decoration-neutral-700">{r.before}</p>
-                <p className="text-emerald-200">{r.after}</p>
-                <p className="mt-1 text-xs text-neutral-500">grounding: {r.grounding}</p>
-              </li>
-            ))}
-          </ul>
-        </div>
+          {rewrites.length > 0 && (
+            <div>
+              <p className="mb-1.5 text-xs uppercase tracking-wide text-neutral-500">
+                Bullet rewrites <span className="normal-case text-neutral-600">(reframe genuine experience)</span>
+              </p>
+              <ul className="space-y-2 text-sm">
+                {rewrites.map((r, i) => (
+                  <li key={i} className="rounded-md border border-neutral-800/70 px-2.5 py-1.5">
+                    <p className="text-neutral-500 line-through decoration-neutral-700">{r.before}</p>
+                    <p className="text-emerald-200">{r.after}</p>
+                    <p className="mt-1 text-xs text-neutral-500">grounding: {r.grounding}</p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -191,6 +216,11 @@ export default function Suggestions({
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [phase, setPhase] = useState<Phase>("idle");
   const [msg, setMsg] = useState<string>("");
+  // Accordion: one card expanded at a time. These used to all render open, so the first one
+  // is opened for you when a set arrives — otherwise the panel would look empty after a run.
+  // Guarded by a ref so a deliberate collapse is never undone.
+  const [openId, setOpenId] = useState<string | null>(null);
+  const seenAny = useRef(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -226,6 +256,15 @@ export default function Suggestions({
   const busy = phase === "analyzing" || phase === "suggesting";
   const aggregate = suggestions.find((s) => s.job_id === null);
   const perJob = suggestions.filter((s) => s.job_id !== null);
+
+  // Open the first card the very first time suggestions show up (e.g. on page load with a set
+  // already stored).
+  useEffect(() => {
+    if (!seenAny.current && suggestions.length > 0) {
+      seenAny.current = true;
+      setOpenId((aggregate ?? suggestions[0]).id);
+    }
+  }, [suggestions, aggregate]);
 
   return (
     <section className="mt-8 rounded-2xl border border-neutral-800 bg-neutral-900/30 p-4">
@@ -263,6 +302,8 @@ export default function Suggestions({
             <SuggestionCard
               s={aggregate}
               title="Across your qualified set (frequency-prioritized)"
+              open={openId === aggregate.id}
+              onToggleOpen={() => setOpenId((cur) => (cur === aggregate.id ? null : aggregate.id))}
               onStatus={(id, st) => setSuggestionStatus(id, st).then(refresh)}
             />
           )}
@@ -271,6 +312,8 @@ export default function Suggestions({
               key={s.id}
               s={s}
               title={jobTitleById(s.job_id as string)}
+              open={openId === s.id}
+              onToggleOpen={() => setOpenId((cur) => (cur === s.id ? null : s.id))}
               onStatus={(id, st) => setSuggestionStatus(id, st).then(refresh)}
             />
           ))}

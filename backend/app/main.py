@@ -736,6 +736,45 @@ async def download_resume_version(resume_id: str, current_user=Depends(get_curre
     )
 
 
+@app.get("/resume/versions/{resume_id}/download/{fmt}", tags=["resume"])
+async def download_resume_version_file(
+    resume_id: str, fmt: str, current_user=Depends(get_current_user)
+):
+    """Download a resume version as a rendered PDF/DOCX.
+
+    Renders through the SAME deterministic Tailor layout the tailored CVs use
+    (``jobpilot_core.tailor``), so an assembled 'apply-to-resume' version comes out in the
+    identical A4, ATS-safe format — no LLM, no second template to drift. Rendered on demand
+    rather than stored: these versions are exports, and re-rendering is cheap.
+
+    This does NOT make the version the working resume — ``/resumes/me/base`` still returns
+    the latest *uploaded* file. To have it scored/tailored, download it and upload it back.
+    """
+    from fastapi.responses import Response
+    from jobpilot_core import tailor
+
+    if fmt not in ("pdf", "docx"):
+        raise HTTPException(status_code=400, detail="fmt must be pdf|docx")
+    res = await mcp_client.resume_mcp(
+        current_user.id, "get_resume_version", {"resume_id": resume_id})
+    resume = res.get("resume")
+    if not resume:
+        raise HTTPException(status_code=404, detail="resume version not found")
+    structured = resume.get("parsed_json") or {}
+    if not structured:
+        raise HTTPException(status_code=422, detail="version has no structured content to render")
+
+    if fmt == "pdf":
+        data = tailor.render_pdf(structured)
+        media = "application/pdf"
+    else:
+        data = tailor.render_docx(structured)
+        media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    return Response(
+        content=data, media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="resume-{resume_id[:8]}.{fmt}"'})
+
+
 # --------------------------------------------------------------------------- #
 # Tailored CVs (Phase 6.5) — tailor → review/approve → export → re-qualify
 # --------------------------------------------------------------------------- #

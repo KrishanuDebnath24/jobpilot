@@ -153,7 +153,11 @@ async def _cleanup(uid):
 # The full honest flow: tailor → approve by chat → export → re-qualify
 # --------------------------------------------------------------------------- #
 @requires_live
-async def test_live_tailor_review_export_requalify(live_stack):
+async def test_live_tailor_review_export_requalify(live_stack, monkeypatch):
+    # Force the Critic loop on: single pass is the product default and is covered
+    # deterministically in test_cv_alignment.py, so the paid live run is spent on the mode
+    # with the moving parts — real Rewriter⇄Critic rounds against a real model.
+    monkeypatch.setattr(S, "cv_max_rounds", 4)
     from app.concierge_runner import run_turn
     from app.cv_align_runner import run_align
     from app.cv_export_runner import run_export

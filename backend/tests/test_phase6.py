@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 
 import pytest
-from jobpilot_core import concierge, gates, repositories, resume_apply
+from jobpilot_core import concierge, gates, models, repositories, resume_apply, tailor
 from jobpilot_core.db import session_scope
 from jobpilot_core.security import hash_password, mint_mcp_context_token
 from jobpilot_core.settings import get_settings
@@ -235,6 +235,45 @@ def test_apply_suggestions_is_honest_and_non_mutating():
     assert resume["skills"] == ["Python"]
 
 
+def test_applied_version_renders_in_the_tailored_cv_format():
+    """An assembled apply-to-resume version renders through the SAME Tailor as the tailored
+    CVs. Guards the one real risk in serving PDF/DOCX for these versions: the structured
+    resume and the tailored-CV dict are separate shapes that must stay renderable by one
+    renderer. A key rename on either side breaks the download — catch it here, not in a
+    user's empty PDF."""
+    resume = {
+        "contact": {"name": "A Candidate", "email": "a@example.com", "location": "Dublin"},
+        "summary": "Backend engineer.",
+        "skills": ["Python"],
+        "experience": [{
+            "title": "Engineer", "company": "Acme", "dates": "2020–2024",
+            "bullets": ["Built REST APIs in Python"],
+        }],
+        "education": [{"text": "BSc Computer Science"}],
+        "certifications": ["AWS SAA"],
+    }
+    accepted = [{
+        "skills_to_add": ["Terraform"],
+        "projects_json": {},
+        "bullet_rewrites_json": {"bullet_rewrites": [
+            {"before": "Built REST APIs in Python",
+             "after": "Designed and shipped 5 REST APIs in Python", "grounding": "x"},
+        ]},
+    }]
+    assembled = resume_apply.apply_suggestions(resume, accepted, confirmed_skills=["Terraform"])
+    rendered = tailor.render_both(assembled["resume"])
+
+    # Real selectable text, not an image — the same bar cv_export_runner holds drafts to.
+    assert rendered["pdf_machine_readable"]
+    assert rendered["pdf"][:4] == b"%PDF" and rendered["docx"][:2] == b"PK"
+
+    # The assembled content actually reached the page (not a silently empty template).
+    text = tailor.pdf_text(rendered["pdf"])
+    assert "A Candidate" in text
+    assert "Designed and shipped 5 REST APIs in Python" in text
+    assert "Terraform" in text
+
+
 def test_apply_adds_only_confirmed_skills():
     resume = {"skills": ["Python"], "experience": []}
     accepted = [{"skills_to_add": ["Kubernetes", "Terraform"], "projects_json": {}, "bullet_rewrites_json": {}}]
@@ -301,6 +340,48 @@ async def test_gate_interrupt_pauses_and_resume_proceeds(monkeypatch):
     out2 = await graph.ainvoke(Command(resume={}), cfg)
     assert out2.get("done") is True
     assert not orch._is_interrupted(await graph.aget_state(cfg))
+
+
+@requires_db
+async def test_pruning_assembled_versions_never_touches_uploads():
+    """Keep-one pruning must be incapable of deleting an uploaded resume — that's the
+    working resume, and losing it would break scoring, tailoring and every job's attached
+    CV. Asserts the source filter holds even when asked to keep nothing at all."""
+    uid = await _mk_user()
+    try:
+        async with session_scope() as s:
+            upload = models.Resume(
+                user_id=uid, file_ref=f"users/{uid}/resume.pdf", raw_text="cv",
+                parsed_json={"skills": ["Python"]}, source="upload",
+            )
+            s.add(upload)
+            await s.flush()
+            v1 = await repositories.create_resume_version(
+                s, uid, parsed_json={"skills": ["Python"]}, raw_text="v1",
+                label="v1", parent_id=upload.id, consent_at=None, retention_expires_at=None)
+            v2 = await repositories.create_resume_version(
+                s, uid, parsed_json={"skills": ["Python", "Terraform"]}, raw_text="v2",
+                label="v2", parent_id=upload.id, consent_at=None, retention_expires_at=None)
+            upload_id, v1_id, v2_id = upload.id, v1.id, v2.id
+
+        # Keep the newest assembled version: the older one goes, the upload stays.
+        async with session_scope() as s:
+            assert await repositories.delete_assembled_resumes(s, uid, keep_id=v2_id) == 1
+        async with session_scope() as s:
+            left = {r["id"] for r in await repositories.list_resumes(s, uid)}
+        assert left == {str(upload_id), str(v2_id)}
+        assert str(v1_id) not in left
+
+        # Even with nothing kept, the upload survives — the filter is on source, not luck.
+        async with session_scope() as s:
+            assert await repositories.delete_assembled_resumes(s, uid) == 1
+        async with session_scope() as s:
+            left = {r["id"] for r in await repositories.list_resumes(s, uid)}
+            base = await repositories.get_latest_uploaded_resume(s, uid)
+        assert left == {str(upload_id)}
+        assert base is not None and base.id == upload_id  # working resume intact
+    finally:
+        await _cleanup(uid)
 
 
 # --------------------------------------------------------------------------- #

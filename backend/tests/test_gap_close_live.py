@@ -163,7 +163,12 @@ async def _cleanup(uid):
 
 
 @requires_live
-async def test_live_gap_close_then_attested_alignment(live_stack):
+async def test_live_gap_close_then_attested_alignment(live_stack, monkeypatch):
+    # Force the Critic loop on. Check (b) below is a REGRESSION TEST FOR THE CRITIC — that
+    # it doesn't flag attested content as overclaiming — and in the default single-pass mode
+    # no Critic runs, so `integrity_flags` would be absent and the assertion would pass
+    # while testing nothing at all. A vacuous regression test is worse than none.
+    monkeypatch.setattr(S, "cv_max_rounds", 4)
     from app.cv_align_runner import run_align
     from app.gap_close_runner import run_gap_close
 

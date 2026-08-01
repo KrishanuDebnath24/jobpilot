@@ -122,7 +122,16 @@ class Settings(BaseSettings):
     # bar and no integrity flag. Otherwise it rewrites and tries again, up to the cap.
     # Raising the threshold buys alignment with more rounds — i.e. linearly more spend.
     cv_alignment_threshold: float = 0.85
-    cv_max_rounds: int = 4  # hard cap on rewrite→critique rounds per job (spend guard)
+    # Rewrite→critique rounds per job, and the dominant cost lever on this path: a job
+    # costs 1 + 2*rounds Sonnet calls (one rewrite, then a critique + a re-rewrite per
+    # round that fails the bar).
+    #   0 = SINGLE PASS (the default): one Rewriter call, no Critic, no revision. The
+    #       deterministic gate still runs — locked facts are re-imposed and un-evidenced
+    #       skills are dropped — so the draft is exactly as honest, just ungraded. The
+    #       draft lands unscored for the human to review, which is what the review-and-
+    #       approve step in the UI is for.
+    #   n>0 = restore the loop with a hard cap of n rounds (4 was the previous default).
+    cv_max_rounds: int = 0
     cv_tailor_max_jobs: int = 20  # bound a selection (spend guard)
 
     # --- Adzuna connector (free developer tier). Backend/sources-mcp env only. ---

@@ -29,7 +29,27 @@ import QualifierSettings from "./QualifierSettings";
 
 type Decision = "all" | "qualified" | "disqualified" | "unscored";
 
+/* The four screens, in the order you work through them. Everything after Dashboard is a long
+ * review surface you go through job by job, so each gets its own screen instead of stacking
+ * below the jobs table. Screens are swapped with CSS, not by unmounting: analyze/suggest and
+ * gap-close runs poll for minutes and the CV panel polls every 5s, so navigating away must
+ * not tear any of them down. */
+type View = "dashboard" | "suggest" | "gap-close" | "tailored";
+
+const NAV: { key: View; label: string; hint: string }[] = [
+  { key: "dashboard", label: "Dashboard", hint: "Pipeline, agents, jobs" },
+  { key: "suggest", label: "Analyze & suggest", hint: "Grounded, no fabrication" },
+  { key: "gap-close", label: "Gap-close proposals", hint: "Vouch, item by item" },
+  { key: "tailored", label: "Tailored CVs", hint: "Draft, approve, export" },
+];
+
+/** Shown only when its screen is active; the others stay mounted and keep running. */
+function Screen({ active, children }: { active: boolean; children: React.ReactNode }) {
+  return <div className={active ? undefined : "hidden"}>{children}</div>;
+}
+
 export default function Dashboard() {
+  const [view, setView] = useState<View>("dashboard");
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [email, setEmail] = useState<string>("");
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -240,232 +260,288 @@ export default function Dashboard() {
   }
   if (!authed) return <LoginGate onAuthed={onAuthed} />;
 
+  const current = NAV.find((n) => n.key === view) ?? NAV[0];
+
   return (
-    <main className="mx-auto max-w-6xl px-6 py-8">
-      <header className="mb-6 flex items-center gap-3">
-        <div>
-          <h1 className="text-xl font-semibold tracking-tight">JobPilot</h1>
-          <p className="text-sm text-neutral-500">
-            Autonomous scout → qualify — fit guidance, not a verdict.
-          </p>
+    <div className="min-h-screen md:flex">
+      <aside className="shrink-0 border-b border-neutral-800 bg-neutral-900/20 md:sticky md:top-0 md:h-screen md:w-60 md:border-b-0 md:border-r">
+        <div className="px-4 pb-2 pt-5">
+          <h1 className="text-base font-semibold tracking-tight">JobPilot</h1>
+          <p className="text-xs text-neutral-500">scout → qualify → tailor</p>
         </div>
-        <div className="ml-auto flex items-center gap-3 text-sm text-neutral-400">
-          <span>{email}</span>
-          <button
-            onClick={logout}
-            className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs transition hover:border-neutral-600"
-          >
-            Sign out
-          </button>
-        </div>
-      </header>
+        <nav className="flex gap-1 overflow-x-auto px-2 pb-3 md:flex-col md:overflow-visible">
+          {NAV.map((n) => {
+            const active = view === n.key;
+            return (
+              <button
+                key={n.key}
+                onClick={() => setView(n.key)}
+                aria-current={active ? "page" : undefined}
+                className={`shrink-0 rounded-lg px-3 py-2 text-left transition ${
+                  active
+                    ? "bg-neutral-800 text-neutral-100"
+                    : "text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
+                }`}
+              >
+                <span className="block whitespace-nowrap text-sm">{n.label}</span>
+                <span
+                  className={`hidden text-xs md:block ${
+                    active ? "text-neutral-400" : "text-neutral-600"
+                  }`}
+                >
+                  {n.hint}
+                </span>
+              </button>
+            );
+          })}
+        </nav>
+        {/* Jobs are selected on the Dashboard screen but both other screens act on that
+            selection — so keep the count visible wherever you are. */}
+        <p className="hidden px-4 text-xs text-neutral-600 md:block">
+          {selected.size} job{selected.size === 1 ? "" : "s"} selected
+          {selected.size === 0 && " — pick some on Dashboard"}
+        </p>
+      </aside>
 
-      <PipelineLive onJobsChanged={loadJobs} />
-
-      {/* The two conversational agents, side by side: the Concierge acts; Ask answers
-          (read-only). Distinct privilege sets — Ask has no action tools. */}
-      <div className="mt-6 grid gap-4 lg:grid-cols-2">
-        <Chat onChanged={onConciergeChanged} selectedJobIds={[...selected]} />
-        <Ask />
-      </div>
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <Gates onChanged={loadJobs} />
-        <CostPanel />
-      </div>
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <ResumeUpload onUploaded={onResumeUploaded} />
-        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/30">
-          <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-2.5">
+      <main className="min-w-0 flex-1 px-6 py-8">
+        <div className="mx-auto max-w-6xl">
+          <header className="mb-6 flex items-center gap-3">
             <div>
-              <h2 className="text-sm font-semibold text-neutral-200">Search settings</h2>
-              <p className="text-xs text-neutral-500">What Scout searches for.</p>
-            </div>
-            <button
-              onClick={() => openSettings("edit")}
-              className="rounded-lg border border-neutral-700 px-2.5 py-1 text-xs text-neutral-200 transition hover:border-neutral-500"
-            >
-              Edit
-            </button>
-          </div>
-          <dl className="space-y-1.5 px-4 py-3 text-xs">
-            <div className="flex gap-2">
-              <dt className="w-20 shrink-0 text-neutral-500">Roles</dt>
-              <dd className="text-neutral-300">{config?.roles?.join(", ") || "—"}</dd>
-            </div>
-            <div className="flex gap-2">
-              <dt className="w-20 shrink-0 text-neutral-500">Locations</dt>
-              <dd className="text-neutral-300">{config?.locations?.join(", ") || "—"}</dd>
-            </div>
-            <div className="flex gap-2">
-              <dt className="w-20 shrink-0 text-neutral-500">Keywords</dt>
-              <dd className="text-neutral-300">{config?.keywords?.join(", ") || "—"}</dd>
-            </div>
-            <div className="flex gap-2">
-              <dt className="w-20 shrink-0 text-neutral-500">Sources</dt>
-              <dd className="text-neutral-300">{config?.sources?.join(", ") || "—"}</dd>
-            </div>
-          </dl>
-        </section>
-      </div>
-
-      <div className="mt-4">
-        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/30">
-          <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-2.5">
-            <div>
-              <h2 className="text-sm font-semibold text-neutral-200">Scoring &amp; filters</h2>
-              <p className="text-xs text-neutral-500">
-                How Qualify scores jobs — and the must-have hard filter.
+              <h1 className="text-xl font-semibold tracking-tight">{current.label}</h1>
+              <p className="text-sm text-neutral-500">
+                {view === "dashboard"
+                  ? "Autonomous scout → qualify — fit guidance, not a verdict."
+                  : current.hint}
               </p>
             </div>
-            <button
-              onClick={() => setQualifierOpen(true)}
-              className="rounded-lg border border-neutral-700 px-2.5 py-1 text-xs text-neutral-200 transition hover:border-neutral-500"
-            >
-              Edit
-            </button>
-          </div>
-          <dl className="grid gap-1.5 px-4 py-3 text-xs sm:grid-cols-2">
-            <div className="flex gap-2">
-              <dt className="w-24 shrink-0 text-neutral-500">Must-have</dt>
-              <dd className="text-neutral-300">{qualifierConfig?.must_have?.join(", ") || "—"}</dd>
+            <div className="ml-auto flex items-center gap-3 text-sm text-neutral-400">
+              <span>{email}</span>
+              <button
+                onClick={logout}
+                className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs transition hover:border-neutral-600"
+              >
+                Sign out
+              </button>
             </div>
-            <div className="flex gap-2">
-              <dt className="w-24 shrink-0 text-neutral-500">Threshold</dt>
-              <dd className="text-neutral-300">{qualifierConfig?.threshold ?? "—"}</dd>
-            </div>
-            <div className="flex gap-2">
-              <dt className="w-24 shrink-0 text-neutral-500">Nice-to-have</dt>
-              <dd className="truncate text-neutral-300">
-                {qualifierConfig?.nice_to_have?.join(", ") || "—"}
-              </dd>
-            </div>
-            <div className="flex gap-2">
-              <dt className="w-24 shrink-0 text-neutral-500">Weights</dt>
-              <dd className="text-neutral-300">
-                {qualifierConfig?.weights_json
-                  ? `skills ${qualifierConfig.weights_json.skills ?? "—"} · exp ${
-                      qualifierConfig.weights_json.experience ?? "—"
-                    } · roles ${qualifierConfig.weights_json.roles_match ?? "—"}`
-                  : "—"}
-              </dd>
-            </div>
-          </dl>
-        </section>
-      </div>
+          </header>
 
-      {error && (
-        <p className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-300">
-          {error}
-        </p>
-      )}
+          <Screen active={view === "dashboard"}>
+            <PipelineLive onJobsChanged={loadJobs} />
 
-      <div className="mb-3 mt-6 flex flex-wrap items-center gap-3">
-        <div className="flex rounded-lg border border-neutral-800 p-0.5 text-sm">
-          {(["all", "qualified", "disqualified", "unscored"] as Decision[]).map((d) => (
-            <button
-              key={d}
-              onClick={() => setDecision(d)}
-              className={`rounded-md px-3 py-1 capitalize transition ${
-                decision === d ? "bg-neutral-800 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"
-              }`}
-            >
-              {d}
-            </button>
-          ))}
+            {/* The two conversational agents, side by side: the Concierge acts; Ask answers
+                (read-only). Distinct privilege sets — Ask has no action tools. */}
+            <div className="mt-6 grid gap-4 lg:grid-cols-2">
+              <Chat onChanged={onConciergeChanged} selectedJobIds={[...selected]} />
+              <Ask />
+            </div>
+            <div className="mt-4 grid gap-4 lg:grid-cols-2">
+              <Gates onChanged={loadJobs} />
+              <CostPanel />
+            </div>
+            <div className="mt-4 grid gap-4 lg:grid-cols-2">
+              <ResumeUpload onUploaded={onResumeUploaded} />
+              <section className="rounded-2xl border border-neutral-800 bg-neutral-900/30">
+                <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-2.5">
+                  <div>
+                    <h2 className="text-sm font-semibold text-neutral-200">Search settings</h2>
+                    <p className="text-xs text-neutral-500">What Scout searches for.</p>
+                  </div>
+                  <button
+                    onClick={() => openSettings("edit")}
+                    className="rounded-lg border border-neutral-700 px-2.5 py-1 text-xs text-neutral-200 transition hover:border-neutral-500"
+                  >
+                    Edit
+                  </button>
+                </div>
+                <dl className="space-y-1.5 px-4 py-3 text-xs">
+                  <div className="flex gap-2">
+                    <dt className="w-20 shrink-0 text-neutral-500">Roles</dt>
+                    <dd className="text-neutral-300">{config?.roles?.join(", ") || "—"}</dd>
+                  </div>
+                  <div className="flex gap-2">
+                    <dt className="w-20 shrink-0 text-neutral-500">Locations</dt>
+                    <dd className="text-neutral-300">{config?.locations?.join(", ") || "—"}</dd>
+                  </div>
+                  <div className="flex gap-2">
+                    <dt className="w-20 shrink-0 text-neutral-500">Keywords</dt>
+                    <dd className="text-neutral-300">{config?.keywords?.join(", ") || "—"}</dd>
+                  </div>
+                  <div className="flex gap-2">
+                    <dt className="w-20 shrink-0 text-neutral-500">Sources</dt>
+                    <dd className="text-neutral-300">{config?.sources?.join(", ") || "—"}</dd>
+                  </div>
+                </dl>
+              </section>
+            </div>
+
+            <div className="mt-4">
+              <section className="rounded-2xl border border-neutral-800 bg-neutral-900/30">
+                <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-2.5">
+                  <div>
+                    <h2 className="text-sm font-semibold text-neutral-200">Scoring &amp; filters</h2>
+                    <p className="text-xs text-neutral-500">
+                      How Qualify scores jobs — and the must-have hard filter.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setQualifierOpen(true)}
+                    className="rounded-lg border border-neutral-700 px-2.5 py-1 text-xs text-neutral-200 transition hover:border-neutral-500"
+                  >
+                    Edit
+                  </button>
+                </div>
+                <dl className="grid gap-1.5 px-4 py-3 text-xs sm:grid-cols-2">
+                  <div className="flex gap-2">
+                    <dt className="w-24 shrink-0 text-neutral-500">Must-have</dt>
+                    <dd className="text-neutral-300">{qualifierConfig?.must_have?.join(", ") || "—"}</dd>
+                  </div>
+                  <div className="flex gap-2">
+                    <dt className="w-24 shrink-0 text-neutral-500">Threshold</dt>
+                    <dd className="text-neutral-300">{qualifierConfig?.threshold ?? "—"}</dd>
+                  </div>
+                  <div className="flex gap-2">
+                    <dt className="w-24 shrink-0 text-neutral-500">Nice-to-have</dt>
+                    <dd className="truncate text-neutral-300">
+                      {qualifierConfig?.nice_to_have?.join(", ") || "—"}
+                    </dd>
+                  </div>
+                  <div className="flex gap-2">
+                    <dt className="w-24 shrink-0 text-neutral-500">Weights</dt>
+                    <dd className="text-neutral-300">
+                      {qualifierConfig?.weights_json
+                        ? `skills ${qualifierConfig.weights_json.skills ?? "—"} · exp ${
+                            qualifierConfig.weights_json.experience ?? "—"
+                          } · roles ${qualifierConfig.weights_json.roles_match ?? "—"}`
+                        : "—"}
+                    </dd>
+                  </div>
+                </dl>
+              </section>
+            </div>
+
+            {error && (
+              <p className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-300">
+                {error}
+              </p>
+            )}
+
+            <div className="mb-3 mt-6 flex flex-wrap items-center gap-3">
+              <div className="flex rounded-lg border border-neutral-800 p-0.5 text-sm">
+                {(["all", "qualified", "disqualified", "unscored"] as Decision[]).map((d) => (
+                  <button
+                    key={d}
+                    onClick={() => setDecision(d)}
+                    className={`rounded-md px-3 py-1 capitalize transition ${
+                      decision === d ? "bg-neutral-800 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"
+                    }`}
+                  >
+                    {d}
+                  </button>
+                ))}
+              </div>
+              <select
+                value={source}
+                onChange={(e) => setSource(e.target.value)}
+                className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-1.5 text-sm text-neutral-300 outline-none focus:border-neutral-600"
+              >
+                <option value="all">All sources</option>
+                {sources.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+              {employmentTypes.length > 0 && (
+                <select
+                  value={employment}
+                  onChange={(e) => setEmployment(e.target.value)}
+                  className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-1.5 text-sm capitalize text-neutral-300 outline-none focus:border-neutral-600"
+                >
+                  <option value="all">All types</option>
+                  {employmentTypes.map((t) => (
+                    <option key={t} value={t}>
+                      {t.replace(/_/g, " ")}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {seniorities.length > 0 && (
+                <select
+                  value={seniority}
+                  onChange={(e) => setSeniority(e.target.value)}
+                  className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-1.5 text-sm capitalize text-neutral-300 outline-none focus:border-neutral-600"
+                >
+                  <option value="all">All levels</option>
+                  {seniorities.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <span className="ml-auto text-sm text-neutral-500">
+                {visible.length} of {jobs.length} jobs · {qualifiedCount} qualified · sorted by score
+              </span>
+            </div>
+
+            <JobsTable
+              jobs={visible}
+              selected={selected}
+              onToggleSelect={toggleSelect}
+              cvDraftByJobId={cvDraftByJobId}
+            />
+          </Screen>
+
+          <Screen active={view === "suggest"}>
+            <Suggestions
+              selectedJobIds={[...selected]}
+              qualifiedCount={qualifiedCount}
+              jobTitleById={(id) => jobs.find((j) => j.id === id)?.title ?? "Job"}
+            />
+          </Screen>
+
+          {/* Phase 6.6 — its own screen now, but the same place in the flow: propose
+              aggressively, vouch item by item, then tailor. */}
+          <Screen active={view === "gap-close"}>
+            <GapCloseProposals
+              selectedJobIds={[...selected]}
+              jobTitleById={(id) => jobs.find((j) => j.id === id)?.title ?? "Job"}
+            />
+          </Screen>
+
+          <Screen active={view === "tailored"}>
+            <TailoredCVs
+              selectedJobIds={[...selected]}
+              // The whole job: the edit and review panels show its description beside the CV.
+              jobById={(id) => jobs.find((j) => j.id === id) ?? null}
+              refreshSignal={cvRefresh}
+            />
+          </Screen>
+
+          {settings.open && (
+            <SearchSettings
+              key={settings.seq}
+              mode={settings.mode}
+              initial={config}
+              proposal={settings.proposal}
+              onClose={() => setSettings((s) => ({ ...s, open: false, proposal: null }))}
+              onSaved={onConfigSaved}
+            />
+          )}
+
+          {qualifierOpen && (
+            <QualifierSettings
+              initial={qualifierConfig}
+              onClose={() => setQualifierOpen(false)}
+              onSaved={(cfg) => {
+                setQualifierConfig(cfg);
+                setQualifierOpen(false);
+                loadJobs(); // a "Save & re-qualify" rescored the pool → refresh the table
+              }}
+            />
+          )}
         </div>
-        <select
-          value={source}
-          onChange={(e) => setSource(e.target.value)}
-          className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-1.5 text-sm text-neutral-300 outline-none focus:border-neutral-600"
-        >
-          <option value="all">All sources</option>
-          {sources.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-        {employmentTypes.length > 0 && (
-          <select
-            value={employment}
-            onChange={(e) => setEmployment(e.target.value)}
-            className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-1.5 text-sm capitalize text-neutral-300 outline-none focus:border-neutral-600"
-          >
-            <option value="all">All types</option>
-            {employmentTypes.map((t) => (
-              <option key={t} value={t}>
-                {t.replace(/_/g, " ")}
-              </option>
-            ))}
-          </select>
-        )}
-        {seniorities.length > 0 && (
-          <select
-            value={seniority}
-            onChange={(e) => setSeniority(e.target.value)}
-            className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-1.5 text-sm capitalize text-neutral-300 outline-none focus:border-neutral-600"
-          >
-            <option value="all">All levels</option>
-            {seniorities.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-        )}
-        <span className="ml-auto text-sm text-neutral-500">
-          {visible.length} of {jobs.length} jobs · {qualifiedCount} qualified · sorted by score
-        </span>
-      </div>
-
-      <JobsTable
-        jobs={visible}
-        selected={selected}
-        onToggleSelect={toggleSelect}
-        cvDraftByJobId={cvDraftByJobId}
-      />
-
-      <Suggestions
-        selectedJobIds={[...selected]}
-        qualifiedCount={qualifiedCount}
-        jobTitleById={(id) => jobs.find((j) => j.id === id)?.title ?? "Job"}
-      />
-
-      {/* Phase 6.6 — sits between the honest suggestions and Tailored CVs because that is
-          its place in the flow: propose aggressively, vouch item by item, then tailor. */}
-      <GapCloseProposals
-        selectedJobIds={[...selected]}
-        jobTitleById={(id) => jobs.find((j) => j.id === id)?.title ?? "Job"}
-      />
-
-      <TailoredCVs
-        selectedJobIds={[...selected]}
-        jobTitleById={(id) => jobs.find((j) => j.id === id)?.title ?? "Job"}
-        refreshSignal={cvRefresh}
-      />
-
-      {settings.open && (
-        <SearchSettings
-          key={settings.seq}
-          mode={settings.mode}
-          initial={config}
-          proposal={settings.proposal}
-          onClose={() => setSettings((s) => ({ ...s, open: false, proposal: null }))}
-          onSaved={onConfigSaved}
-        />
-      )}
-
-      {qualifierOpen && (
-        <QualifierSettings
-          initial={qualifierConfig}
-          onClose={() => setQualifierOpen(false)}
-          onSaved={(cfg) => {
-            setQualifierConfig(cfg);
-            setQualifierOpen(false);
-            loadJobs(); // a "Save & re-qualify" rescored the pool → refresh the table
-          }}
-        />
-      )}
-    </main>
+      </main>
+    </div>
   );
 }

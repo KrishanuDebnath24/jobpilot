@@ -209,7 +209,8 @@ class ConciergeExecutor:
             from .cv_align_runner import run_align
             s = await run_align(self.user_id, list(args.get("job_ids") or []))
             return {"status": "done", "tailored": s.get("tailored", 0),
-                    "aligned": s.get("aligned", 0), "errors": s.get("errors") or {}}, False
+                    "judged": s.get("judged", False), "aligned": s.get("aligned", 0),
+                    "errors": s.get("errors") or {}}, False
         if name == "prepare_cvs":
             from .cv_prepare_runner import run_prepare_cvs
             s = await run_prepare_cvs(self.user_id, list(args.get("job_ids") or []))
@@ -441,9 +442,12 @@ def _confirm_reply(tool: str, result: dict) -> str:
             return f"Done — created a new resume version ({result.get('applied_rewrites', 0)} rewrite(s); added: {added})."
         return f"Nothing applied — {result.get('reason', 'no accepted suggestions')}."
     if tool == "tailor_cvs":
-        return (f"Done — tailored {result.get('tailored', 0)} CV(s) "
-                f"({result.get('aligned', 0)} cleared the alignment bar).{err_tail} Review them, then "
-                f"say 'approve and export' to attach.")
+        # Only claim a bar was cleared when a Critic actually applied one (cv_max_rounds > 0);
+        # in single-pass mode there is no score to report and saying "0 cleared" would lie.
+        bar = (f" ({result.get('aligned', 0)} cleared the alignment bar)"
+               if result.get("judged") else "")
+        return (f"Done — tailored {result.get('tailored', 0)} CV(s){bar}.{err_tail} Review them, "
+                f"then say 'approve and export' to attach.")
     if tool == "prepare_cvs":
         return (f"Done — prepared {result.get('tailored', 0)} CV(s), exported {result.get('exported', 0)}, "
                 f"re-qualified {result.get('requalified', 0)}.{err_tail} They're attached to the job rows — "

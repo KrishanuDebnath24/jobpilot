@@ -325,6 +325,25 @@ async def create_resume_version(
     return resume
 
 
+async def delete_assembled_resumes(
+    session: AsyncSession, user_id: uuid.UUID, keep_id: uuid.UUID | None = None
+) -> int:
+    """Delete the user's *assembled* resume versions, optionally keeping one.
+
+    Uploaded resumes are never touched — the filter is ``source == 'assembled'``, so the
+    working resume (and every file the user actually gave us) is out of reach of this call
+    by construction, not by the caller remembering to be careful. Assembled rows carry a
+    synthetic ``file_ref`` and no stored file, so there is nothing to clean up in storage.
+    Scoped to ``user_id``. Returns rows deleted."""
+    stmt = delete(models.Resume).where(
+        models.Resume.user_id == user_id, models.Resume.source == "assembled"
+    )
+    if keep_id is not None:
+        stmt = stmt.where(models.Resume.id != keep_id)
+    res = await session.execute(stmt)
+    return int(res.rowcount or 0)
+
+
 async def list_resumes(session: AsyncSession, user_id: uuid.UUID) -> list[dict]:
     """All of a user's resume versions (upload + assembled), newest first."""
     res = await session.execute(

@@ -6,6 +6,7 @@ import {
   applyResume,
   approveGate,
   downloadResumeVersion,
+  downloadResumeVersionFile,
   getGates,
   getPipelineStatus,
   getResumeVersions,
@@ -87,7 +88,13 @@ export default function Gates({ onChanged }: { onChanged?: () => void }) {
     setMsg("Applying…");
     try {
       const r = await applyResume([...confirmSkills], "Tailored from accepted suggestions");
-      setMsg(r.applied ? "New resume version created." : "Nothing to apply.");
+      setMsg(
+        r.applied
+          ? `New résumé version created — download it as PDF/DOCX below.${
+              r.pruned_versions ? ` Replaced ${r.pruned_versions} earlier suggested version(s).` : ""
+            }`
+          : "Nothing to apply.",
+      );
       setPreview(null);
       setConfirmSkills(new Set());
       await refresh();
@@ -194,26 +201,58 @@ export default function Gates({ onChanged }: { onChanged?: () => void }) {
             >
               Apply as new version
             </button>
+            <p className="text-xs text-neutral-500">
+              Saves a new résumé version you can download as PDF/DOCX below, and replaces any
+              earlier suggested version (each one is rebuilt from your upload, so the older one
+              holds nothing this doesn’t). Your uploaded résumé is never touched or removed —
+              re-upload the file to attach it to your jobs.
+            </p>
           </div>
         )}
 
         {versions.length > 0 && (
-          <ul className="mt-3 space-y-1">
-            {versions.map((v) => (
-              <li key={v.id} className="flex items-center gap-2 text-xs text-neutral-400">
-                <span className="rounded border border-neutral-800 px-1.5 py-0.5 font-mono">
-                  {v.source}
-                </span>
-                <span className="truncate">{v.label ?? "resume"}</span>
-                <button
-                  onClick={() => downloadResumeVersion(v.id)}
-                  className="ml-auto text-emerald-300 hover:underline"
-                >
-                  download
-                </button>
-              </li>
-            ))}
-          </ul>
+          <>
+            {/* The one thing that surprises everyone: an applied version is an EXPORT, not a
+                promotion. Scoring and tailoring keep using the last file you uploaded, so the
+                round trip has to be spelled out where the download buttons are. */}
+            <p className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/[0.06] px-3 py-2 text-xs leading-relaxed text-sky-200/90">
+              <span className="font-medium">To attach a suggested résumé to your jobs:</span>{" "}
+              download it as PDF or DOCX below, then re-upload that file in{" "}
+              <span className="text-neutral-200">“Your CV / résumé”</span>. Uploading is what
+              makes a résumé the working one — the CV attached to every job stays the last file
+              you uploaded manually until you do. Downloading alone changes nothing.
+            </p>
+            <ul className="mt-2 space-y-1">
+              {versions.map((v) => (
+                <li key={v.id} className="flex flex-wrap items-center gap-2 text-xs text-neutral-400">
+                  <span className="rounded border border-neutral-800 px-1.5 py-0.5 font-mono">
+                    {v.source}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate">{v.label ?? "resume"}</span>
+                  {/* Same A4/ATS layout as the tailored CVs — rendered by the same Tailor. */}
+                  <button
+                    onClick={() => downloadResumeVersionFile(v.id, "pdf")}
+                    className="rounded-md border border-neutral-700 px-2 py-0.5 text-neutral-200 hover:border-neutral-500"
+                  >
+                    PDF
+                  </button>
+                  <button
+                    onClick={() => downloadResumeVersionFile(v.id, "docx")}
+                    className="rounded-md border border-neutral-700 px-2 py-0.5 text-neutral-200 hover:border-neutral-500"
+                  >
+                    DOCX
+                  </button>
+                  <button
+                    onClick={() => downloadResumeVersion(v.id)}
+                    className="text-neutral-500 hover:underline"
+                    title="Plain-text rendering"
+                  >
+                    .txt
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </>
         )}
       </div>
     </section>

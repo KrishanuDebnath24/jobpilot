@@ -242,7 +242,7 @@ export const prepareApply = (confirmed_skills?: string[]) =>
     body: JSON.stringify({ confirmed_skills: confirmed_skills ?? null }),
   });
 export const applyResume = (confirmed_skills?: string[], label?: string) =>
-  request<{ applied: boolean; resume?: { id: string } }>("/resume/apply", {
+  request<{ applied: boolean; resume?: { id: string }; pruned_versions?: number }>("/resume/apply", {
     method: "POST",
     body: JSON.stringify({ confirmed_skills: confirmed_skills ?? null, label: label ?? null }),
   });
@@ -261,6 +261,24 @@ export async function downloadResumeVersion(id: string): Promise<void> {
   const a = document.createElement("a");
   a.href = url;
   a.download = `resume-${id.slice(0, 8)}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/** Download a resume version rendered as PDF/DOCX — the same Tailor layout the tailored
+ *  CVs use, so an assembled version matches them exactly. Downloading does NOT attach it
+ *  to jobs: re-upload the file to make it the working resume. */
+export async function downloadResumeVersionFile(id: string, fmt: "pdf" | "docx"): Promise<void> {
+  const res = await fetch(`${API_URL}/resume/versions/${id}/download/${fmt}`, {
+    headers: { Authorization: `Bearer ${getToken() ?? ""}` },
+    cache: "no-store",
+  });
+  if (!res.ok) throw new ApiError(res.status, `download failed (${res.status})`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `resume-${id.slice(0, 8)}.${fmt}`;
   a.click();
   URL.revokeObjectURL(url);
 }

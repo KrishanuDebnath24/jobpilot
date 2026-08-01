@@ -107,11 +107,32 @@ def _attested_trail(attested: dict | None) -> dict:
 
 
 def _notes(result: dict, cv: dict, base: dict, settings, attested: dict | None = None) -> dict:
-    """The review trail persisted on the draft — how aligned, over how many rounds, and
-    what was added or rejected along the way."""
-    critique = result.get("critique") or {}
-    return {
+    """The review trail persisted on the draft — what was added or rejected, and (when a
+    Critic ran) how aligned over how many rounds.
+
+    In single-pass mode the critic keys are **omitted, not zeroed**. The UI hides each of
+    them on ``!= null``, so omitting yields "not scored"; writing 0 would render a green-
+    to-amber "best 0%" badge and claim the draft scored bottom marks, which is a different
+    and false statement. The deterministic gate's findings are recorded either way — that
+    is the part that is still evidence, not opinion.
+    """
+    notes = {
         **_attested_trail(attested),
+        "added_skills": cv_fields.added_skills(cv, base),
+        "skill_evidence": cv.get("skill_evidence") or [],
+        "change_notes": cv.get("change_notes") or [],
+    }
+    findings = result.get("code_findings") or {}
+    if findings:
+        notes["code_violations"] = findings.get("violations") or []
+        notes["code_rejected_skills"] = findings.get("rejected_skills") or []
+
+    if not result.get("rounds"):
+        notes["single_pass"] = True
+        return notes
+
+    critique = result.get("critique") or {}
+    notes.update({
         "aligned": result["aligned"],
         "alignment_score": result["alignment_score"],
         "threshold": settings.cv_alignment_threshold,
@@ -123,15 +144,18 @@ def _notes(result: dict, cv: dict, base: dict, settings, attested: dict | None =
         "matched_requirements": critique.get("matched_requirements") or [],
         "unaddressed_requirements": critique.get("unaddressed_requirements") or [],
         "integrity_flags": critique.get("integrity_flags") or [],
-        "added_skills": cv_fields.added_skills(cv, base),
-        "skill_evidence": cv.get("skill_evidence") or [],
-        "change_notes": cv.get("change_notes") or [],
-    }
+    })
+    return notes
 
 
 async def run_align(user_id: uuid.UUID, job_ids: list[str], *, use_attested: bool = True) -> dict:
-    """Align a CV to each selected job via the Rewriter⇄Critic loop. Persists one
-    ``draft_ready`` cv_draft per job. Per-job error isolation; bounded selection.
+    """Align a CV to each selected job. Persists one ``draft_ready`` cv_draft per job.
+    Per-job error isolation; bounded selection.
+
+    By default this is a **single Rewriter pass per job** (``cv_max_rounds = 0``) — the
+    deterministic gate still runs, but no Critic grades the result, so ``aligned`` is not
+    measured and the summary reports ``judged: False``. Setting ``cv_max_rounds`` above 0
+    restores the Rewriter⇄Critic loop.
 
     ``use_attested`` decides whether accepted Gap-closer proposals are folded in. It is on
     for the **Tailor only** path (and the Concierge's tailor tool), which is the reviewed,
@@ -197,21 +221,27 @@ async def run_align(user_id: uuid.UUID, job_ids: list[str], *, use_attested: boo
             errors[jid] = f"{type(exc).__name__}: {exc}"
             logger.warning("cv_align.job id=%s FAILED: %s", jid, exc)
 
+    judged = settings.cv_max_rounds > 0
     summary = {
         "tailored": len(drafts),          # drafts produced (the historical key)
-        "aligned": fully_aligned,         # how many cleared the alignment bar
+        # Whether a Critic graded anything at all. Without it `aligned: 0` would read as
+        # "none cleared the bar" when the truth is "no bar was applied" — so every caller
+        # that phrases `aligned` to a human must check this first.
+        "judged": judged,
+        "aligned": fully_aligned,         # how many cleared the alignment bar (0 if unjudged)
         "attested": attested_jobs,        # of those, how many carried user-attested content
         "drafts": drafts,
         "errors": errors,
         "llm_usage": {
             "rewriter_model": settings.rewriter_model,
-            "critic_model": settings.cv_critic_model,
+            "critic_model": settings.cv_critic_model if judged else None,
             "rounds_total": rounds_total,
             "estimated_cost_usd": round(cost, 6),
         },
     }
-    logger.info("cv_align.summary drafts=%d aligned=%d attested=%d rounds=%d errors=%d cost=%.6f",
-                len(drafts), fully_aligned, attested_jobs, rounds_total, len(errors), cost)
+    logger.info("cv_align.summary drafts=%d judged=%s aligned=%d attested=%d rounds=%d "
+                "errors=%d cost=%.6f", len(drafts), judged, fully_aligned, attested_jobs,
+                rounds_total, len(errors), cost)
     return summary
 
 

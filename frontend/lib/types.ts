@@ -338,7 +338,15 @@ export type CvAlignmentRound = {
   added_skills?: string[];
 };
 export type CvCriticNotes = {
-  // New alignment-loop shape (jobpilot_core.cv_loop + cv_align_runner._notes).
+  // Single-pass drafts (settings.cv_max_rounds = 0, the default): one Rewriter call and the
+  // deterministic gate, no Critic. Every critic-derived field below is then ABSENT rather
+  // than zero — the draft is unscored, not badly scored — so each render site must keep
+  // gating on `!= null` and must not substitute a 0 default.
+  single_pass?: boolean;
+  // What the deterministic gate caught, recorded in both modes (it is evidence, not opinion).
+  code_violations?: string[];
+  code_rejected_skills?: string[];
+  // Alignment-loop shape (jobpilot_core.cv_loop + cv_align_runner._notes).
   aligned?: boolean;
   alignment_score?: number;
   threshold?: number;

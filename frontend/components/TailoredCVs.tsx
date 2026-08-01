@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CvDraft, CvReport } from "@/lib/types";
+import type { CvDraft, CvReport, Job, TailoredContent } from "@/lib/types";
 import {
   approveCvDrafts,
   downloadCv,
@@ -53,14 +53,18 @@ const OP_STAGES: Record<OpKind, Stage[]> = {
   // Mirrors run_prepare_cvs: analyze → align → approve → export → re-qualify.
   prepare: [
     { key: "analyze", label: "analyze", unobservable: true },
-    { key: "align", label: "align (Rewriter⇄Critic)" },
+    // Wording stays mode-neutral: whether a Critic grades the draft is a server-side
+    // setting (cv_max_rounds), which the client can't see before the run.
+    { key: "align", label: "rewrite + honesty gate" },
     { key: "approve", label: "approve", unobservable: true },
     { key: "export", label: "export PDF/DOCX" },
     { key: "requalify", label: "re-qualify" },
   ],
   tailor: [
     { key: "analyze", label: "analyze if needed", unobservable: true },
-    { key: "align", label: "align (Rewriter⇄Critic)" },
+    // Wording stays mode-neutral: whether a Critic grades the draft is a server-side
+    // setting (cv_max_rounds), which the client can't see before the run.
+    { key: "align", label: "rewrite + honesty gate" },
     { key: "draft", label: "draft ready to review" },
   ],
   export: [{ key: "export", label: "render PDF/DOCX" }],
@@ -128,19 +132,23 @@ function opComplete(op: Op): boolean {
   return observable.length > 0 && observable.every((k) => op.done.includes(k));
 }
 
-/** Aligned-CV review + approval (Phase 6.5). A Rewriter⇄Critic loop reshapes each selected
- *  job's CV until the Critic scores it aligned (or the round cap is hit) → review the
- *  alignment score, rounds, integrity flags and the evidence behind each added skill (locked
- *  facts untouched) → approve (select-all / mass / particulars) → Tailor to Irish-format
- *  PDF/DOCX → re-qualify → see the improvement deltas. Only user-selected jobs run; rejected
+/** Aligned-CV review + approval (Phase 6.5). The Rewriter reshapes each selected job's CV
+ *  and the deterministic gate re-imposes locked facts and drops un-evidenced skills → review
+ *  the evidence behind each added skill (and, when the Critic loop is enabled server-side,
+ *  the alignment score, rounds and integrity flags) → approve (select-all / mass /
+ *  particulars) → Tailor to Irish-format PDF/DOCX → re-qualify → see the improvement deltas.
+ *  Single-pass drafts arrive UNSCORED, which puts the judgement on this review step — the
+ *  reason it exists. Only user-selected jobs run; rejected
  *  drafts never export. */
 export default function TailoredCVs({
   selectedJobIds,
-  jobTitleById,
+  jobById,
   refreshSignal = 0,
 }: {
   selectedJobIds: string[];
-  jobTitleById: (id: string) => string;
+  /** The whole job, not just its title — the review and edit panels show its description
+   *  beside the CV. Dashboard already holds these, so this adds no request. */
+  jobById: (id: string) => Job | null;
   refreshSignal?: number;
 }) {
   const [drafts, setDrafts] = useState<CvDraft[]>([]);
@@ -310,7 +318,7 @@ export default function TailoredCVs({
           title={
             selectedJobIds.length === 0
               ? "Select jobs in the table first"
-              : "Analyze → align (Rewriter⇄Critic) → export, then the CV attaches to each job row"
+              : "Analyze → rewrite + honesty gate → export, then the CV attaches to each job row"
           }
         >
           {op?.kind === "prepare"
@@ -522,7 +530,8 @@ export default function TailoredCVs({
           <DraftCard
             key={d.id}
             draft={d}
-            title={jobTitleById(d.job_id)}
+            job={jobById(d.job_id)}
+            title={jobById(d.job_id)?.title ?? "Job"}
             picked={picked.has(d.id)}
             isNew={fresh.has(d.id)}
             open={openId === d.id}
@@ -548,6 +557,100 @@ export default function TailoredCVs({
         ))}
       </div>
     </section>
+  );
+}
+
+/** The job posting, beside whatever you're doing to the CV.
+ *
+ *  Editing a CV toward a job you can't see means holding the posting in your head or in
+ *  another tab. The description is already loaded on the dashboard (`/dashboard/jobs`
+ *  returns it in full), so showing it here costs no request — it is purely a matter of
+ *  putting it where the decision is made.
+ *
+ *  Rendered as TEXT, never as HTML: this string is scraped from third-party sites, so
+ *  `dangerouslySetInnerHTML` would hand arbitrary markup from a job board a script tag in
+ *  the user's session. `whitespace-pre-wrap` keeps the posting's own line breaks. */
+function JobPanel({ job, className = "" }: { job: Job | null; className?: string }) {
+  const body = job?.description?.trim();
+  // Scout records whether it got the whole posting or only a listing snippet. If the text
+  // is partial, say so and link out — otherwise a short description reads as a short job.
+  const partial = job?.description_completeness && job.description_completeness !== "full";
+
+  return (
+    <div className={`rounded-md border border-neutral-800 bg-neutral-950/60 p-2 ${className}`}>
+      <div className="mb-1 flex flex-wrap items-center gap-1.5">
+        <p className="font-medium text-neutral-300">Job description</p>
+        {partial && (
+          <span
+            className="rounded border border-amber-500/30 px-1 py-0.5 text-[10px] text-amber-300"
+            title="Scout captured only part of this posting — open the original for the full text."
+          >
+            {job?.description_completeness}
+          </span>
+        )}
+        {job?.url && (
+          <a
+            href={job.url}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="ml-auto text-[11px] text-sky-300 hover:text-sky-200"
+          >
+            open posting ↗
+          </a>
+        )}
+      </div>
+      {job?.company && (
+        <p className="mb-1 text-neutral-500">
+          {job.company}
+          {job.location ? ` · ${job.location}` : ""}
+        </p>
+      )}
+      {body ? (
+        <div className="max-h-[28rem] overflow-y-auto whitespace-pre-wrap break-words text-neutral-300">
+          {body}
+        </div>
+      ) : (
+        <p className="py-4 text-center text-neutral-500">
+          No description stored for this job{job?.url ? " — open the posting above." : "."}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** The CV as it currently stands, read-only — what "compare against the posting" needs.
+ *  The review panel used to show only the profile line and the change notes, which is
+ *  enough to audit an edit but not enough to judge a fit. */
+function CvPreview({ content, className = "" }: { content: TailoredContent; className?: string }) {
+  const roles = content?.experience ?? [];
+  return (
+    <div className={`rounded-md border border-neutral-800 bg-neutral-950/60 p-2 ${className}`}>
+      <p className="mb-1 font-medium text-neutral-300">Your tailored CV</p>
+      <div className="max-h-[28rem] space-y-2 overflow-y-auto">
+        {content?.summary && <p className="text-neutral-300">{content.summary}</p>}
+        {(content?.skills ?? []).length > 0 && (
+          <p className="text-neutral-400">
+            <span className="text-neutral-500">Skills: </span>
+            {(content?.skills ?? []).join(" · ")}
+          </p>
+        )}
+        {roles.map((role, i) => (
+          <div key={i}>
+            <p className="text-neutral-300">
+              {role.title} @ {role.company}{" "}
+              <span className="text-neutral-600">({role.dates})</span>
+            </p>
+            <ul className="mt-0.5 space-y-0.5 pl-3">
+              {(role.bullets ?? []).map((b, bi) => (
+                <li key={bi} className="text-neutral-400">
+                  • {b}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -733,6 +836,7 @@ function DraftEditor({
 
 function DraftCard({
   draft,
+  job,
   title,
   picked,
   isNew = false,
@@ -747,6 +851,9 @@ function DraftCard({
   busy,
 }: {
   draft: CvDraft;
+  /** The posting this CV targets, shown beside the editor and the review. Null if the job
+   *  has since been deleted from the pool — the panels then say so rather than breaking. */
+  job: Job | null;
   title: string;
   picked: boolean;
   isNew?: boolean;
@@ -817,6 +924,18 @@ function DraftCard({
             }
           >
             {aligned ? "aligned" : "best"} {Math.round(alignScore * 100)}%
+          </span>
+        )}
+        {alignScore == null && notes?.single_pass && (
+          <span
+            className="rounded-md border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400"
+            title={
+              "Written in a single pass, with no Critic grading it. Locked facts and skill " +
+              "evidence were still enforced in code — but nothing scored how well this CV " +
+              "matches the job, so that judgement is yours."
+            }
+          >
+            not scored
           </span>
         )}
         {roundsRun != null && (
@@ -899,7 +1018,24 @@ function DraftCard({
 
       {open && (
         <div className="mt-2 space-y-3 border-t border-neutral-800 pt-2 text-xs">
-          {editing && <DraftEditor draft={draft} onChanged={onChanged} />}
+          {/* Editing: the controls on the left, the posting you're editing toward on the
+              right. The posting sticks while the editor scrolls — the editor is the taller
+              column, and a requirement you have to scroll away from is one you'll forget. */}
+          {editing && (
+            <div className="grid gap-3 lg:grid-cols-2">
+              <DraftEditor draft={draft} onChanged={onChanged} />
+              <JobPanel job={job} className="lg:sticky lg:top-2 lg:self-start" />
+            </div>
+          )}
+
+          {/* Not editing: the posting beside the CV as it now stands, so the review step is
+              an actual comparison rather than a recollection. */}
+          {!editing && (
+            <div className="grid gap-3 lg:grid-cols-2">
+              <JobPanel job={job} />
+              <CvPreview content={content} />
+            </div>
+          )}
 
           {/* What the candidate vouched for themselves — kept visually distinct from the
               evidence-backed block below, because the warrant is different in kind. */}
@@ -1011,13 +1147,8 @@ function DraftCard({
             </p>
           )}
 
-          {/* Tailored profile + traceable change notes */}
-          {content?.summary && (
-            <p className="text-neutral-300">
-              <span className="text-neutral-500">Profile: </span>
-              {content.summary}
-            </p>
-          )}
+          {/* Traceable change notes. The profile line that used to sit here is now in the
+              CvPreview panel above, with the rest of the CV it belongs to. */}
           {changes.length > 0 && (
             <div>
               <p className="mb-0.5 text-neutral-500">What changed and why (grounded in your real experience):</p>

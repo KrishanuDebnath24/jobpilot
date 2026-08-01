@@ -1,23 +1,36 @@
-"""The CV alignment loop — Rewriter ⇄ Critic until the CV matches the job.
+"""CV alignment — one Rewriter pass, optionally graded by a Critic until it matches.
 
-Two agents alternate on one selected job:
+``settings.cv_max_rounds`` picks the mode, and it is the dominant cost lever on this path.
+
+**Single pass (``cv_max_rounds = 0``, the default).** One Rewriter call, the code gate,
+done — 1 LLM call per job:
+
+    rewrite ──► [code gate] ──► draft
+
+**Loop (``cv_max_rounds = n > 0``).** A Critic grades each draft and the Rewriter revises
+until it clears the bar or the cap is hit — 1 + 2n calls per job worst case:
 
     rewrite ──► [code gate] ──► critique ──► aligned? ──► done
        ▲                                        │
        └──────────── issues + score ◄───────────┘
 
-Each round is made honest **before** it is judged: ``cv_fields.finalize`` re-imposes the
-locked snapshot verbatim, drops any added skill whose citation isn't verifiable in the
-real resume, and carries every original header through. So the Critic always grades a
-draft that has already passed the deterministic gate, and its findings are handed to the
-Critic as ``code_findings`` — which frees it to spend its judgement on the question code
-can't answer: does the cited evidence actually *support* the claim?
+**The code gate runs in both modes, and it is what makes the output honest.**
+``cv_fields.finalize`` re-imposes the locked snapshot verbatim, drops any added skill
+whose citation isn't verifiable in the real resume, and carries every original header
+through. Dropping the Critic costs *judgement*, not *integrity*: no un-evidenced skill can
+survive either way. What the Critic adds is the question code cannot answer — does the
+cited evidence actually *support* the claim? — which in single-pass mode falls to the
+human at the review-and-approve step.
 
-Exit is :func:`cv_critic.is_aligned` — verdict ``aligned``, score ≥
-``cv_alignment_threshold``, and no integrity flag. Failing that, the loop rewrites and
-tries again up to ``cv_max_rounds`` (a spend guard). If it never clears the bar it
-returns the **best-scoring** round rather than the last one, marked ``aligned: False``,
-so a draft that peaked in round 2 isn't lost to a weaker round 3.
+In loop mode, exit is :func:`cv_critic.is_aligned` — verdict ``aligned``, score ≥
+``cv_alignment_threshold``, and no integrity flag. If it never clears the bar it returns
+the **best-scoring** round rather than the last one, marked ``aligned: False``, so a draft
+that peaked in round 2 isn't lost to a weaker round 3.
+
+Single pass returns ``aligned``/``alignment_score`` as **None** — no verdict was sought,
+which is not the same as failing one — plus ``code_findings`` for what the gate caught
+(in loop mode that detail lives per-round in ``rounds``). The caller must not coerce those
+Nones to 0/False: an unscored draft is not a zero-scoring draft.
 
 No I/O and no persistence here — the caller owns both.
 """
@@ -44,6 +57,15 @@ def _code_findings(draft: dict, base_resume: dict, snapshot: dict) -> dict:
         "rejected_skills": [r["skill"] for r in evidence["rejected"]],
         "rejected_detail": evidence["rejected"],
     }
+
+
+def _gate(draft: dict, base_resume: dict, snapshot: dict, attested: dict | None) -> dict:
+    """The deterministic honesty gate: locked facts re-imposed, un-evidenced added skills
+    dropped. On the attested path the candidate's confirmed items are forced in first —
+    they carry no résumé citation, so without their ``user_confirmed`` basis the evidence
+    check inside ``finalize`` would delete them."""
+    return (cv_edit.apply_attested(draft, base_resume, snapshot, attested) if attested
+            else cv_fields.finalize(draft, base_resume, snapshot))
 
 
 def _round_record(n: int, critique: dict, findings: dict, cv: dict, base_resume: dict) -> dict:
@@ -79,11 +101,12 @@ async def align_cv(
     citation, so a Critic that hasn't been told would flag it as overclaiming, and
     :func:`cv_critic.is_aligned` treats any integrity flag as a hard block.
 
-    Returns ``{cv, aligned, alignment_score, rounds, critique, usage}`` where ``cv`` has
-    already been through the code gate and is safe to persist and export.
+    Returns ``{cv, aligned, alignment_score, rounds, critique, code_findings, usage}``
+    where ``cv`` has already been through the code gate and is safe to persist and export.
+    With ``cv_max_rounds = 0`` no Critic runs and ``aligned``/``alignment_score`` are None.
     """
     threshold = settings.cv_alignment_threshold
-    max_rounds = max(1, settings.cv_max_rounds)
+    max_rounds = max(0, settings.cv_max_rounds)   # 0 = single pass, no Critic
     rw_usage = LLMUsage(model=settings.rewriter_model)
     cr_usage = LLMUsage(model=settings.cv_critic_model)
 
@@ -98,17 +121,32 @@ async def align_cv(
         raise RuntimeError("rewriter returned no CV")
     draft = res.data
 
+    if max_rounds == 0:
+        # Single pass. The gate still runs, so the draft is as honest as any looped one —
+        # it is simply ungraded, and goes to the human unscored rather than to the Critic.
+        findings = _code_findings(draft, base_resume, snapshot)
+        cv = _gate(draft, base_resume, snapshot, attested)
+        logger.info("cv_loop.single_pass job=%s rejected_skills=%d violations=%d",
+                    job.get("id"), len(findings["rejected_skills"]), len(findings["violations"]))
+        return {
+            "cv": cv,
+            # None, not False: nothing judged this draft, which is not the same as judging
+            # it unaligned. Callers render "not scored", never "scored 0".
+            "aligned": None,
+            "alignment_score": None,
+            "rounds": [],
+            "critique": {},
+            "code_findings": findings,
+            "usage": {"rewriter": rw_usage, "critic": cr_usage},
+        }
+
     rounds: list[dict] = []
-    best: tuple[float, dict, dict] | None = None  # (score, cv, critique)
+    best: tuple[float, dict, dict, dict] | None = None  # (score, cv, critique, findings)
 
     for n in range(1, max_rounds + 1):
         # Make the draft honest BEFORE it is judged, and tell the Critic what code caught.
-        # On the attested path, force the candidate's confirmed items in first: an attested
-        # skill carries no résumé citation, so without its user_confirmed basis the evidence
-        # gate inside finalize would delete it and the Critic would grade the wrong document.
         findings = _code_findings(draft, base_resume, snapshot)
-        cv = (cv_edit.apply_attested(draft, base_resume, snapshot, attested) if attested
-              else cv_fields.finalize(draft, base_resume, snapshot))
+        cv = _gate(draft, base_resume, snapshot, attested)
 
         cres = await critique_cv(base_resume, snapshot, job, analysis, cv, settings,
                                  code_findings=findings, attested=attested)
@@ -119,7 +157,7 @@ async def align_cv(
         raw_score = critique.get("alignment_score")
         score = float(raw_score) if isinstance(raw_score, (int, float)) else 0.0
         if best is None or score > best[0]:
-            best = (score, cv, critique)
+            best = (score, cv, critique, findings)
 
         if is_aligned(critique, threshold):
             logger.info("cv_loop.aligned job=%s round=%d score=%.2f", job.get("id"), n, score)
@@ -129,6 +167,7 @@ async def align_cv(
                 "alignment_score": score,
                 "rounds": rounds,
                 "critique": critique,
+                "code_findings": findings,
                 "usage": {"rewriter": rw_usage, "critic": cr_usage},
             }
 
@@ -144,7 +183,8 @@ async def align_cv(
             break
         draft = res.data
 
-    score, cv, critique = best  # at least one round always ran
+    # At least one round always ran here: max_rounds >= 1 on this path (0 returned above).
+    score, cv, critique, findings = best
     logger.info("cv_loop.exhausted job=%s rounds=%d best_score=%.2f (below %.2f)",
                 job.get("id"), len(rounds), score, threshold)
     return {
@@ -153,5 +193,6 @@ async def align_cv(
         "alignment_score": score,
         "rounds": rounds,
         "critique": critique,
+        "code_findings": findings,   # the winning round's, not the last round's
         "usage": {"rewriter": rw_usage, "critic": cr_usage},
     }
