@@ -55,18 +55,18 @@ function ChipInput({
 
   return (
     <label className="block space-y-1.5">
-      <span className="text-xs font-medium text-neutral-400">{label}</span>
-      <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-neutral-700 bg-neutral-950 px-2 py-1.5">
+      <span className="text-xs font-semibold text-slate-700">{label}</span>
+      <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2 py-1.5 transition focus-within:border-indigo-400 focus-within:ring-2 focus-within:ring-indigo-100">
         {values.map((v) => (
           <span
             key={v}
-            className="inline-flex items-center gap-1 rounded-md border border-neutral-700 bg-neutral-800 px-1.5 py-0.5 text-xs text-neutral-200"
+            className="inline-flex items-center gap-1 rounded-md border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-xs font-medium text-indigo-700"
           >
             {v}
             <button
               type="button"
               onClick={() => onChange(values.filter((x) => x !== v))}
-              className="text-neutral-500 hover:text-neutral-200"
+              className="text-indigo-400 transition hover:text-indigo-700"
               aria-label={`Remove ${v}`}
             >
               ×
@@ -86,7 +86,7 @@ function ChipInput({
           }}
           onBlur={() => draft && commit(draft)}
           placeholder={values.length ? "" : placeholder}
-          className="min-w-[8rem] flex-1 bg-transparent px-1 py-0.5 text-sm text-neutral-100 outline-none placeholder:text-neutral-600"
+          className="min-w-[8rem] flex-1 bg-transparent px-1 py-0.5 text-sm text-slate-900 outline-none placeholder:text-slate-400"
         />
       </div>
     </label>
@@ -179,21 +179,21 @@ export default function SearchSettings({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 px-4 py-10 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/25 px-4 py-10 backdrop-blur-sm"
       onClick={() => !blocking && onClose()}
     >
       <div
-        className="w-full max-w-lg space-y-4 rounded-2xl border border-neutral-800 bg-neutral-900 p-6 shadow-2xl"
+        className="screen-enter w-full max-w-lg space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl shadow-slate-900/10"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="space-y-1">
-          <h2 className="text-lg font-semibold tracking-tight text-neutral-100">{title}</h2>
-          <p className="text-sm text-neutral-500">{subtitle}</p>
+          <h2 className="text-lg font-semibold tracking-tight text-slate-900">{title}</h2>
+          <p className="text-sm leading-relaxed text-slate-500">{subtitle}</p>
         </div>
 
         {mode === "onboarding" && (
           <div className="space-y-2">
-            <p className="text-xs text-neutral-500">
+            <p className="text-xs leading-relaxed text-slate-500">
               Attach your CV and we&apos;ll propose market-standard roles from it — then edit
               and save below. Or just fill the fields in yourself.
             </p>
@@ -203,29 +203,32 @@ export default function SearchSettings({
           </div>
         )}
 
-        <div className="rounded-lg border border-neutral-800 bg-neutral-950/50 p-3">
+        <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3">
           <div className="flex flex-wrap items-end gap-2">
             <label className="min-w-[12rem] flex-1 space-y-1.5">
-              <span className="text-xs font-medium text-neutral-400">
-                Target hint <span className="text-neutral-600">(optional)</span>
+              <span className="text-xs font-semibold text-slate-700">
+                Target hint <span className="font-normal text-slate-400">(optional)</span>
               </span>
               <input
                 value={hint}
                 onChange={(e) => setHint(e.target.value)}
                 placeholder="e.g. senior backend / platform roles"
-                className="w-full rounded-lg border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 outline-none focus:border-neutral-500"
+                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
               />
             </label>
             <button
               type="button"
               onClick={suggest}
               disabled={suggesting || busy}
-              className="rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-sm text-sky-200 transition hover:bg-sky-500/20 disabled:opacity-40"
+              className="flex items-center gap-2 rounded-lg bg-sky-600 px-3.5 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-sky-700 active:scale-[0.98] disabled:opacity-40 disabled:hover:bg-sky-600"
             >
+              {suggesting && (
+                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+              )}
               {suggesting ? "Studying résumé…" : "Suggest from résumé"}
             </button>
           </div>
-          {notes && <p className="mt-2 text-xs text-neutral-400">{notes}</p>}
+          {notes && <p className="mt-2 text-xs text-slate-600">{notes}</p>}
         </div>
 
         <ChipInput label="Roles" values={roles} onChange={setRoles} placeholder="Software Engineer, Backend Engineer…" />
@@ -239,7 +242,7 @@ export default function SearchSettings({
         />
 
         <div className="space-y-1.5">
-          <span className="text-xs font-medium text-neutral-400">Sources</span>
+          <span className="text-xs font-semibold text-slate-700">Sources</span>
           <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
             {SOURCES.map((s) => {
               const on = sources.includes(s.id);
@@ -248,8 +251,8 @@ export default function SearchSettings({
                   key={s.id}
                   className={`flex cursor-pointer items-start gap-2 rounded-lg border px-2 py-1.5 text-xs transition ${
                     on
-                      ? "border-sky-500/40 bg-sky-500/10 text-sky-100"
-                      : "border-neutral-800 bg-neutral-950/40 text-neutral-400 hover:border-neutral-700"
+                      ? "border-sky-300 bg-sky-50 text-sky-900 shadow-card"
+                      : "border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:bg-slate-50"
                   }`}
                 >
                   <input
@@ -260,11 +263,11 @@ export default function SearchSettings({
                         e.target.checked ? [...prev, s.id] : prev.filter((x) => x !== s.id),
                       )
                     }
-                    className="mt-0.5 accent-sky-500"
+                    className="mt-0.5 h-3.5 w-3.5 cursor-pointer rounded border-slate-300 accent-sky-600"
                   />
                   <span>
-                    <span className="block font-medium">{s.label}</span>
-                    <span className="text-neutral-500">{s.note}</span>
+                    <span className="block font-semibold">{s.label}</span>
+                    <span className={on ? "text-sky-700/70" : "text-slate-400"}>{s.note}</span>
                   </span>
                 </label>
               );
@@ -272,7 +275,11 @@ export default function SearchSettings({
           </div>
         </div>
 
-        {error && <p className="text-sm text-rose-300">{error}</p>}
+        {error && (
+          <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+            {error}
+          </p>
+        )}
 
         <div className="flex items-center justify-end gap-3 pt-1">
           {!blocking && (
@@ -280,7 +287,7 @@ export default function SearchSettings({
               type="button"
               onClick={onClose}
               disabled={busy}
-              className="rounded-lg border border-neutral-800 px-3 py-2 text-sm text-neutral-300 transition hover:border-neutral-600 disabled:opacity-50"
+              className="rounded-lg px-3 py-2 text-sm font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-900 disabled:opacity-50"
             >
               Cancel
             </button>
@@ -290,8 +297,11 @@ export default function SearchSettings({
             onClick={save}
             disabled={busy || roles.length === 0}
             title={roles.length === 0 ? "Add at least one role" : undefined}
-            className="rounded-lg bg-neutral-100 px-4 py-2 text-sm font-medium text-neutral-900 transition hover:bg-white disabled:opacity-40"
+            className="flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-slate-800 active:scale-[0.98] disabled:opacity-40"
           >
+            {busy && (
+              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+            )}
             {busy ? "Saving…" : mode === "onboarding" ? "Save & continue" : "Save"}
           </button>
         </div>

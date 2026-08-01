@@ -5,14 +5,14 @@ export function pct(score: number | null | undefined): string {
 }
 
 function scoreTone(score: number | null | undefined): string {
-  if (score == null) return "text-neutral-500";
-  if (score >= 0.7) return "text-emerald-400";
-  if (score >= 0.5) return "text-amber-400";
-  return "text-rose-400";
+  if (score == null) return "text-slate-400";
+  if (score >= 0.7) return "text-emerald-600";
+  if (score >= 0.5) return "text-amber-600";
+  return "text-rose-600";
 }
 
 function scoreBar(score: number | null | undefined): string {
-  if (score == null) return "bg-neutral-700";
+  if (score == null) return "bg-slate-300";
   if (score >= 0.7) return "bg-emerald-500";
   if (score >= 0.5) return "bg-amber-500";
   return "bg-rose-500";
@@ -22,12 +22,12 @@ function scoreBar(score: number | null | undefined): string {
 export function ScoreCell({ score }: { score: number | null | undefined }) {
   return (
     <div className="flex items-center gap-2">
-      <span className={`w-7 text-right font-mono text-sm tabular-nums ${scoreTone(score)}`}>
+      <span className={`w-7 text-right font-mono text-sm font-semibold tabular-nums ${scoreTone(score)}`}>
         {pct(score)}
       </span>
-      <span className="h-1.5 w-16 overflow-hidden rounded-full bg-neutral-800">
+      <span className="h-1.5 w-16 overflow-hidden rounded-full bg-slate-200">
         <span
-          className={`block h-full rounded-full ${scoreBar(score)}`}
+          className={`block h-full rounded-full transition-all duration-500 ${scoreBar(score)}`}
           style={{ width: `${score == null ? 0 : Math.round(score * 100)}%` }}
         />
       </span>
@@ -37,10 +37,10 @@ export function ScoreCell({ score }: { score: number | null | undefined }) {
 
 export function DecisionPill({ decision }: { decision: string | null | undefined }) {
   const map: Record<string, string> = {
-    qualified: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
-    disqualified: "border-rose-500/30 bg-rose-500/10 text-rose-300",
+    qualified: "border-emerald-200 bg-emerald-50 text-emerald-700",
+    disqualified: "border-rose-200 bg-rose-50 text-rose-700",
   };
-  const cls = decision ? map[decision] : "border-neutral-700 bg-neutral-800/50 text-neutral-400";
+  const cls = decision ? map[decision] : "border-slate-200 bg-slate-50 text-slate-500";
   return (
     <span className={`inline-flex rounded-full border px-2 py-0.5 text-xs font-medium ${cls}`}>
       {decision ?? "unscored"}
@@ -54,7 +54,7 @@ export function LimitedDataBadge() {
   return (
     <span
       title="Scored on a short snippet — the source text was limited, so treat this score as low-confidence."
-      className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-300"
+      className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700"
     >
       limited data
     </span>
@@ -64,8 +64,8 @@ export function LimitedDataBadge() {
 export function Chip({ label, tone }: { label: string; tone: "match" | "miss" }) {
   const cls =
     tone === "match"
-      ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-300"
-      : "border-amber-500/25 bg-amber-500/10 text-amber-300";
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+      : "border-amber-200 bg-amber-50 text-amber-700";
   return <span className={`rounded-md border px-1.5 py-0.5 text-xs ${cls}`}>{label}</span>;
 }
 
@@ -82,13 +82,13 @@ export function DimensionBars({ dims }: { dims: DimensionScores }) {
         const v = dims[k];
         return (
           <div key={k} className="space-y-1">
-            <div className="flex justify-between text-xs text-neutral-400">
+            <div className="flex justify-between text-xs text-slate-500">
               <span>{DIM_LABELS[k]}</span>
-              <span className="font-mono tabular-nums text-neutral-300">{pct(v)}</span>
+              <span className="font-mono tabular-nums text-slate-700">{pct(v)}</span>
             </div>
-            <span className="block h-1 overflow-hidden rounded-full bg-neutral-800">
+            <span className="block h-1 overflow-hidden rounded-full bg-slate-200">
               <span
-                className={`block h-full rounded-full ${scoreBar(v)}`}
+                className={`block h-full rounded-full transition-all duration-500 ${scoreBar(v)}`}
                 style={{ width: `${v == null ? 0 : Math.round(v * 100)}%` }}
               />
             </span>
@@ -110,7 +110,7 @@ export function timeAgo(iso: string | null): string {
 
 export function SourceBadge({ connector }: { connector: string | null }) {
   return (
-    <span className="rounded-md border border-neutral-700 bg-neutral-800/40 px-1.5 py-0.5 font-mono text-xs text-neutral-400">
+    <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-xs text-slate-500">
       {connector ?? "—"}
     </span>
   );

@@ -36,6 +36,47 @@ type Decision = "all" | "qualified" | "disqualified" | "unscored";
  * not tear any of them down. */
 type View = "dashboard" | "suggest" | "gap-close" | "tailored";
 
+/** Inline glyphs — no icon dependency, and they inherit currentColor. */
+function NavIcon({ name, className = "" }: { name: View; className?: string }) {
+  const common = {
+    className: `h-4 w-4 shrink-0 ${className}`,
+    viewBox: "0 0 20 20",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.6,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+  };
+  if (name === "dashboard")
+    return (
+      <svg {...common}>
+        <rect x="2.5" y="2.5" width="6" height="6" rx="1.5" />
+        <rect x="11.5" y="2.5" width="6" height="6" rx="1.5" />
+        <rect x="2.5" y="11.5" width="6" height="6" rx="1.5" />
+        <rect x="11.5" y="11.5" width="6" height="6" rx="1.5" />
+      </svg>
+    );
+  if (name === "suggest")
+    return (
+      <svg {...common}>
+        <path d="M10 2.5 11.9 7l4.6.4-3.5 3 1 4.5L10 12.5 5.9 15l1-4.5-3.4-3L8.1 7Z" />
+      </svg>
+    );
+  if (name === "gap-close")
+    return (
+      <svg {...common}>
+        <path d="M7.5 10a2.5 2.5 0 0 1 2.5-2.5h3.5a2.5 2.5 0 0 1 0 5H12" />
+        <path d="M12.5 10a2.5 2.5 0 0 1-2.5 2.5H6.5a2.5 2.5 0 0 1 0-5H8" />
+      </svg>
+    );
+  return (
+    <svg {...common}>
+      <path d="M11.5 2.5H6a1.5 1.5 0 0 0-1.5 1.5v12A1.5 1.5 0 0 0 6 17.5h8a1.5 1.5 0 0 0 1.5-1.5V6.5Z" />
+      <path d="M11.5 2.5v4h4M7.5 11h5M7.5 14h3" />
+    </svg>
+  );
+}
+
 const NAV: { key: View; label: string; hint: string }[] = [
   { key: "dashboard", label: "Dashboard", hint: "Pipeline, agents, jobs" },
   { key: "suggest", label: "Analyze & suggest", hint: "Grounded, no fabrication" },
@@ -45,7 +86,27 @@ const NAV: { key: View; label: string; hint: string }[] = [
 
 /** Shown only when its screen is active; the others stay mounted and keep running. */
 function Screen({ active, children }: { active: boolean; children: React.ReactNode }) {
-  return <div className={active ? undefined : "hidden"}>{children}</div>;
+  return <div className={active ? "screen-enter" : "hidden"}>{children}</div>;
+}
+
+/** A labelled metric in the header strip — the pool at a glance, on every screen. */
+function Stat({
+  label,
+  value,
+  tone = "slate",
+}: {
+  label: string;
+  value: React.ReactNode;
+  tone?: "slate" | "emerald" | "indigo";
+}) {
+  const valueTone =
+    tone === "emerald" ? "text-emerald-600" : tone === "indigo" ? "text-indigo-600" : "text-slate-900";
+  return (
+    <div className="min-w-[5.5rem] rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-card">
+      <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</p>
+      <p className={`mt-0.5 text-lg font-semibold tabular-nums leading-none ${valueTone}`}>{value}</p>
+    </div>
+  );
 }
 
 export default function Dashboard() {
@@ -256,20 +317,37 @@ export default function Dashboard() {
   const qualifiedCount = jobs.filter((j) => j.qualification?.decision === "qualified").length;
 
   if (authed === null) {
-    return <main className="grid min-h-screen place-items-center text-neutral-500">Loading…</main>;
+    return (
+      <main className="grid min-h-screen place-items-center bg-white">
+        <div className="flex flex-col items-center gap-3">
+          <span className="h-8 w-8 animate-spin rounded-full border-2 border-slate-200 border-t-indigo-600" />
+          <p className="text-sm text-slate-500">Loading…</p>
+        </div>
+      </main>
+    );
   }
   if (!authed) return <LoginGate onAuthed={onAuthed} />;
 
   const current = NAV.find((n) => n.key === view) ?? NAV[0];
+  const selectClass =
+    "cursor-pointer rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700 shadow-card transition hover:border-slate-300 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-100";
 
   return (
-    <div className="min-h-screen md:flex">
-      <aside className="shrink-0 border-b border-neutral-800 bg-neutral-900/20 md:sticky md:top-0 md:h-screen md:w-60 md:border-b-0 md:border-r">
-        <div className="px-4 pb-2 pt-5">
-          <h1 className="text-base font-semibold tracking-tight">JobPilot</h1>
-          <p className="text-xs text-neutral-500">scout → qualify → tailor</p>
+    <div className="min-h-screen bg-slate-50/60 md:flex">
+      <aside className="z-20 shrink-0 border-b border-slate-200 bg-white md:sticky md:top-0 md:flex md:h-screen md:w-64 md:flex-col md:border-b-0 md:border-r">
+        <div className="flex items-center gap-2.5 px-5 pb-3 pt-5">
+          <span className="grid h-8 w-8 place-items-center rounded-lg bg-gradient-to-br from-indigo-500 to-indigo-600 text-sm font-bold text-white shadow-sm">
+            JP
+          </span>
+          <div>
+            <h1 className="text-[15px] font-semibold leading-tight tracking-tight text-slate-900">
+              JobPilot
+            </h1>
+            <p className="text-[11px] leading-tight text-slate-400">scout → qualify → tailor</p>
+          </div>
         </div>
-        <nav className="flex gap-1 overflow-x-auto px-2 pb-3 md:flex-col md:overflow-visible">
+
+        <nav className="flex gap-1 overflow-x-auto px-3 pb-3 md:flex-col md:overflow-visible">
           {NAV.map((n) => {
             const active = view === n.key;
             return (
@@ -277,60 +355,102 @@ export default function Dashboard() {
                 key={n.key}
                 onClick={() => setView(n.key)}
                 aria-current={active ? "page" : undefined}
-                className={`shrink-0 rounded-lg px-3 py-2 text-left transition ${
+                className={`group relative flex shrink-0 items-start gap-2.5 rounded-lg px-3 py-2 text-left transition-colors duration-150 ${
                   active
-                    ? "bg-neutral-800 text-neutral-100"
-                    : "text-neutral-400 hover:bg-neutral-900 hover:text-neutral-200"
+                    ? "bg-indigo-50 text-indigo-700"
+                    : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
                 }`}
               >
-                <span className="block whitespace-nowrap text-sm">{n.label}</span>
-                <span
-                  className={`hidden text-xs md:block ${
-                    active ? "text-neutral-400" : "text-neutral-600"
-                  }`}
-                >
-                  {n.hint}
+                {active && (
+                  <span className="absolute inset-y-1.5 left-0 hidden w-0.5 rounded-full bg-indigo-600 md:block" />
+                )}
+                <NavIcon
+                  name={n.key}
+                  className={`mt-0.5 ${active ? "text-indigo-600" : "text-slate-400 group-hover:text-slate-500"}`}
+                />
+                <span className="min-w-0">
+                  <span className="block whitespace-nowrap text-sm font-medium">{n.label}</span>
+                  <span
+                    className={`hidden text-xs md:block ${active ? "text-indigo-500/80" : "text-slate-400"}`}
+                  >
+                    {n.hint}
+                  </span>
                 </span>
               </button>
             );
           })}
         </nav>
+
         {/* Jobs are selected on the Dashboard screen but both other screens act on that
             selection — so keep the count visible wherever you are. */}
-        <p className="hidden px-4 text-xs text-neutral-600 md:block">
-          {selected.size} job{selected.size === 1 ? "" : "s"} selected
-          {selected.size === 0 && " — pick some on Dashboard"}
-        </p>
+        <div className="mt-auto hidden px-3 pb-4 md:block">
+          <div
+            className={`rounded-lg border px-3 py-2 transition-colors ${
+              selected.size > 0
+                ? "border-indigo-200 bg-indigo-50/70"
+                : "border-dashed border-slate-200 bg-slate-50/50"
+            }`}
+          >
+            <p
+              className={`text-xs font-medium ${
+                selected.size > 0 ? "text-indigo-700" : "text-slate-500"
+              }`}
+            >
+              {selected.size} job{selected.size === 1 ? "" : "s"} selected
+            </p>
+            {selected.size === 0 ? (
+              <p className="mt-0.5 text-[11px] leading-snug text-slate-400">
+                Pick some on Dashboard to act on them.
+              </p>
+            ) : (
+              <button
+                onClick={() => setSelected(new Set())}
+                className="mt-1 text-[11px] font-medium text-indigo-600 underline-offset-2 hover:underline"
+              >
+                Clear selection
+              </button>
+            )}
+          </div>
+        </div>
       </aside>
 
-      <main className="min-w-0 flex-1 px-6 py-8">
-        <div className="mx-auto max-w-6xl">
-          <header className="mb-6 flex items-center gap-3">
-            <div>
-              <h1 className="text-xl font-semibold tracking-tight">{current.label}</h1>
-              <p className="text-sm text-neutral-500">
+      <main className="min-w-0 flex-1">
+        <header className="sticky top-0 z-10 border-b border-slate-200 bg-white/85 backdrop-blur-md">
+          <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3 px-6 py-4">
+            <div className="min-w-0">
+              <h1 className="text-xl font-semibold tracking-tight text-slate-900">{current.label}</h1>
+              <p className="text-sm text-slate-500">
                 {view === "dashboard"
                   ? "Autonomous scout → qualify — fit guidance, not a verdict."
                   : current.hint}
               </p>
             </div>
-            <div className="ml-auto flex items-center gap-3 text-sm text-neutral-400">
-              <span>{email}</span>
+            <div className="ml-auto flex items-center gap-3">
+              <span className="hidden text-sm text-slate-500 sm:inline">{email}</span>
               <button
                 onClick={logout}
-                className="rounded-lg border border-neutral-800 px-2.5 py-1 text-xs transition hover:border-neutral-600"
+                className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 shadow-card transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900 active:scale-[0.98]"
               >
                 Sign out
               </button>
             </div>
-          </header>
+          </div>
+        </header>
 
+        <div className="mx-auto max-w-6xl px-6 py-6">
           <Screen active={view === "dashboard"}>
+            <div className="mb-5 flex flex-wrap gap-2.5">
+              <Stat label="Jobs" value={jobs.length} />
+              <Stat label="Qualified" value={qualifiedCount} tone="emerald" />
+              <Stat label="Selected" value={selected.size} tone="indigo" />
+              <Stat label="Tailored CVs" value={Object.keys(cvDraftByJobId).length} />
+            </div>
+
             <PipelineLive onJobsChanged={loadJobs} />
 
             {/* The two conversational agents, side by side: the Concierge acts; Ask answers
                 (read-only). Distinct privilege sets — Ask has no action tools. */}
-            <div className="mt-6 grid gap-4 lg:grid-cols-2">
+            <div className="mt-5 grid gap-4 lg:grid-cols-2">
               <Chat onChanged={onConciergeChanged} selectedJobIds={[...selected]} />
               <Ask />
             </div>
@@ -340,74 +460,74 @@ export default function Dashboard() {
             </div>
             <div className="mt-4 grid gap-4 lg:grid-cols-2">
               <ResumeUpload onUploaded={onResumeUploaded} />
-              <section className="rounded-2xl border border-neutral-800 bg-neutral-900/30">
-                <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-2.5">
+              <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-card transition-shadow hover:shadow-card-hover">
+                <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
                   <div>
-                    <h2 className="text-sm font-semibold text-neutral-200">Search settings</h2>
-                    <p className="text-xs text-neutral-500">What Scout searches for.</p>
+                    <h2 className="text-sm font-semibold text-slate-900">Search settings</h2>
+                    <p className="text-xs text-slate-500">What Scout searches for.</p>
                   </div>
                   <button
                     onClick={() => openSettings("edit")}
-                    className="rounded-lg border border-neutral-700 px-2.5 py-1 text-xs text-neutral-200 transition hover:border-neutral-500"
+                    className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 active:scale-[0.98]"
                   >
                     Edit
                   </button>
                 </div>
-                <dl className="space-y-1.5 px-4 py-3 text-xs">
+                <dl className="space-y-2 px-4 py-3 text-xs">
                   <div className="flex gap-2">
-                    <dt className="w-20 shrink-0 text-neutral-500">Roles</dt>
-                    <dd className="text-neutral-300">{config?.roles?.join(", ") || "—"}</dd>
+                    <dt className="w-20 shrink-0 font-medium text-slate-400">Roles</dt>
+                    <dd className="text-slate-700">{config?.roles?.join(", ") || "—"}</dd>
                   </div>
                   <div className="flex gap-2">
-                    <dt className="w-20 shrink-0 text-neutral-500">Locations</dt>
-                    <dd className="text-neutral-300">{config?.locations?.join(", ") || "—"}</dd>
+                    <dt className="w-20 shrink-0 font-medium text-slate-400">Locations</dt>
+                    <dd className="text-slate-700">{config?.locations?.join(", ") || "—"}</dd>
                   </div>
                   <div className="flex gap-2">
-                    <dt className="w-20 shrink-0 text-neutral-500">Keywords</dt>
-                    <dd className="text-neutral-300">{config?.keywords?.join(", ") || "—"}</dd>
+                    <dt className="w-20 shrink-0 font-medium text-slate-400">Keywords</dt>
+                    <dd className="text-slate-700">{config?.keywords?.join(", ") || "—"}</dd>
                   </div>
                   <div className="flex gap-2">
-                    <dt className="w-20 shrink-0 text-neutral-500">Sources</dt>
-                    <dd className="text-neutral-300">{config?.sources?.join(", ") || "—"}</dd>
+                    <dt className="w-20 shrink-0 font-medium text-slate-400">Sources</dt>
+                    <dd className="text-slate-700">{config?.sources?.join(", ") || "—"}</dd>
                   </div>
                 </dl>
               </section>
             </div>
 
             <div className="mt-4">
-              <section className="rounded-2xl border border-neutral-800 bg-neutral-900/30">
-                <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-2.5">
+              <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-card transition-shadow hover:shadow-card-hover">
+                <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
                   <div>
-                    <h2 className="text-sm font-semibold text-neutral-200">Scoring &amp; filters</h2>
-                    <p className="text-xs text-neutral-500">
+                    <h2 className="text-sm font-semibold text-slate-900">Scoring &amp; filters</h2>
+                    <p className="text-xs text-slate-500">
                       How Qualify scores jobs — and the must-have hard filter.
                     </p>
                   </div>
                   <button
                     onClick={() => setQualifierOpen(true)}
-                    className="rounded-lg border border-neutral-700 px-2.5 py-1 text-xs text-neutral-200 transition hover:border-neutral-500"
+                    className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 active:scale-[0.98]"
                   >
                     Edit
                   </button>
                 </div>
-                <dl className="grid gap-1.5 px-4 py-3 text-xs sm:grid-cols-2">
+                <dl className="grid gap-2 px-4 py-3 text-xs sm:grid-cols-2">
                   <div className="flex gap-2">
-                    <dt className="w-24 shrink-0 text-neutral-500">Must-have</dt>
-                    <dd className="text-neutral-300">{qualifierConfig?.must_have?.join(", ") || "—"}</dd>
+                    <dt className="w-24 shrink-0 font-medium text-slate-400">Must-have</dt>
+                    <dd className="text-slate-700">{qualifierConfig?.must_have?.join(", ") || "—"}</dd>
                   </div>
                   <div className="flex gap-2">
-                    <dt className="w-24 shrink-0 text-neutral-500">Threshold</dt>
-                    <dd className="text-neutral-300">{qualifierConfig?.threshold ?? "—"}</dd>
+                    <dt className="w-24 shrink-0 font-medium text-slate-400">Threshold</dt>
+                    <dd className="text-slate-700">{qualifierConfig?.threshold ?? "—"}</dd>
                   </div>
                   <div className="flex gap-2">
-                    <dt className="w-24 shrink-0 text-neutral-500">Nice-to-have</dt>
-                    <dd className="truncate text-neutral-300">
+                    <dt className="w-24 shrink-0 font-medium text-slate-400">Nice-to-have</dt>
+                    <dd className="truncate text-slate-700">
                       {qualifierConfig?.nice_to_have?.join(", ") || "—"}
                     </dd>
                   </div>
                   <div className="flex gap-2">
-                    <dt className="w-24 shrink-0 text-neutral-500">Weights</dt>
-                    <dd className="text-neutral-300">
+                    <dt className="w-24 shrink-0 font-medium text-slate-400">Weights</dt>
+                    <dd className="text-slate-700">
                       {qualifierConfig?.weights_json
                         ? `skills ${qualifierConfig.weights_json.skills ?? "—"} · exp ${
                             qualifierConfig.weights_json.experience ?? "—"
@@ -420,19 +540,21 @@ export default function Dashboard() {
             </div>
 
             {error && (
-              <p className="mt-4 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-sm text-rose-300">
+              <p className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
                 {error}
               </p>
             )}
 
             <div className="mb-3 mt-6 flex flex-wrap items-center gap-3">
-              <div className="flex rounded-lg border border-neutral-800 p-0.5 text-sm">
+              <div className="flex rounded-lg border border-slate-200 bg-white p-0.5 text-sm shadow-card">
                 {(["all", "qualified", "disqualified", "unscored"] as Decision[]).map((d) => (
                   <button
                     key={d}
                     onClick={() => setDecision(d)}
-                    className={`rounded-md px-3 py-1 capitalize transition ${
-                      decision === d ? "bg-neutral-800 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"
+                    className={`rounded-md px-3 py-1 font-medium capitalize transition-colors ${
+                      decision === d
+                        ? "bg-slate-900 text-white shadow-sm"
+                        : "text-slate-500 hover:bg-slate-50 hover:text-slate-900"
                     }`}
                   >
                     {d}
@@ -442,7 +564,7 @@ export default function Dashboard() {
               <select
                 value={source}
                 onChange={(e) => setSource(e.target.value)}
-                className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-1.5 text-sm text-neutral-300 outline-none focus:border-neutral-600"
+                className={selectClass}
               >
                 <option value="all">All sources</option>
                 {sources.map((s) => (
@@ -455,7 +577,7 @@ export default function Dashboard() {
                 <select
                   value={employment}
                   onChange={(e) => setEmployment(e.target.value)}
-                  className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-1.5 text-sm capitalize text-neutral-300 outline-none focus:border-neutral-600"
+                  className={`${selectClass} capitalize`}
                 >
                   <option value="all">All types</option>
                   {employmentTypes.map((t) => (
@@ -469,7 +591,7 @@ export default function Dashboard() {
                 <select
                   value={seniority}
                   onChange={(e) => setSeniority(e.target.value)}
-                  className="rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-1.5 text-sm capitalize text-neutral-300 outline-none focus:border-neutral-600"
+                  className={`${selectClass} capitalize`}
                 >
                   <option value="all">All levels</option>
                   {seniorities.map((s) => (
@@ -479,8 +601,10 @@ export default function Dashboard() {
                   ))}
                 </select>
               )}
-              <span className="ml-auto text-sm text-neutral-500">
-                {visible.length} of {jobs.length} jobs · {qualifiedCount} qualified · sorted by score
+              <span className="ml-auto text-sm text-slate-500">
+                <span className="font-medium text-slate-900">{visible.length}</span> of {jobs.length} jobs ·{" "}
+                <span className="font-medium text-emerald-600">{qualifiedCount}</span> qualified · sorted by
+                score
               </span>
             </div>
 

@@ -3,9 +3,74 @@
 @tailwind utilities;
 
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
 }
 
 body {
-  @apply bg-neutral-950 text-neutral-100 antialiased;
+  @apply bg-white text-slate-900 antialiased;
+}
+
+/* Slim, unobtrusive scrollbars for the inner scroll areas (tables, chat, previews). */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: theme(colors.slate.300) transparent;
+}
+*::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: theme(colors.slate.300);
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: theme(colors.slate.400);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Screen transitions — the four views swap with CSS, so entering one should read as a
+   transition rather than a hard cut. */
+@keyframes screen-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.screen-enter {
+  animation: screen-enter 220ms ease-out;
+}
+
+/* A row/card that has just arrived from a background task, briefly highlighted. */
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.pop-in {
+  animation: pop-in 260ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .screen-enter,
+  .pop-in {
+    animation: none;
+  }
+}
+
+/* Consistent keyboard-focus treatment everywhere without per-element classes. */
+:focus-visible {
+  outline: 2px solid theme(colors.indigo.500);
+  outline-offset: 2px;
+  border-radius: 4px;
 }

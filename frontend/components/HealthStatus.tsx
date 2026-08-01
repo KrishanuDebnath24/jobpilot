@@ -36,28 +36,33 @@ export default function HealthStatus() {
 
   const dotColor =
     state.kind === "ok"
-      ? "bg-green-500"
+      ? "bg-emerald-500"
       : state.kind === "error"
-        ? "bg-red-500"
-        : "bg-yellow-500";
+        ? "bg-rose-500"
+        : "bg-amber-500";
 
   return (
-    <div className="rounded-xl border border-neutral-800 bg-neutral-900/60 p-5">
+    <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-card">
       <div className="flex items-center gap-3">
-        <span className={`h-3 w-3 rounded-full ${dotColor}`} />
-        <span className="font-medium">Backend API</span>
-        <span className="ml-auto text-sm text-neutral-400">{API_URL}</span>
+        <span className="relative flex h-3 w-3">
+          {state.kind === "loading" && (
+            <span className={`absolute inline-flex h-full w-full animate-ping rounded-full ${dotColor} opacity-60`} />
+          )}
+          <span className={`relative inline-flex h-3 w-3 rounded-full ${dotColor}`} />
+        </span>
+        <span className="font-medium text-slate-900">Backend API</span>
+        <span className="ml-auto font-mono text-xs text-slate-400">{API_URL}</span>
       </div>
-      <div className="mt-3 text-sm text-neutral-300">
+      <div className="mt-3 text-sm text-slate-600">
         {state.kind === "loading" && <span>Checking…</span>}
         {state.kind === "ok" && (
           <span>
-            <span className="text-green-400">ok</span> — {state.data.service} v
+            <span className="font-medium text-emerald-600">ok</span> — {state.data.service} v
             {state.data.version}
           </span>
         )}
         {state.kind === "error" && (
-          <span className="text-red-400">
+          <span className="text-rose-600">
             unreachable ({state.message}). Is the backend running on {API_URL}?
           </span>
         )}

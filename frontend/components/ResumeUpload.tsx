@@ -62,10 +62,10 @@ export default function ResumeUpload({ onUploaded }: { onUploaded?: () => void }
   const name = current?.contact?.name;
 
   return (
-    <section className="rounded-2xl border border-neutral-800 bg-neutral-900/30">
-      <div className="border-b border-neutral-800 px-4 py-2.5">
-        <h2 className="text-sm font-semibold text-neutral-200">Your CV / résumé</h2>
-        <p className="text-xs text-neutral-500">
+    <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-card transition-shadow hover:shadow-card-hover">
+      <div className="border-b border-slate-100 px-4 py-3">
+        <h2 className="text-sm font-semibold text-slate-900">Your CV / résumé</h2>
+        <p className="mt-1 text-xs leading-relaxed text-slate-500">
           Attach a PDF or DOCX. It seeds your qualifier and powers tailoring — parsed on
           upload, stored only with your consent.
         </p>
@@ -73,15 +73,17 @@ export default function ResumeUpload({ onUploaded }: { onUploaded?: () => void }
 
       <div className="space-y-3 px-4 py-3">
         {current && (
-          <div className="rounded-lg border border-neutral-800 bg-neutral-900/40 px-3 py-2 text-xs text-neutral-400">
-            <span className="text-neutral-300">On file:</span>{" "}
-            {name ? <span className="text-neutral-200">{name}</span> : "resume"}
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+            <span className="font-semibold">On file:</span>{" "}
+            {name ? <span className="font-medium">{name}</span> : "resume"}
             {skills.length > 0 && (
               <span>
                 {" "}
                 · {skills.length} skill{skills.length === 1 ? "" : "s"}
-                <span className="ml-1 text-neutral-500">({skills.slice(0, 6).join(", ")}
-                {skills.length > 6 ? "…" : ""})</span>
+                <span className="ml-1 text-emerald-700/80">
+                  ({skills.slice(0, 6).join(", ")}
+                  {skills.length > 6 ? "…" : ""})
+                </span>
               </span>
             )}
           </div>
@@ -94,17 +96,17 @@ export default function ResumeUpload({ onUploaded }: { onUploaded?: () => void }
             accept={RESUME_ACCEPT}
             disabled={busy}
             onChange={(e) => pick(e.target.files?.[0] ?? null)}
-            className="block w-full text-sm text-neutral-400 file:mr-3 file:cursor-pointer file:rounded-lg file:border file:border-neutral-700 file:bg-neutral-800 file:px-3 file:py-1.5 file:text-sm file:text-neutral-200 hover:file:border-neutral-600 disabled:opacity-50"
+            className="block w-full cursor-pointer rounded-lg border border-dashed border-slate-300 bg-slate-50/50 p-2 text-sm text-slate-500 transition hover:border-slate-400 file:mr-3 file:cursor-pointer file:rounded-lg file:border-0 file:bg-slate-900 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-white hover:file:bg-slate-800 disabled:opacity-50"
           />
         </div>
 
-        <label className="flex cursor-pointer items-start gap-2 text-xs text-neutral-400">
+        <label className="flex cursor-pointer items-start gap-2 text-xs text-slate-600">
           <input
             type="checkbox"
             checked={consent}
             disabled={busy}
             onChange={(e) => setConsent(e.target.checked)}
-            className="mt-0.5 accent-sky-500"
+            className="mt-0.5 h-3.5 w-3.5 cursor-pointer rounded border-slate-300 accent-sky-600"
           />
           <span>I consent to JobPilot storing and processing this resume to match and tailor for jobs.</span>
         </label>
@@ -113,15 +115,24 @@ export default function ResumeUpload({ onUploaded }: { onUploaded?: () => void }
           <button
             onClick={submit}
             disabled={busy || !file || !consent}
-            className="rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-sm text-sky-200 transition hover:bg-sky-500/20 disabled:opacity-40"
+            className="flex items-center gap-2 rounded-lg bg-sky-600 px-3.5 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-sky-700 active:scale-[0.98] disabled:opacity-40 disabled:hover:bg-sky-600"
           >
+            {busy && (
+              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+            )}
             {busy ? "Uploading…" : current ? "Replace CV" : "Attach CV"}
           </button>
-          {file && !busy && <span className="truncate text-xs text-neutral-500">{file.name}</span>}
-          {justUploaded && !error && <span className="text-xs text-emerald-300">Uploaded ✓</span>}
+          {file && !busy && <span className="truncate text-xs text-slate-500">{file.name}</span>}
+          {justUploaded && !error && (
+            <span className="text-xs font-medium text-emerald-600">Uploaded ✓</span>
+          )}
         </div>
 
-        {error && <p className="text-xs text-rose-300">{error}</p>}
+        {error && (
+          <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+            {error}
+          </p>
+        )}
       </div>
     </section>
   );

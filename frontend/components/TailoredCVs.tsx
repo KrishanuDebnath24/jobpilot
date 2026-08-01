@@ -18,9 +18,9 @@ import {
 import StageStrip, { type Stage } from "./StageStrip";
 
 const STATUS_STYLE: Record<string, string> = {
-  draft_ready: "border-amber-500/30 bg-amber-500/10 text-amber-200",
-  approved: "border-emerald-500/30 bg-emerald-500/10 text-emerald-200",
-  rejected: "border-rose-500/30 bg-rose-500/10 text-rose-200",
+  draft_ready: "border-amber-200 bg-amber-50 text-amber-700",
+  approved: "border-emerald-200 bg-emerald-50 text-emerald-700",
+  rejected: "border-rose-200 bg-rose-50 text-rose-700",
 };
 
 /* ---------------------------------------------------------------------------- *
@@ -296,17 +296,17 @@ export default function TailoredCVs({
   const hiddenCount = drafts.length - visible.length;
 
   return (
-    <section className="mt-6 rounded-2xl border border-neutral-800 bg-neutral-900/30 p-4">
+    <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-card">
       <div className="flex flex-wrap items-center gap-2">
         <div>
-          <h2 className="text-sm font-semibold text-neutral-200">Tailored CVs</h2>
-          <p className="max-w-3xl text-xs text-neutral-500">
+          <h2 className="text-sm font-semibold text-slate-900">Tailored CVs</h2>
+          <p className="mt-1 max-w-3xl text-xs leading-relaxed text-slate-500">
             “Prepare CVs” runs analyze → tailor → export for the selected jobs and attaches an
             honest, job-specific CV to each job row (locked facts never change). The qualifier then
             scores those jobs against their attached CV. It stays strictly résumé-evidenced and
             ignores gap-close proposals. “Tailor only” stops at a reviewable draft and{" "}
-            <span className="text-amber-300/90">does</span> fold in any gap-close item you accepted
-            — edit each draft, then approve and export yourself.
+            <span className="font-medium text-amber-600">does</span> fold in any gap-close item you
+            accepted — edit each draft, then approve and export yourself.
           </p>
         </div>
         <button
@@ -314,13 +314,16 @@ export default function TailoredCVs({
             startOp("prepare", selectedJobIds.length, [], () => prepareCvs(selectedJobIds))
           }
           disabled={!!busy || !!op || selectedJobIds.length === 0}
-          className="ml-auto rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-1.5 text-sm text-sky-200 transition hover:bg-sky-500/20 disabled:opacity-40"
+          className="ml-auto flex items-center gap-2 rounded-lg bg-sky-600 px-3.5 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-sky-700 active:scale-[0.98] disabled:opacity-40 disabled:hover:bg-sky-600"
           title={
             selectedJobIds.length === 0
               ? "Select jobs in the table first"
               : "Analyze → rewrite + honesty gate → export, then the CV attaches to each job row"
           }
         >
+          {op?.kind === "prepare" && (
+            <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+          )}
           {op?.kind === "prepare"
             ? `Preparing ${op.jobCount} …`
             : `Prepare CVs for ${selectedJobIds.length} selected`}
@@ -330,7 +333,7 @@ export default function TailoredCVs({
             startOp("tailor", selectedJobIds.length, [], () => tailorCvs(selectedJobIds))
           }
           disabled={!!busy || !!op || selectedJobIds.length === 0}
-          className="rounded-lg border border-neutral-700 px-3 py-1.5 text-sm text-neutral-200 transition hover:border-neutral-500 disabled:opacity-40"
+          className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 active:scale-[0.98] disabled:opacity-40"
           title={selectedJobIds.length === 0 ? "Select jobs in the table first" : "Tailor only (review, then approve/export yourself)"}
         >
           {op?.kind === "tailor" ? `Tailoring ${op.jobCount} …` : "Tailor only"}
@@ -363,35 +366,35 @@ export default function TailoredCVs({
       )}
 
       {drafts.length > 0 && (
-        <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-neutral-800 pt-3 text-xs">
+        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-2 text-xs">
           <button
             onClick={() => setPicked(new Set(allReadyPicked ? [] : draftReady.map((d) => d.id)))}
-            className="rounded-md border border-neutral-700 px-2 py-1 text-neutral-300 hover:border-neutral-500"
+            className="rounded-md border border-slate-200 bg-white px-2 py-1 font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 active:scale-95"
           >
             {allReadyPicked ? "Clear" : "Select all"}
           </button>
           <button
             onClick={() => run("approve-sel", () => approveCvDrafts(pickedReady))}
             disabled={!!busy || pickedReady.length === 0}
-            className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-emerald-200 disabled:opacity-40"
+            className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 font-medium text-emerald-700 transition hover:border-emerald-300 hover:bg-emerald-100 active:scale-95 disabled:opacity-40"
           >
             Approve selected ({pickedReady.length})
           </button>
           <button
             onClick={() => run("approve-all", () => approveCvDrafts(undefined, true))}
             disabled={!!busy || draftReady.length === 0}
-            className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-emerald-200 disabled:opacity-40"
+            className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 font-medium text-emerald-700 transition hover:border-emerald-300 hover:bg-emerald-100 active:scale-95 disabled:opacity-40"
           >
             Approve all
           </button>
           <button
             onClick={() => run("reject-sel", () => rejectCvDrafts(pickedReady))}
             disabled={!!busy || pickedReady.length === 0}
-            className="rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-rose-200 disabled:opacity-40"
+            className="rounded-md border border-rose-200 bg-rose-50 px-2 py-1 font-medium text-rose-700 transition hover:border-rose-300 hover:bg-rose-100 active:scale-95 disabled:opacity-40"
           >
             Reject selected
           </button>
-          <span className="mx-1 h-4 w-px bg-neutral-700" />
+          <span className="mx-1 h-4 w-px bg-slate-300" />
           {/* Sends only the ids that lack a file, via the draft_ids parameter /cv/export
               already accepts — so the count means "will be rendered", not "is approved". */}
           <button
@@ -401,7 +404,7 @@ export default function TailoredCVs({
               )
             }
             disabled={!!busy || !!op || needsExport.length === 0}
-            className="rounded-md border border-neutral-700 px-2 py-1 text-neutral-200 disabled:opacity-40"
+            className="rounded-md border border-slate-200 bg-white px-2 py-1 font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 active:scale-95 disabled:opacity-40"
             title={
               needsExport.length === 0
                 ? "Every approved draft already has a PDF/DOCX"
@@ -416,7 +419,7 @@ export default function TailoredCVs({
             <button
               onClick={() => startOp("export", 0, approved.map((d) => d.id), () => exportCvs())}
               disabled={!!busy || !!op}
-              className="rounded-md border border-neutral-800 px-2 py-1 text-neutral-500 hover:border-neutral-600 hover:text-neutral-300 disabled:opacity-40"
+              className="rounded-md border border-slate-200 bg-white px-2 py-1 text-slate-500 transition hover:border-slate-300 hover:text-slate-700 active:scale-95 disabled:opacity-40"
               title={`Re-render all ${approved.length} approved draft(s), including the ${alreadyExported} that already have files. No LLM cost — the renderer is deterministic.`}
             >
               Re-render all ({approved.length})
@@ -431,7 +434,7 @@ export default function TailoredCVs({
               )
             }
             disabled={!!busy || !!op || needsScore.length === 0}
-            className="rounded-md border border-neutral-700 px-2 py-1 text-neutral-200 disabled:opacity-40"
+            className="rounded-md border border-slate-200 bg-white px-2 py-1 font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 active:scale-95 disabled:opacity-40"
             title={
               needsScore.length === 0
                 ? "Every approved draft already has an after-score"
@@ -448,7 +451,7 @@ export default function TailoredCVs({
                 startOp("requalify", 0, approved.map((d) => d.id), () => requalifyCvs())
               }
               disabled={!!busy || !!op}
-              className="rounded-md border border-neutral-800 px-2 py-1 text-neutral-500 hover:border-amber-500/40 hover:text-amber-200 disabled:opacity-40"
+              className="rounded-md border border-slate-200 bg-white px-2 py-1 text-slate-500 transition hover:border-amber-300 hover:bg-amber-50 hover:text-amber-700 active:scale-95 disabled:opacity-40"
               title={`Re-score all ${approved.length} approved draft(s), including the ${alreadyScored} already scored. COSTS TOKENS — use after changing your qualifier config (weights, threshold, must-haves), so every draft is judged by the new rules.`}
             >
               Re-score all ({approved.length}) · costs tokens
@@ -457,7 +460,7 @@ export default function TailoredCVs({
           <button
             onClick={() => run("report", async () => setReport(await getCvReport()))}
             disabled={!!busy}
-            className="rounded-md border border-neutral-700 px-2 py-1 text-neutral-200 disabled:opacity-40"
+            className="rounded-md border border-slate-200 bg-white px-2 py-1 font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 active:scale-95 disabled:opacity-40"
           >
             {busy === "report" ? "Loading…" : "Improvement report"}
           </button>
@@ -465,11 +468,11 @@ export default function TailoredCVs({
           {/* Clearing the view. Never a delete — the drafts and their exported files are
               untouched, and a cleared draft reappears by itself if it goes back to
               draft_ready (an edit or a re-tailor), so nothing can hide unfinished work. */}
-          <span className="mx-1 h-4 w-px bg-neutral-700" />
+          <span className="mx-1 h-4 w-px bg-slate-300" />
           <button
             onClick={() => setHidden(new Set(finished.map((d) => d.id)))}
             disabled={finished.length === 0 || hiddenCount === finished.length}
-            className="rounded-md border border-neutral-700 px-2 py-1 text-neutral-400 hover:border-neutral-500 disabled:opacity-40"
+            className="rounded-md border border-slate-200 bg-white px-2 py-1 font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 active:scale-95 disabled:opacity-40"
             title="Hide approved and rejected drafts from this list — view only, nothing is deleted"
           >
             Clear finished from view ({finished.length})
@@ -477,7 +480,7 @@ export default function TailoredCVs({
           {hiddenCount > 0 && (
             <button
               onClick={() => setHidden(new Set())}
-              className="rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-sky-200"
+              className="rounded-md border border-sky-200 bg-sky-50 px-2 py-1 font-medium text-sky-700 transition hover:border-sky-300 hover:bg-sky-100 active:scale-95"
             >
               Show all ({hiddenCount} hidden)
             </button>
@@ -485,23 +488,33 @@ export default function TailoredCVs({
         </div>
       )}
 
-      {error && <p className="mt-2 text-xs text-rose-300">{error}</p>}
+      {error && (
+        <p className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+          {error}
+        </p>
+      )}
 
       {report && (
-        <div className="mt-3 rounded-lg border border-neutral-800 bg-neutral-950/50 p-3 text-sm">
-          <p className="text-neutral-300">
-            {report.improved} of {report.total} scored higher · {report.unchanged} unchanged ·{" "}
-            {report.worse} lower
+        <div className="pop-in mt-3 rounded-lg border border-slate-200 bg-slate-50/70 p-3 text-sm">
+          <p className="font-medium text-slate-900">
+            <span className="text-emerald-700">{report.improved}</span> of {report.total} scored higher ·{" "}
+            {report.unchanged} unchanged · <span className="text-rose-600">{report.worse}</span> lower
           </p>
-          <ul className="mt-1 space-y-0.5 text-xs text-neutral-400">
+          <ul className="mt-1.5 space-y-0.5 text-xs text-slate-600">
             {report.report.map((r) => (
               <li key={r.draft_id}>
                 {r.job_title ?? "Job"}
                 {r.company ? ` · ${r.company}` : ""}:{" "}
-                {r.before_score != null ? Math.round(r.before_score * 100) : "—"} →{" "}
-                {r.after_score != null ? Math.round(r.after_score * 100) : "—"}
+                <span className="font-mono tabular-nums">
+                  {r.before_score != null ? Math.round(r.before_score * 100) : "—"} →{" "}
+                  {r.after_score != null ? Math.round(r.after_score * 100) : "—"}
+                </span>
                 {r.delta != null && (
-                  <span className={r.delta > 0 ? "text-emerald-300" : r.delta < 0 ? "text-rose-300" : ""}>
+                  <span
+                    className={`font-medium ${
+                      r.delta > 0 ? "text-emerald-700" : r.delta < 0 ? "text-rose-600" : ""
+                    }`}
+                  >
                     {" "}
                     ({r.delta > 0 ? "+" : ""}
                     {Math.round(r.delta * 100)})
@@ -515,14 +528,19 @@ export default function TailoredCVs({
 
       <div className="mt-3 space-y-2">
         {drafts.length === 0 && (
-          <p className="py-4 text-center text-sm text-neutral-500">
-            {op
-              ? "Working… the first draft will appear here as soon as it lands."
-              : "No tailored drafts yet. Select jobs in the table, then “Tailor selected”."}
-          </p>
+          <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50/50 py-10 text-center">
+            <p className="text-sm font-medium text-slate-600">
+              {op ? "Working…" : "No tailored drafts yet."}
+            </p>
+            <p className="mt-1 text-xs text-slate-400">
+              {op
+                ? "The first draft will appear here as soon as it lands."
+                : "Select jobs on the Dashboard, then “Prepare CVs” or “Tailor only”."}
+            </p>
+          </div>
         )}
         {drafts.length > 0 && visible.length === 0 && (
-          <p className="py-4 text-center text-sm text-neutral-500">
+          <p className="py-4 text-center text-sm text-slate-500">
             Everything here is finished and cleared from view — “Show all” to bring it back.
           </p>
         )}
@@ -577,12 +595,12 @@ function JobPanel({ job, className = "" }: { job: Job | null; className?: string
   const partial = job?.description_completeness && job.description_completeness !== "full";
 
   return (
-    <div className={`rounded-md border border-neutral-800 bg-neutral-950/60 p-2 ${className}`}>
+    <div className={`rounded-lg border border-slate-200 bg-slate-50/70 p-2.5 ${className}`}>
       <div className="mb-1 flex flex-wrap items-center gap-1.5">
-        <p className="font-medium text-neutral-300">Job description</p>
+        <p className="font-semibold text-slate-700">Job description</p>
         {partial && (
           <span
-            className="rounded border border-amber-500/30 px-1 py-0.5 text-[10px] text-amber-300"
+            className="rounded border border-amber-200 bg-amber-50 px-1 py-0.5 text-[10px] font-medium text-amber-700"
             title="Scout captured only part of this posting — open the original for the full text."
           >
             {job?.description_completeness}
@@ -593,24 +611,24 @@ function JobPanel({ job, className = "" }: { job: Job | null; className?: string
             href={job.url}
             target="_blank"
             rel="noreferrer noopener"
-            className="ml-auto text-[11px] text-sky-300 hover:text-sky-200"
+            className="ml-auto text-[11px] font-medium text-sky-600 hover:text-sky-700 hover:underline"
           >
             open posting ↗
           </a>
         )}
       </div>
       {job?.company && (
-        <p className="mb-1 text-neutral-500">
+        <p className="mb-1 text-slate-500">
           {job.company}
           {job.location ? ` · ${job.location}` : ""}
         </p>
       )}
       {body ? (
-        <div className="max-h-[28rem] overflow-y-auto whitespace-pre-wrap break-words text-neutral-300">
+        <div className="max-h-[28rem] overflow-y-auto whitespace-pre-wrap break-words rounded-md bg-white p-2 leading-relaxed text-slate-700">
           {body}
         </div>
       ) : (
-        <p className="py-4 text-center text-neutral-500">
+        <p className="py-4 text-center text-slate-400">
           No description stored for this job{job?.url ? " — open the posting above." : "."}
         </p>
       )}
@@ -624,25 +642,24 @@ function JobPanel({ job, className = "" }: { job: Job | null; className?: string
 function CvPreview({ content, className = "" }: { content: TailoredContent; className?: string }) {
   const roles = content?.experience ?? [];
   return (
-    <div className={`rounded-md border border-neutral-800 bg-neutral-950/60 p-2 ${className}`}>
-      <p className="mb-1 font-medium text-neutral-300">Your tailored CV</p>
-      <div className="max-h-[28rem] space-y-2 overflow-y-auto">
-        {content?.summary && <p className="text-neutral-300">{content.summary}</p>}
+    <div className={`rounded-lg border border-slate-200 bg-white p-2.5 shadow-card ${className}`}>
+      <p className="mb-1.5 font-semibold text-slate-700">Your tailored CV</p>
+      <div className="max-h-[28rem] space-y-2.5 overflow-y-auto">
+        {content?.summary && <p className="leading-relaxed text-slate-700">{content.summary}</p>}
         {(content?.skills ?? []).length > 0 && (
-          <p className="text-neutral-400">
-            <span className="text-neutral-500">Skills: </span>
+          <p className="text-slate-600">
+            <span className="font-medium text-slate-400">Skills: </span>
             {(content?.skills ?? []).join(" · ")}
           </p>
         )}
         {roles.map((role, i) => (
           <div key={i}>
-            <p className="text-neutral-300">
-              {role.title} @ {role.company}{" "}
-              <span className="text-neutral-600">({role.dates})</span>
+            <p className="font-medium text-slate-800">
+              {role.title} @ {role.company} <span className="font-normal text-slate-400">({role.dates})</span>
             </p>
             <ul className="mt-0.5 space-y-0.5 pl-3">
               {(role.bullets ?? []).map((b, bi) => (
-                <li key={bi} className="text-neutral-400">
+                <li key={bi} className="text-slate-600">
                   • {b}
                 </li>
               ))}
@@ -692,27 +709,27 @@ function DraftEditor({
   };
 
   return (
-    <div className="rounded-md border border-sky-500/20 bg-sky-500/[0.03] p-2">
-      <p className="mb-2 text-neutral-400">
+    <div className="rounded-lg border border-sky-200 bg-sky-50/50 p-2.5">
+      <p className="mb-2.5 leading-relaxed text-slate-600">
         Edit before approving — employer, title, dates and education are locked and can’t be
         changed here. A skill your résumé doesn’t evidence is recorded as{" "}
-        <span className="text-amber-300">user-confirmed</span> (your word, not a citation).
+        <span className="font-medium text-amber-700">user-confirmed</span> (your word, not a citation).
       </p>
 
       {/* --- skills --- */}
-      <p className="mb-1 text-neutral-500">Skills</p>
+      <p className="mb-1 font-semibold uppercase tracking-wide text-slate-400">Skills</p>
       <div className="mb-2 flex flex-wrap gap-1">
         {(content?.skills ?? []).map((s) => (
           <span
             key={s}
-            className="inline-flex items-center gap-1 rounded-md border border-neutral-700 bg-neutral-900 px-1.5 py-0.5 text-neutral-200"
+            className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-1.5 py-0.5 text-slate-700"
           >
             {s}
             <button
               disabled={!!busy}
               title={`Remove ${s}`}
               onClick={() => act("rm-skill", () => editCvDraft(draft.id, { remove_skills: [s] }))}
-              className="text-neutral-500 hover:text-rose-300 disabled:opacity-40"
+              className="text-slate-400 transition hover:text-rose-600 disabled:opacity-40"
             >
               ✕
             </button>
@@ -724,7 +741,7 @@ function DraftEditor({
           value={skill}
           onChange={(e) => setSkill(e.target.value)}
           placeholder="add a skill…"
-          className="min-w-0 flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-neutral-100 outline-none focus:border-sky-500/60"
+          className="min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
         />
         <button
           disabled={!!busy || !skill.trim()}
@@ -735,7 +752,7 @@ function DraftEditor({
               return r;
             })
           }
-          className="rounded-md border border-neutral-700 px-2 py-1 text-neutral-200 disabled:opacity-40"
+          className="rounded-md border border-slate-200 bg-white px-2.5 py-1 font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 active:scale-95 disabled:opacity-40"
         >
           Add
         </button>
@@ -744,19 +761,19 @@ function DraftEditor({
       {/* --- bullets, per role (locked header shown for context only) --- */}
       {roles.map((role, i) => (
         <div key={i} className="mb-3">
-          <p className="mb-1 text-neutral-500">
+          <p className="mb-1 font-medium text-slate-600">
             {role.title} @ {role.company}{" "}
-            <span className="text-neutral-600">({role.dates} — locked)</span>
+            <span className="font-normal text-slate-400">({role.dates} — locked)</span>
           </p>
           <ul className="mb-1 space-y-1">
             {(role.bullets ?? []).map((b, bi) => (
               <li key={bi} className="flex items-start gap-1.5">
-                <span className="min-w-0 flex-1 text-neutral-300">• {b}</span>
+                <span className="min-w-0 flex-1 text-slate-700">• {b}</span>
                 <button
                   disabled={!!busy}
                   title="Remove this bullet"
                   onClick={() => act("rm-bullet", () => editCvDraft(draft.id, { remove_bullets: [b] }))}
-                  className="shrink-0 text-neutral-500 hover:text-rose-300 disabled:opacity-40"
+                  className="shrink-0 text-slate-400 transition hover:text-rose-600 disabled:opacity-40"
                 >
                   ✕
                 </button>
@@ -768,7 +785,7 @@ function DraftEditor({
               value={bullet[i] ?? ""}
               onChange={(e) => setBullet({ ...bullet, [i]: e.target.value })}
               placeholder={`add a bullet to ${role.company ?? "this role"}…`}
-              className="min-w-0 flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-neutral-100 outline-none focus:border-sky-500/60"
+              className="min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
             />
             <button
               disabled={!!busy || !(bullet[i] ?? "").trim()}
@@ -781,7 +798,7 @@ function DraftEditor({
                   return r;
                 })
               }
-              className="rounded-md border border-neutral-700 px-2 py-1 text-neutral-200 disabled:opacity-40"
+              className="rounded-md border border-slate-200 bg-white px-2.5 py-1 font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 active:scale-95 disabled:opacity-40"
             >
               Add
             </button>
@@ -790,12 +807,14 @@ function DraftEditor({
       ))}
 
       {/* --- reword: the one path that spends a model call --- */}
-      <p className="mb-1 text-neutral-500">Reword to an instruction (one model call)</p>
+      <p className="mb-1 font-semibold uppercase tracking-wide text-slate-400">
+        Reword to an instruction (one model call)
+      </p>
       <div className="flex flex-wrap gap-1.5">
         <select
           value={target}
           onChange={(e) => setTarget(e.target.value)}
-          className="rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-neutral-200 outline-none"
+          className="cursor-pointer rounded-md border border-slate-200 bg-white px-2 py-1 text-slate-700 outline-none transition hover:border-slate-300 focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
         >
           <option value="summary">Profile / summary</option>
           {roles.map((role, i) => (
@@ -808,7 +827,7 @@ function DraftEditor({
           value={instruction}
           onChange={(e) => setInstruction(e.target.value)}
           placeholder="e.g. emphasise Kubernetes and platform ownership"
-          className="min-w-0 flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-1 text-neutral-100 outline-none focus:border-sky-500/60"
+          className="min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
         />
         <button
           disabled={!!busy || !instruction.trim()}
@@ -823,13 +842,13 @@ function DraftEditor({
               return r;
             })
           }
-          className="rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-sky-200 disabled:opacity-40"
+          className="rounded-md bg-sky-600 px-2.5 py-1 font-medium text-white shadow-sm transition hover:bg-sky-700 active:scale-95 disabled:opacity-40 disabled:hover:bg-sky-600"
         >
           {busy === "reword" ? "Rewording…" : "Reword"}
         </button>
       </div>
 
-      {note && <p className="mt-2 text-neutral-400">{note}</p>}
+      {note && <p className="mt-2 text-slate-600">{note}</p>}
     </div>
   );
 }
@@ -893,29 +912,40 @@ function DraftCard({
 
   return (
     <div
-      className={`rounded-lg border bg-neutral-950/40 p-3 transition ${
-        isNew ? "border-sky-500/50 ring-1 ring-sky-500/20" : "border-neutral-800"
+      className={`rounded-xl border bg-white p-3 transition-all ${
+        isNew
+          ? "pop-in border-sky-300 ring-2 ring-sky-100"
+          : open
+            ? "border-sky-200 shadow-card-hover"
+            : "border-slate-200 shadow-card hover:border-slate-300"
       }`}
     >
       <div className="flex flex-wrap items-center gap-2">
         {draft.status === "draft_ready" && (
-          <input type="checkbox" checked={picked} onChange={onPick} className="accent-sky-500" />
+          <input
+            type="checkbox"
+            checked={picked}
+            onChange={onPick}
+            className="h-4 w-4 cursor-pointer rounded border-slate-300 accent-sky-600"
+          />
         )}
-        <span className="text-sm font-medium text-neutral-200">{title}</span>
+        <span className="text-sm font-semibold text-slate-900">{title}</span>
         {isNew && (
-          <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-200">
+          <span className="rounded-full border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[10px] font-medium text-sky-700">
             new
           </span>
         )}
-        <span className={`rounded-md border px-1.5 py-0.5 text-[10px] ${STATUS_STYLE[draft.status]}`}>
+        <span
+          className={`rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${STATUS_STYLE[draft.status]}`}
+        >
           {draft.status.replace("_", " ")}
         </span>
         {alignScore != null && (
           <span
             className={`rounded-md border px-1.5 py-0.5 text-[10px] font-medium ${
               aligned
-                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
-                : "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                : "border-amber-200 bg-amber-50 text-amber-700"
             }`}
             title={
               threshold != null
@@ -928,7 +958,7 @@ function DraftCard({
         )}
         {alignScore == null && notes?.single_pass && (
           <span
-            className="rounded-md border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400"
+            className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-medium text-slate-500"
             title={
               "Written in a single pass, with no Critic grading it. Locked facts and skill " +
               "evidence were still enforced in code — but nothing scored how well this CV " +
@@ -939,44 +969,50 @@ function DraftCard({
           </span>
         )}
         {roundsRun != null && (
-          <span className="rounded-md border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
+          <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
             {roundsRun}
             {maxRounds ? `/${maxRounds}` : ""} round{roundsRun === 1 ? "" : "s"}
           </span>
         )}
         {flags.length > 0 ? (
           <span
-            className="rounded-md border border-rose-500/30 bg-rose-500/10 px-1.5 py-0.5 text-[10px] text-rose-200"
+            className="rounded-md border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-[10px] font-medium text-rose-700"
             title={flags.join(" · ")}
           >
             ⚠ {flags.length} integrity flag{flags.length === 1 ? "" : "s"}
           </span>
         ) : (
           lockedSafe && (
-            <span className="rounded-md border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-400">
+            <span className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
               🔒 locked facts verified
             </span>
           )
         )}
         {draft.before_score != null && (
-          <span className="text-xs text-neutral-500">
+          <span className="text-xs tabular-nums text-slate-500">
             score {Math.round(draft.before_score * 100)}
             {draft.after_score != null && ` → ${Math.round(draft.after_score * 100)}`}
           </span>
         )}
         {attestedCount > 0 && (
           <span
-            className="rounded-md border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-200"
+            className="rounded-md border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700"
             title="Includes content you vouched for yourself, not backed by résumé citations"
           >
             {attestedCount} self-attested
           </span>
         )}
         <div className="ml-auto flex items-center gap-1.5">
-          <button onClick={onToggleOpen} className="text-xs text-neutral-400 hover:text-neutral-200">
+          <button
+            onClick={onToggleOpen}
+            className="rounded-md px-2 py-0.5 text-xs font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+          >
             {open ? "Hide" : "Review"}
           </button>
-          <button onClick={onToggleEdit} className="text-xs text-sky-300 hover:text-sky-200">
+          <button
+            onClick={onToggleEdit}
+            className="rounded-md px-2 py-0.5 text-xs font-medium text-sky-600 transition hover:bg-sky-50 hover:text-sky-700"
+          >
             {editing ? "Done editing" : "Edit"}
           </button>
           {draft.status === "draft_ready" && (
@@ -984,14 +1020,14 @@ function DraftCard({
               <button
                 onClick={onApprove}
                 disabled={busy}
-                className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-200 disabled:opacity-40"
+                className="rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white shadow-sm transition hover:bg-emerald-700 active:scale-95 disabled:opacity-40"
               >
                 Approve
               </button>
               <button
                 onClick={onReject}
                 disabled={busy}
-                className="rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-xs text-rose-200 disabled:opacity-40"
+                className="rounded-md border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-medium text-rose-700 transition hover:border-rose-300 hover:bg-rose-100 active:scale-95 disabled:opacity-40"
               >
                 Reject
               </button>
@@ -1000,7 +1036,7 @@ function DraftCard({
           {draft.pdf_ref && (
             <button
               onClick={() => downloadCv(draft.id, "pdf")}
-              className="rounded-md border border-neutral-700 px-2 py-0.5 text-xs text-neutral-200"
+              className="rounded-md border border-slate-200 bg-white px-2 py-0.5 text-xs font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 active:scale-95"
             >
               PDF
             </button>
@@ -1008,7 +1044,7 @@ function DraftCard({
           {draft.docx_ref && (
             <button
               onClick={() => downloadCv(draft.id, "docx")}
-              className="rounded-md border border-neutral-700 px-2 py-0.5 text-xs text-neutral-200"
+              className="rounded-md border border-slate-200 bg-white px-2 py-0.5 text-xs font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 active:scale-95"
             >
               DOCX
             </button>
@@ -1017,7 +1053,7 @@ function DraftCard({
       </div>
 
       {open && (
-        <div className="mt-2 space-y-3 border-t border-neutral-800 pt-2 text-xs">
+        <div className="screen-enter mt-2.5 space-y-3 border-t border-slate-100 pt-2.5 text-xs">
           {/* Editing: the controls on the left, the posting you're editing toward on the
               right. The posting sticks while the editor scrolls — the editor is the taller
               column, and a requirement you have to scroll away from is one you'll forget. */}
@@ -1040,26 +1076,26 @@ function DraftCard({
           {/* What the candidate vouched for themselves — kept visually distinct from the
               evidence-backed block below, because the warrant is different in kind. */}
           {attestedCount > 0 && (
-            <div className="rounded-md border border-amber-500/30 bg-amber-500/[0.06] p-2">
-              <p className="mb-1 font-medium text-amber-200">
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-2.5">
+              <p className="mb-1 font-semibold text-amber-900">
                 You vouched for these ({attestedCount}) — no résumé citation backs them
               </p>
               {(attested?.skills?.length ?? 0) > 0 && (
-                <p className="text-amber-100/80">Skills: {attested?.skills?.join(", ")}</p>
+                <p className="text-amber-800">Skills: {attested?.skills?.join(", ")}</p>
               )}
               {(attested?.new_bullets ?? []).map((b, i) => (
-                <p key={`nb${i}`} className="mt-0.5 text-amber-100/80">
+                <p key={`nb${i}`} className="mt-0.5 text-amber-800">
                   + {b.role_ref ? `[${b.role_ref}] ` : ""}
                   {b.text}
                 </p>
               ))}
               {(attested?.bullet_rewrites ?? []).map((b, i) => (
-                <p key={`rw${i}`} className="mt-0.5 text-amber-100/80">
+                <p key={`rw${i}`} className="mt-0.5 text-amber-800">
                   ↻ {b.role_ref ? `[${b.role_ref}] ` : ""}
                   {b.after}
                 </p>
               ))}
-              <p className="mt-1 text-neutral-500">
+              <p className="mt-1 text-amber-700/80">
                 {attested?.note ?? "Interview prep on these is on you."}
               </p>
             </div>
@@ -1067,11 +1103,11 @@ function DraftCard({
 
           {/* Alignment summary — how well, over how many rounds */}
           {alignScore != null && (
-            <p className="text-neutral-400">
+            <p className="text-slate-600">
               {aligned ? (
-                <span className="text-emerald-300">Aligned</span>
+                <span className="font-medium text-emerald-700">Aligned</span>
               ) : (
-                <span className="text-amber-300">Did not reach the bar</span>
+                <span className="font-medium text-amber-700">Did not reach the bar</span>
               )}{" "}
               at {Math.round(alignScore * 100)}%
               {threshold != null ? ` (bar ${Math.round(threshold * 100)}%)` : ""}
@@ -1084,9 +1120,9 @@ function DraftCard({
 
           {/* Integrity flags — honesty problems the Critic raised (forces another round) */}
           {flags.length > 0 && (
-            <div className="rounded-md border border-rose-500/30 bg-rose-500/10 p-2">
-              <p className="mb-0.5 font-medium text-rose-200">⚠ Integrity flags</p>
-              <ul className="list-disc space-y-0.5 pl-4 text-rose-200/90">
+            <div className="rounded-lg border border-rose-200 bg-rose-50 p-2.5">
+              <p className="mb-0.5 font-semibold text-rose-800">⚠ Integrity flags</p>
+              <ul className="list-disc space-y-0.5 pl-4 text-rose-700">
                 {flags.map((f, i) => (
                   <li key={i}>{f}</li>
                 ))}
@@ -1097,18 +1133,20 @@ function DraftCard({
           {/* Per-dimension alignment scores */}
           {Object.keys(dims).length > 0 && (
             <div>
-              <p className="mb-1 text-neutral-500">Alignment by dimension</p>
+              <p className="mb-1 font-semibold uppercase tracking-wide text-slate-400">
+                Alignment by dimension
+              </p>
               <div className="space-y-1">
                 {Object.entries(dims).map(([k, v]) => (
                   <div key={k} className="flex items-center gap-2">
-                    <span className="w-36 truncate capitalize text-neutral-400">{k.replace(/_/g, " ")}</span>
-                    <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-neutral-800">
+                    <span className="w-36 truncate capitalize text-slate-600">{k.replace(/_/g, " ")}</span>
+                    <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-200">
                       <span
-                        className="block h-full rounded-full bg-sky-500/70"
+                        className="block h-full rounded-full bg-sky-500 transition-all duration-500"
                         style={{ width: `${Math.round((Number(v) || 0) * 100)}%` }}
                       />
                     </span>
-                    <span className="w-8 text-right font-mono tabular-nums text-neutral-500">
+                    <span className="w-8 text-right font-mono tabular-nums text-slate-500">
                       {Math.round((Number(v) || 0) * 100)}
                     </span>
                   </div>
@@ -1120,20 +1158,20 @@ function DraftCard({
           {/* Added-skill evidence — skills not in the base list + the real CV text that backs each */}
           {evidence.length > 0 && (
             <div>
-              <p className="mb-0.5 text-neutral-500">
+              <p className="mb-1 font-semibold uppercase tracking-wide text-slate-400">
                 Skills added for this job{" "}
-                <span className="normal-case text-neutral-600">(each grounded in your real CV)</span>
+                <span className="font-normal normal-case text-slate-400">(each grounded in your real CV)</span>
               </p>
               <ul className="space-y-1">
                 {evidence.map((e, i) => (
-                  <li key={i} className="rounded-md border border-neutral-800/70 px-2 py-1">
-                    <span className="font-medium text-neutral-200">{e.skill}</span>
+                  <li key={i} className="rounded-md border border-slate-200 bg-white px-2 py-1">
+                    <span className="font-medium text-slate-900">{e.skill}</span>
                     {e.basis && (
-                      <span className="ml-2 rounded border border-neutral-700 px-1 py-0.5 text-[10px] uppercase tracking-wide text-neutral-400">
+                      <span className="ml-2 rounded border border-slate-200 bg-slate-50 px-1 py-0.5 text-[10px] uppercase tracking-wide text-slate-500">
                         {e.basis}
                       </span>
                     )}
-                    {e.evidence && <span className="mt-0.5 block text-neutral-500">from: “{e.evidence}”</span>}
+                    {e.evidence && <span className="mt-0.5 block text-slate-500">from: “{e.evidence}”</span>}
                   </li>
                 ))}
               </ul>
@@ -1142,8 +1180,9 @@ function DraftCard({
 
           {/* Genuine gaps left honest — the loop won't claim these */}
           {unaddressed.length > 0 && (
-            <p className="text-neutral-500">
-              <span className="text-neutral-400">Still unaddressed (kept honest):</span> {unaddressed.join(", ")}
+            <p className="text-slate-500">
+              <span className="font-medium text-slate-700">Still unaddressed (kept honest):</span>{" "}
+              {unaddressed.join(", ")}
             </p>
           )}
 
@@ -1151,11 +1190,13 @@ function DraftCard({
               CvPreview panel above, with the rest of the CV it belongs to. */}
           {changes.length > 0 && (
             <div>
-              <p className="mb-0.5 text-neutral-500">What changed and why (grounded in your real experience):</p>
+              <p className="mb-1 font-semibold uppercase tracking-wide text-slate-400">
+                What changed and why (grounded in your real experience)
+              </p>
               <ul className="space-y-0.5">
                 {changes.map((c, i) => (
-                  <li key={i} className="text-neutral-400">
-                    <span className="text-neutral-300">{c.field}</span>
+                  <li key={i} className="text-slate-600">
+                    <span className="font-medium text-slate-900">{c.field}</span>
                     {c.why ? ` — ${c.why}` : ""}
                     {c.grounded_in ? ` (from: ${c.grounded_in})` : ""}
                   </li>
@@ -1166,7 +1207,7 @@ function DraftCard({
 
           {/* Legacy critic line — only for pre-alignment-loop drafts (no alignment score) */}
           {alignScore == null && notes?.rounds && notes.rounds.length > 0 && (
-            <p className="text-neutral-500">
+            <p className="text-slate-500">
               Critic: {notes.rounds.map((r) => r.verdict).filter(Boolean).join(" → ") || "reviewed"}
               {notes.caught_before_enforce &&
                 (notes.caught_before_enforce.violations.length +

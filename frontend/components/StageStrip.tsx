@@ -26,14 +26,14 @@ export type Stage = {
 };
 
 const DOT: Record<StageState, string> = {
-  done: "text-emerald-400",
-  active: "text-sky-300 animate-pulse",
-  pending: "text-neutral-600",
+  done: "text-emerald-600",
+  active: "text-sky-600 animate-pulse",
+  pending: "text-slate-300",
 };
 const TEXT: Record<StageState, string> = {
-  done: "text-neutral-300",
-  active: "text-sky-200",
-  pending: "text-neutral-600",
+  done: "text-slate-700",
+  active: "text-sky-700",
+  pending: "text-slate-400",
 };
 
 function glyph(state: StageState, unobservable?: boolean): string {
@@ -78,9 +78,9 @@ export default function StageStrip({
   tone?: "sky" | "amber";
   onDismiss?: () => void;
 }) {
-  const border = tone === "amber" ? "border-amber-500/30" : "border-sky-500/30";
-  const bg = tone === "amber" ? "bg-amber-500/[0.04]" : "bg-sky-500/[0.04]";
-  const head = tone === "amber" ? "text-amber-200" : "text-sky-200";
+  const border = tone === "amber" ? "border-amber-200" : "border-sky-200";
+  const bg = tone === "amber" ? "bg-amber-50/60" : "bg-sky-50/60";
+  const head = tone === "amber" ? "text-amber-700" : "text-sky-700";
 
   return (
     <div className={`mt-3 rounded-lg border ${border} ${bg} px-3 py-2`}>
@@ -90,14 +90,14 @@ export default function StageStrip({
           {title}
         </span>
         {startedAt !== null && (
-          <span className="font-mono tabular-nums text-neutral-500">
+          <span className="font-mono tabular-nums text-slate-500">
             <Elapsed since={startedAt} />
           </span>
         )}
         {onDismiss && (
           <button
             onClick={onDismiss}
-            className="ml-auto text-neutral-500 transition hover:text-neutral-300"
+            className="ml-auto text-slate-400 transition hover:text-slate-600"
             title="Hide this (the work keeps running)"
           >
             ✕
@@ -117,7 +117,7 @@ export default function StageStrip({
         })}
       </div>
 
-      {note && <p className="mt-1.5 text-xs text-neutral-500">{note}</p>}
+      {note && <p className="mt-1.5 text-xs text-slate-500">{note}</p>}
     </div>
   );
 }

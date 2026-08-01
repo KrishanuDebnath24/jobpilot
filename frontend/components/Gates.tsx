@@ -105,24 +105,24 @@ export default function Gates({ onChanged }: { onChanged?: () => void }) {
   };
 
   return (
-    <section className="space-y-4 rounded-2xl border border-neutral-800 bg-neutral-900/30 p-4">
-      <h2 className="text-sm font-semibold text-neutral-200">Review gates &amp; resume</h2>
+    <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-card transition-shadow hover:shadow-card-hover">
+      <h2 className="text-sm font-semibold text-slate-900">Review gates &amp; resume</h2>
 
       {pending && (
-        <div className="flex items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2">
-          <span className="text-sm text-amber-200">
+        <div className="pop-in flex flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+          <span className="text-sm text-amber-900">
             Pipeline paused for review: <b>{GATE_LABELS[pending.gate_key] ?? pending.gate_key}</b>
           </span>
           <div className="ml-auto flex gap-2">
             <button
               onClick={() => resolve(true)}
-              className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-xs text-emerald-300 hover:bg-emerald-500/20"
+              className="rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.98]"
             >
               Approve
             </button>
             <button
               onClick={() => resolve(false)}
-              className="rounded-md border border-neutral-700 px-2 py-0.5 text-xs text-neutral-400 hover:border-neutral-500"
+              className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 active:scale-[0.98]"
             >
               Skip
             </button>
@@ -130,42 +130,54 @@ export default function Gates({ onChanged }: { onChanged?: () => void }) {
         </div>
       )}
 
-      <div className="space-y-1.5">
+      <div className="space-y-1">
         {keys.map((key) => (
-          <label key={key} className="flex items-center gap-2 text-sm text-neutral-300">
-            <input type="checkbox" checked={!!gates[key]} onChange={() => toggle(key)} />
+          <label
+            key={key}
+            className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-1.5 text-sm text-slate-700 transition hover:bg-slate-50"
+          >
+            <input
+              type="checkbox"
+              checked={!!gates[key]}
+              onChange={() => toggle(key)}
+              className="h-4 w-4 cursor-pointer rounded border-slate-300 accent-indigo-600"
+            />
             {GATE_LABELS[key] ?? key}
           </label>
         ))}
       </div>
 
-      <div className="border-t border-neutral-800 pt-3">
+      <div className="border-t border-slate-100 pt-3">
         <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={doPrepare}
-            className="rounded-lg border border-neutral-700 px-3 py-1.5 text-sm text-neutral-200 hover:border-neutral-500"
+            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 active:scale-[0.98]"
           >
             Preview resume from accepted suggestions
           </button>
-          {msg && <span className="text-xs text-neutral-400">{msg}</span>}
+          {msg && <span className="text-xs text-slate-500">{msg}</span>}
         </div>
 
         {preview && (
-          <div className="mt-3 space-y-3 rounded-lg border border-neutral-800 bg-neutral-950/40 p-3 text-sm">
-            <p className="text-xs text-neutral-500">
+          <div className="pop-in mt-3 space-y-3 rounded-lg border border-slate-200 bg-slate-50/70 p-3 text-sm">
+            <p className="text-xs text-slate-500">
               {preview.accepted_count} accepted suggestion(s) · {preview.applied_rewrites.length}{" "}
               bullet rewrite(s) will apply.
             </p>
             {preview.withheld_skills.length > 0 && (
               <div>
-                <p className="mb-1 text-xs uppercase tracking-wide text-neutral-500">
+                <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400">
                   Confirm skills you actually hold (only these get added)
                 </p>
                 <div className="flex flex-wrap gap-2">
                   {preview.withheld_skills.map((s) => (
                     <label
                       key={s}
-                      className="flex items-center gap-1.5 rounded-md border border-neutral-800 px-2 py-1 text-xs text-neutral-300"
+                      className={`flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition ${
+                        confirmSkills.has(s)
+                          ? "border-emerald-300 bg-emerald-50 text-emerald-800"
+                          : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"
+                      }`}
                     >
                       <input
                         type="checkbox"
@@ -177,6 +189,7 @@ export default function Gates({ onChanged }: { onChanged?: () => void }) {
                             return n;
                           })
                         }
+                        className="h-3.5 w-3.5 cursor-pointer rounded border-slate-300 accent-emerald-600"
                       />
                       {s}
                     </label>
@@ -184,24 +197,24 @@ export default function Gates({ onChanged }: { onChanged?: () => void }) {
                 </div>
                 <button
                   onClick={doPrepare}
-                  className="mt-2 text-xs text-emerald-300 hover:underline"
+                  className="mt-2 text-xs font-medium text-emerald-700 hover:underline"
                 >
                   Re-preview with confirmed skills
                 </button>
               </div>
             )}
             {preview.project_guidance.length > 0 && (
-              <p className="text-xs text-neutral-500">
+              <p className="text-xs text-slate-500">
                 {preview.project_guidance.length} project idea(s) surfaced as guidance (not inserted).
               </p>
             )}
             <button
               onClick={doApply}
-              className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-sm text-emerald-200 hover:bg-emerald-500/20"
+              className="rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white shadow-sm transition hover:bg-emerald-700 active:scale-[0.98]"
             >
               Apply as new version
             </button>
-            <p className="text-xs text-neutral-500">
+            <p className="text-xs leading-relaxed text-slate-500">
               Saves a new résumé version you can download as PDF/DOCX below, and replaces any
               earlier suggested version (each one is rebuilt from your upload, so the older one
               holds nothing this doesn’t). Your uploaded résumé is never touched or removed —
@@ -215,36 +228,39 @@ export default function Gates({ onChanged }: { onChanged?: () => void }) {
             {/* The one thing that surprises everyone: an applied version is an EXPORT, not a
                 promotion. Scoring and tailoring keep using the last file you uploaded, so the
                 round trip has to be spelled out where the download buttons are. */}
-            <p className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/[0.06] px-3 py-2 text-xs leading-relaxed text-sky-200/90">
-              <span className="font-medium">To attach a suggested résumé to your jobs:</span>{" "}
+            <p className="mt-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs leading-relaxed text-sky-900">
+              <span className="font-semibold">To attach a suggested résumé to your jobs:</span>{" "}
               download it as PDF or DOCX below, then re-upload that file in{" "}
-              <span className="text-neutral-200">“Your CV / résumé”</span>. Uploading is what
+              <span className="font-medium">“Your CV / résumé”</span>. Uploading is what
               makes a résumé the working one — the CV attached to every job stays the last file
               you uploaded manually until you do. Downloading alone changes nothing.
             </p>
             <ul className="mt-2 space-y-1">
               {versions.map((v) => (
-                <li key={v.id} className="flex flex-wrap items-center gap-2 text-xs text-neutral-400">
-                  <span className="rounded border border-neutral-800 px-1.5 py-0.5 font-mono">
+                <li
+                  key={v.id}
+                  className="flex flex-wrap items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-slate-500 transition hover:bg-slate-50"
+                >
+                  <span className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-slate-500">
                     {v.source}
                   </span>
-                  <span className="min-w-0 flex-1 truncate">{v.label ?? "resume"}</span>
+                  <span className="min-w-0 flex-1 truncate text-slate-700">{v.label ?? "resume"}</span>
                   {/* Same A4/ATS layout as the tailored CVs — rendered by the same Tailor. */}
                   <button
                     onClick={() => downloadResumeVersionFile(v.id, "pdf")}
-                    className="rounded-md border border-neutral-700 px-2 py-0.5 text-neutral-200 hover:border-neutral-500"
+                    className="rounded-md border border-slate-200 bg-white px-2 py-0.5 font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
                   >
                     PDF
                   </button>
                   <button
                     onClick={() => downloadResumeVersionFile(v.id, "docx")}
-                    className="rounded-md border border-neutral-700 px-2 py-0.5 text-neutral-200 hover:border-neutral-500"
+                    className="rounded-md border border-slate-200 bg-white px-2 py-0.5 font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
                   >
                     DOCX
                   </button>
                   <button
                     onClick={() => downloadResumeVersion(v.id)}
-                    className="text-neutral-500 hover:underline"
+                    className="text-slate-400 hover:text-slate-600 hover:underline"
                     title="Plain-text rendering"
                   >
                     .txt
