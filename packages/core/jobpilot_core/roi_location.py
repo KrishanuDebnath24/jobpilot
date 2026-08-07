@@ -80,6 +80,15 @@ _ELSEWHERE: frozenset[str] = frozenset({
 })
 
 
+#: "<Irish place>, Ireland" — an unambiguous RoI location inside a longer, comma-joined
+#: list of locations. Deliberately requires the country word next to the place, so
+#: "Dublin, Ohio" and "Cork, Georgia" cannot satisfy it.
+_ROI_PAIR_RE = re.compile(
+    r"\b(?:" + "|".join(sorted(re.escape(p) for p in (_ROI_COUNTIES | _ROI_PLACES)))
+    + r")\b[^,;]*,\s*(?:republic of\s+)?ireland\b"
+)
+
+
 def _words(text: str) -> set[str]:
     return {w for w in re.split(r"[^a-z]+", text) if w}
 
@@ -138,6 +147,14 @@ def is_roi(
         return False
     if any(sig in blob for sig in _NI):
         return False
+    # Positive evidence beats the foreign-country vetoes below. Some sources join several
+    # locations with ", " — The Muse emits
+    # "Austin, TX, Chicago, IL, Dublin, Ireland, London, United Kingdom" — which cannot be
+    # split on the comma, because a comma also separates a city from its country. An
+    # explicit "<Irish place>, Ireland" pairing anywhere in the string settles it: the job
+    # is open in Ireland whatever else is listed. "Dublin, Ohio" cannot match this.
+    if _ROI_PAIR_RE.search(blob):
+        return True
     # "Dublin, United Kingdom" and "Dublin, Ohio" would otherwise pass on the city alone.
     if any(re.search(rf"\b{re.escape(c)}\b", blob) for c in _UK_COUNTRIES):
         return False

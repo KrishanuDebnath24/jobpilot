@@ -70,6 +70,26 @@ def test_is_roi_handles_multi_location_postings(label, expected):
     assert is_roi(label) is expected
 
 
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        # The Muse joins locations with ", ", which cannot be split on the comma because a
+        # comma also separates city from country. A "<Irish place>, Ireland" pairing
+        # anywhere in the string is decisive. First case is a real record from the pool.
+        ("Austin, TX, Chicago, IL, Dublin, Ireland, London, United Kingdom, New York, NY", True),
+        ("New York, NY, Cork, Ireland", True),
+        ("Austin, TX, London, United Kingdom, New York, NY", False),
+        # The pairing must not be satisfiable by a same-named place abroad.
+        ("Dublin, Ohio", False),
+        ("Cork, Georgia, United States", False),
+        # Belfast still cannot ride in on a comma-joined list.
+        ("Belfast, Northern Ireland, London, United Kingdom", False),
+    ],
+)
+def test_is_roi_handles_comma_joined_location_lists(label, expected):
+    assert is_roi(label) is expected
+
+
 def test_is_roi_rejects_belfast_even_when_the_source_says_ireland():
     """Real record from Workable's live Ireland feed: "Belfast, Ulster, Ireland" with
     countryName "Ireland". Belfast is the UK; the city has to beat the country label."""

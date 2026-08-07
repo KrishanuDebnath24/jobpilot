@@ -19,6 +19,7 @@ import re
 
 import httpx
 from bs4 import BeautifulSoup
+from jobpilot_core.roi_location import is_roi
 from jobpilot_core.scout import RawJob
 from jobpilot_core.settings import Settings
 
@@ -75,6 +76,18 @@ def _city_match(job_locations: str, city: str) -> bool:
     return not city or city in job_locations.lower()
 
 
+def _roi_match(job_locations: str) -> bool:
+    """Republic-of-Ireland gate, independent of the city filter.
+
+    ``_city_match`` is a substring test against whatever city was asked for, so it lets
+    "Belfast" through on a Dublin query about as easily as it lets Dublin through on a
+    Belfast one — and it passes everything when no city is given. This is the check that
+    actually keeps the pool in the Republic. The Muse joins several locations with ", ",
+    which :func:`is_roi` handles.
+    """
+    return is_roi(job_locations)
+
+
 def _strip(html: str | None) -> str:
     if not html:
         return ""
@@ -123,6 +136,7 @@ async def search_muse(
         base_params["api_key"] = settings.muse_api_key
 
     out: list[RawJob] = []
+    dropped_non_roi = 0
     async with httpx.AsyncClient(timeout=settings.crawler_timeout_seconds) as client:
         for page in range(1, pages + 1):
             resp = await client.get(MUSE_BASE, params={**base_params, "page": str(page)})
@@ -132,11 +146,16 @@ async def search_muse(
             results = body.get("results") or []
             if not results:
                 break
-            out.extend(_to_raw(job) for job in results if _city_match(_locations(job), city))
+            kept = [
+                job for job in results
+                if _roi_match(_locations(job)) and _city_match(_locations(job), city)
+            ]
+            dropped_non_roi += sum(1 for job in results if not _roi_match(_locations(job)))
+            out.extend(_to_raw(job) for job in kept)
             if page >= (body.get("page_count") or page):
                 break
     logger.info(
-        "muse.call location=%r categories=%s pages=%d -> %d jobs (city-filtered)",
-        location, categories, pages, len(out),
+        "muse.call location=%r categories=%s pages=%d -> %d jobs (%d dropped: not RoI)",
+        location, categories, pages, len(out), dropped_non_roi,
     )
     return out

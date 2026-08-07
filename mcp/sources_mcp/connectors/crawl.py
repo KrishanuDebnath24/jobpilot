@@ -33,6 +33,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from bs4 import BeautifulSoup
 from jobpilot_core.llm import LLMUsage
+from jobpilot_core.roi_location import is_roi
 from jobpilot_core.scout import RawJob
 from jobpilot_core.settings import Settings
 
@@ -287,6 +288,14 @@ async def run_crawl(
                 slug = urlparse(url).path.split("/")
                 title = slug[2].replace("-", " ").title() if len(slug) > 2 else None
             if not title:
+                continue
+
+            # Republic-of-Ireland gate. Asymmetric on purpose: the board itself is Irish,
+            # so provenance carries a posting whose location we could not read (schema.org
+            # extraction fails on some pages). Only a location we *did* read and that is
+            # explicitly outside the Republic gets dropped — irishjobs.ie is
+            # StepStone-owned and lists Northern Ireland too.
+            if (loc or "").strip() and not is_roi(loc):
                 continue
 
             out.append(
