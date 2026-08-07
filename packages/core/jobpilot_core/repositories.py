@@ -1639,3 +1639,185 @@ async def count_user_rows(session: AsyncSession, user_id: uuid.UUID) -> dict[str
     )
     counts["users"] = int(res.scalar_one())
     return counts
+
+
+# --------------------------------------------------------------------------- #
+# Application profile + answer bank (apply agent, stage 1)
+#
+# Both are pre-configured user data: nothing here is ever written by a model. The
+# profile is one row per user (unique constraint), so upsert genuinely updates rather
+# than appending a version the way search/qualifier configs do.
+# --------------------------------------------------------------------------- #
+_PROFILE_FIELDS = (
+    "first_name", "last_name", "email", "phone",
+    "address_line1", "city", "region", "postcode", "country",
+    "linkedin_url", "github_url", "portfolio_url",
+    "notice_period_days", "earliest_start_date",
+    "salary_expectation", "salary_currency",
+    "willing_to_relocate", "work_mode_preference",
+    "eligibility_json", "demographics_json",
+)
+
+
+def application_profile_to_dict(p: "models.ApplicationProfile | None") -> dict:
+    """Serialise the profile, or an all-empty shell when the user has none yet.
+
+    The shell keeps the shape stable for the frontend so the editor renders the same
+    whether or not a row exists — an absent profile is an unfilled form, not an error.
+    """
+    if p is None:
+        blank: dict = {key: None for key in _PROFILE_FIELDS}
+        blank["eligibility_json"] = {}
+        blank["demographics_json"] = {}
+        return {"id": None, "seeded_from_resume_id": None, **blank}
+    out: dict = {"id": str(p.id), "seeded_from_resume_id":
+                 str(p.seeded_from_resume_id) if p.seeded_from_resume_id else None}
+    for key in _PROFILE_FIELDS:
+        value = getattr(p, key)
+        # Date is not JSON-serialisable over MCP; ISO-8601 round-trips cleanly.
+        out[key] = value.isoformat() if hasattr(value, "isoformat") else value
+    out["created_at"] = _iso(p.created_at)
+    out["updated_at"] = _iso(p.updated_at)
+    return out
+
+
+async def get_application_profile(
+    session: AsyncSession, user_id: uuid.UUID
+) -> "models.ApplicationProfile | None":
+    return (
+        await session.execute(
+            select(models.ApplicationProfile).where(
+                models.ApplicationProfile.user_id == user_id
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def upsert_application_profile(
+    session: AsyncSession, user_id: uuid.UUID, fields: dict
+) -> "models.ApplicationProfile":
+    """Partial update. A key absent from ``fields`` is left alone; a key present with
+    ``None`` is an explicit clear, which is why the guard tests for membership rather
+    than truthiness (``willing_to_relocate=False`` must be storable)."""
+    from datetime import date as _date
+
+    profile = await get_application_profile(session, user_id)
+    if profile is None:
+        profile = models.ApplicationProfile(user_id=user_id)
+        session.add(profile)
+    for key in _PROFILE_FIELDS:
+        if key not in fields:
+            continue
+        value = fields[key]
+        if key == "earliest_start_date" and isinstance(value, str) and value:
+            value = _date.fromisoformat(value)
+        setattr(profile, key, value)
+    profile.updated_at = datetime.now(timezone.utc)
+    await session.flush()
+    return profile
+
+
+def answer_bank_entry_to_dict(e: "models.AnswerBankEntry") -> dict:
+    """Serialise a bank row. ``question_vec`` is deliberately omitted — it is a 1024-float
+    internal artefact with no meaning to a caller, and shipping it would bloat every
+    list response."""
+    return {
+        "id": str(e.id),
+        "question_text": e.question_text,
+        "question_norm": e.question_norm,
+        "answer_value": e.answer_value,
+        "answer_kind": e.answer_kind,
+        "scope": e.scope,
+        "locked": e.locked,
+        "times_used": e.times_used,
+        "last_used_at": _iso(e.last_used_at),
+        "confirmed_at": _iso(e.confirmed_at),
+        "created_at": _iso(e.created_at),
+    }
+
+
+async def get_answer_bank(
+    session: AsyncSession, user_id: uuid.UUID, *, include_vectors: bool = False
+) -> list[dict]:
+    """List the user's banked answers, newest first.
+
+    ``include_vectors`` is for the resolver, which needs the embeddings to run its
+    near-match pass; the API surface never sets it.
+    """
+    rows = (
+        (
+            await session.execute(
+                select(models.AnswerBankEntry)
+                .where(models.AnswerBankEntry.user_id == user_id)
+                .order_by(models.AnswerBankEntry.created_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    out = []
+    for row in rows:
+        item = answer_bank_entry_to_dict(row)
+        if include_vectors:
+            item["question_vec"] = list(row.question_vec) if row.question_vec is not None else None
+        out.append(item)
+    return out
+
+
+async def upsert_answer_bank_entry(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    *,
+    question_text: str,
+    question_norm: str,
+    answer_value: str,
+    answer_kind: str = "text",
+    scope: str = "global",
+    locked: bool = False,
+    question_vec: list[float] | None = None,
+) -> "models.AnswerBankEntry":
+    """Store or re-confirm one answer, keyed on (user, normalised question, scope).
+
+    Re-answering the same question updates the existing row rather than inserting a
+    rival: two different stored answers to one question is the state that would make
+    resolution arbitrary.
+    """
+    existing = (
+        await session.execute(
+            select(models.AnswerBankEntry).where(
+                models.AnswerBankEntry.user_id == user_id,
+                models.AnswerBankEntry.question_norm == question_norm,
+                models.AnswerBankEntry.scope == scope,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if existing is None:
+        existing = models.AnswerBankEntry(
+            user_id=user_id, question_norm=question_norm, scope=scope
+        )
+        session.add(existing)
+
+    existing.question_text = question_text
+    existing.answer_value = answer_value
+    existing.answer_kind = answer_kind
+    existing.locked = locked
+    if question_vec is not None:
+        existing.question_vec = question_vec
+    existing.confirmed_at = datetime.now(timezone.utc)
+    await session.flush()
+    return existing
+
+
+async def delete_answer_bank_entry(
+    session: AsyncSession, user_id: uuid.UUID, entry_id: uuid.UUID
+) -> bool:
+    """Delete one banked answer. Scoped by user_id so an id alone cannot reach another
+    user's row. Returns whether anything was removed."""
+    result = await session.execute(
+        delete(models.AnswerBankEntry).where(
+            models.AnswerBankEntry.user_id == user_id,
+            models.AnswerBankEntry.id == entry_id,
+        )
+    )
+    return bool(result.rowcount)

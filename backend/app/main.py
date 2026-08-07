@@ -175,6 +175,55 @@ class QualifierConfigUpdate(BaseModel):
     nice_to_have: list[str] | None = None
 
 
+class ApplicationProfileUpdate(BaseModel):
+    """Partial update of the pre-configured application profile.
+
+    Every field is optional and defaults are absent rather than ``None``, so the endpoint
+    can use ``exclude_unset`` to tell "leave this alone" apart from "clear this" — the
+    difference matters for ``willing_to_relocate``, where ``False`` is a real answer.
+
+    ``eligibility_json`` is keyed by jurisdiction (``{"IE": {"authorized": true, …}}``)
+    because work authorisation differs per country while the question wording barely
+    does; ``demographics_json`` holds voluntary EEO answers, defaulting to
+    "prefer not to say".
+    """
+
+    first_name: str | None = None
+    last_name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    address_line1: str | None = None
+    city: str | None = None
+    region: str | None = None
+    postcode: str | None = None
+    country: str | None = None
+    linkedin_url: str | None = None
+    github_url: str | None = None
+    portfolio_url: str | None = None
+    notice_period_days: int | None = None
+    earliest_start_date: str | None = None  # ISO-8601 date
+    salary_expectation: int | None = None
+    salary_currency: str | None = None
+    willing_to_relocate: bool | None = None
+    work_mode_preference: str | None = None
+    eligibility_json: dict | None = None
+    demographics_json: dict | None = None
+
+
+class AnswerUpsert(BaseModel):
+    """Store or re-confirm one screening answer.
+
+    Note there is no ``locked`` field: whether a question is legally sensitive is decided
+    server-side from its content, so a client cannot mark a work-eligibility question as
+    ordinary and opt it into similarity matching.
+    """
+
+    question_text: str
+    answer_value: str
+    answer_kind: str = "text"
+    scope: str = "global"
+
+
 class DeriveConfigRequest(BaseModel):
     """Ask the LLM to propose a market-canonical config from the resume (review-only, no
     write). ``hint`` is the optional free-text steer typed in the review dialog."""
@@ -482,6 +531,53 @@ async def update_qualifier_config(
     # untouched rather than cleared.
     fields = body.model_dump(exclude_none=True)
     return await mcp_client.config_mcp(current_user.id, "update_qualifier_config", fields)
+
+
+# --------------------------------------------------------------------------- #
+# Application profile + answer bank (apply agent, stage 1)
+#
+# The pre-configured facts an apply agent may submit on the user's behalf, and the
+# questions they have already answered. Read/write only — nothing here touches a browser
+# or an LLM, and no value on either surface is ever model-generated.
+# --------------------------------------------------------------------------- #
+@app.get("/application-profile", tags=["apply"])
+async def get_application_profile(current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.config_mcp(current_user.id, "get_application_profile", {})
+
+
+@app.put("/application-profile", tags=["apply"])
+async def update_application_profile(
+    body: ApplicationProfileUpdate, current_user=Depends(get_current_user)
+) -> dict:
+    # ``exclude_unset`` (not ``exclude_none``): an explicit null is a deliberate clear,
+    # which must be distinguishable from a field the client simply didn't send.
+    fields = body.model_dump(exclude_unset=True)
+    return await mcp_client.config_mcp(current_user.id, "update_application_profile", {"fields": fields})
+
+
+@app.post("/application-profile/seed", tags=["apply"])
+async def seed_application_profile(current_user=Depends(get_current_user)) -> dict:
+    """Fill blank profile fields from the parsed résumé. Never overwrites a set value."""
+    return await mcp_client.config_mcp(current_user.id, "seed_application_profile", {})
+
+
+@app.get("/answer-bank", tags=["apply"])
+async def get_answer_bank(current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.config_mcp(current_user.id, "get_answer_bank", {})
+
+
+@app.post("/answer-bank", tags=["apply"])
+async def upsert_answer(
+    body: AnswerUpsert, current_user=Depends(get_current_user)
+) -> dict:
+    return await mcp_client.config_mcp(
+        current_user.id, "upsert_answer", body.model_dump(exclude_none=True)
+    )
+
+
+@app.delete("/answer-bank/{entry_id}", tags=["apply"])
+async def delete_answer(entry_id: str, current_user=Depends(get_current_user)) -> dict:
+    return await mcp_client.config_mcp(current_user.id, "delete_answer", {"entry_id": entry_id})
 
 
 # --------------------------------------------------------------------------- #

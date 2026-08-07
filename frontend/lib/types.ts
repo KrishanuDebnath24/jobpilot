@@ -414,3 +414,61 @@ export type CvReport = {
   worse: number;
   total: number;
 };
+
+// --- Apply agent (stage 1): pre-configured application facts ---
+// Every value an apply agent may submit on your behalf traces to this profile or to the
+// answer bank below — never to a model's inference.
+export type ApplicationProfile = {
+  id?: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  email: string | null;
+  phone: string | null;
+  address_line1: string | null;
+  city: string | null;
+  region: string | null;
+  postcode: string | null;
+  country: string | null;
+  linkedin_url: string | null;
+  github_url: string | null;
+  portfolio_url: string | null;
+  notice_period_days: number | null;
+  earliest_start_date: string | null; // ISO-8601 date
+  salary_expectation: number | null;
+  salary_currency: string | null;
+  willing_to_relocate: boolean | null;
+  work_mode_preference: string | null;
+  // Keyed by jurisdiction ("IE", "UK", …) because authorisation differs per country
+  // while the question wording barely does. Locked: never similarity-matched.
+  eligibility_json: Record<string, Record<string, unknown>>;
+  demographics_json: Record<string, unknown>;
+  seeded_from_resume_id?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type AnswerKind = "text" | "boolean" | "select" | "number" | "date";
+
+// A screening question you've already answered, reused on later forms. `locked` is set
+// server-side from the question's content — sensitive questions resolve by exact match
+// only, so a near-miss escalates to you instead of reusing a wrong answer.
+export type AnswerBankEntry = {
+  id: string;
+  question_text: string;
+  question_norm: string;
+  answer_value: string;
+  answer_kind: AnswerKind;
+  scope: string; // "global" | "employer:<slug>"
+  locked: boolean;
+  times_used: number;
+  last_used_at: string | null;
+  confirmed_at: string | null;
+  created_at: string | null;
+};
+
+export type SeedProfileResult = {
+  seeded: boolean;
+  reason?: string;
+  fields?: string[];
+  profile?: ApplicationProfile;
+};

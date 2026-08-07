@@ -26,6 +26,7 @@ import CostPanel from "./CostPanel";
 import ResumeUpload from "./ResumeUpload";
 import SearchSettings, { type SearchSettingsMode } from "./SearchSettings";
 import QualifierSettings from "./QualifierSettings";
+import ApplicationProfileEditor from "./ApplicationProfile";
 
 type Decision = "all" | "qualified" | "disqualified" | "unscored";
 
@@ -34,7 +35,7 @@ type Decision = "all" | "qualified" | "disqualified" | "unscored";
  * below the jobs table. Screens are swapped with CSS, not by unmounting: analyze/suggest and
  * gap-close runs poll for minutes and the CV panel polls every 5s, so navigating away must
  * not tear any of them down. */
-type View = "dashboard" | "suggest" | "gap-close" | "tailored";
+type View = "dashboard" | "suggest" | "gap-close" | "tailored" | "apply-profile";
 
 /** Inline glyphs — no icon dependency, and they inherit currentColor. */
 function NavIcon({ name, className = "" }: { name: View; className?: string }) {
@@ -69,6 +70,13 @@ function NavIcon({ name, className = "" }: { name: View; className?: string }) {
         <path d="M12.5 10a2.5 2.5 0 0 1-2.5 2.5H6.5a2.5 2.5 0 0 1 0-5H8" />
       </svg>
     );
+  if (name === "apply-profile")
+    return (
+      <svg {...common}>
+        <path d="M10 10.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
+        <path d="M3.5 17c.6-3 3.3-4.5 6.5-4.5s5.9 1.5 6.5 4.5" />
+      </svg>
+    );
   return (
     <svg {...common}>
       <path d="M11.5 2.5H6a1.5 1.5 0 0 0-1.5 1.5v12A1.5 1.5 0 0 0 6 17.5h8a1.5 1.5 0 0 0 1.5-1.5V6.5Z" />
@@ -82,6 +90,7 @@ const NAV: { key: View; label: string; hint: string }[] = [
   { key: "suggest", label: "Analyze & suggest", hint: "Grounded, no fabrication" },
   { key: "gap-close", label: "Gap-close proposals", hint: "Vouch, item by item" },
   { key: "tailored", label: "Tailored CVs", hint: "Draft, approve, export" },
+  { key: "apply-profile", label: "Application details", hint: "Pre-configured answers" },
 ];
 
 /** Shown only when its screen is active; the others stay mounted and keep running. */
@@ -640,6 +649,13 @@ export default function Dashboard() {
               jobById={(id) => jobs.find((j) => j.id === id) ?? null}
               refreshSignal={cvRefresh}
             />
+          </Screen>
+
+          {/* Apply agent, stage 1: the pre-configured facts and banked answers an apply
+              agent is permitted to submit. No browser automation exists yet — this screen
+              is the store those later stages will read from. */}
+          <Screen active={view === "apply-profile"}>
+            <ApplicationProfileEditor />
           </Screen>
 
           {settings.open && (

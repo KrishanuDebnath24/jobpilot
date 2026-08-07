@@ -1,4 +1,7 @@
 import type {
+  AnswerBankEntry,
+  AnswerKind,
+  ApplicationProfile,
   ApplyPreview,
   ChatMessage,
   ChatTurn,
@@ -19,6 +22,7 @@ import type {
   ResumeVersion,
   SearchConfig,
   SearchConfigProposal,
+  SeedProfileResult,
   StructuredResume,
   Suggestion,
   TailoredContent,
@@ -460,3 +464,36 @@ export function streamPipeline(
     controller.abort();
   };
 }
+
+// --- Apply agent (stage 1): application profile + answer bank ---
+export const getApplicationProfile = () =>
+  request<{ profile: ApplicationProfile }>("/application-profile").then((r) => r.profile);
+
+// Partial update: only the keys you pass are written. An explicit null clears a field,
+// which is why callers must not strip nulls before sending.
+export const updateApplicationProfile = (fields: Partial<ApplicationProfile>) =>
+  request<{ profile: ApplicationProfile }>("/application-profile", {
+    method: "PUT",
+    body: JSON.stringify(fields),
+  }).then((r) => r.profile);
+
+// Fills blanks from the parsed résumé; never overwrites a value you've set by hand.
+export const seedApplicationProfile = () =>
+  request<SeedProfileResult>("/application-profile/seed", { method: "POST" });
+
+export const getAnswerBank = () =>
+  request<{ entries: AnswerBankEntry[] }>("/answer-bank").then((r) => r.entries);
+
+export const upsertAnswer = (body: {
+  question_text: string;
+  answer_value: string;
+  answer_kind?: AnswerKind;
+  scope?: string;
+}) =>
+  request<{ entry: AnswerBankEntry; locked_as: string | null }>("/answer-bank", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const deleteAnswer = (entryId: string) =>
+  request<{ deleted: boolean }>(`/answer-bank/${entryId}`, { method: "DELETE" });

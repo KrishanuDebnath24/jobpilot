@@ -9,14 +9,16 @@ until semantic search lands in Phase 3.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
+    Integer,
     String,
     Text,
     Uuid,
@@ -292,12 +294,85 @@ class Message(Base):
     created_at: Mapped[datetime] = _created()
 
 
+class ApplicationProfile(Base):
+    """The user's pre-configured application facts — one row, not a version chain.
+
+    Everything an ATS form asks that is *stable* across applications lives here as a named
+    column, because the canonical field map resolves form fields onto named keys. The two
+    JSONB columns are the categories that cannot be flat values: ``eligibility_json`` is
+    keyed by jurisdiction (authorisation differs per country while the question wording
+    barely does), and ``demographics_json`` is voluntary EEO data with employer-specific
+    option sets. Both are treated as locked — never resolved by text similarity.
+    """
+
+    __tablename__ = "application_profiles"
+
+    id: Mapped[uuid.UUID] = _pk()
+    user_id: Mapped[uuid.UUID] = _user_fk()
+
+    first_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    phone: Mapped[str | None] = mapped_column(Text, nullable=True)
+    address_line1: Mapped[str | None] = mapped_column(Text, nullable=True)
+    city: Mapped[str | None] = mapped_column(Text, nullable=True)
+    region: Mapped[str | None] = mapped_column(Text, nullable=True)
+    postcode: Mapped[str | None] = mapped_column(Text, nullable=True)
+    country: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    linkedin_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    github_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    portfolio_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    notice_period_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    earliest_start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    salary_expectation: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    salary_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    willing_to_relocate: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    work_mode_preference: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    eligibility_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    demographics_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    seeded_from_resume_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = _created()
+
+
+class AnswerBankEntry(Base):
+    """A screening question the user has already answered, reusable on every later form.
+
+    ``question_norm`` is the exact-match key. ``question_vec`` backs near-match, which is
+    deliberately unavailable to ``locked`` rows: eligibility and demographic questions sit
+    a hair apart in embedding space while having entirely different correct answers, so
+    they resolve by exact key or escalate to the user.
+    """
+
+    __tablename__ = "answer_bank"
+
+    id: Mapped[uuid.UUID] = _pk()
+    user_id: Mapped[uuid.UUID] = _user_fk()
+    question_text: Mapped[str] = mapped_column(Text, nullable=False)
+    question_norm: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    question_vec: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
+    answer_value: Mapped[str] = mapped_column(Text, nullable=False)
+    answer_kind: Mapped[str] = mapped_column(String(16), nullable=False, default="text")
+    scope: Mapped[str] = mapped_column(Text, nullable=False, default="global")
+    locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    times_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    confirmed_at: Mapped[datetime] = _created()
+    created_at: Mapped[datetime] = _created()
+
+
 # Ordered child->parent for reference; erasure relies on ON DELETE CASCADE from users.
 USER_OWNED_TABLES = [
     "messages",
     "chat_sessions",
     "agent_events",
     "pipeline_runs",
+    "answer_bank",
+    "application_profiles",
     "cv_drafts",
     "suggestions",
     "analyses",
