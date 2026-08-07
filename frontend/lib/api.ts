@@ -2,6 +2,7 @@ import type {
   AnswerBankEntry,
   AnswerKind,
   ApplicationProfile,
+  ApplyCoverage,
   ApplyPreview,
   ChatMessage,
   ChatTurn,
@@ -497,3 +498,15 @@ export const upsertAnswer = (body: {
 
 export const deleteAnswer = (entryId: string) =>
   request<{ deleted: boolean }>(`/answer-bank/${entryId}`, { method: "DELETE" });
+
+// --- Apply agent (stage 2): where each job's application form lives ---
+export const getApplyCoverage = () =>
+  request<{ coverage: ApplyCoverage }>("/apply/coverage").then((r) => r.coverage);
+
+// Queues redirect resolution; returns 202 immediately. Poll getApplyCoverage for
+// progress — resolving hundreds of listings is paced on purpose.
+export const resolveApplyTargets = (limit = 200, force = false) =>
+  request<{ queued: boolean; task_id: string }>("/apply/resolve", {
+    method: "POST",
+    body: JSON.stringify({ limit, force }),
+  });

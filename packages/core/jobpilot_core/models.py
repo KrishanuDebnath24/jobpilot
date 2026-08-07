@@ -157,6 +157,18 @@ class Job(Base):
     embedding: Mapped[list[float] | None] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
     dedupe_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="scouted")
+    # Apply agent, stage 2: where the application form actually lives. Most connectors
+    # store a tracking redirect in ``url``; these hold the terminal page it leads to and
+    # the platform hosting it. ``apply_resolved_from`` records which ``url`` was followed,
+    # so a later scout rewriting ``url`` makes the resolution detectably stale rather than
+    # silently wrong. All NULL until a resolve run touches the row.
+    apply_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    apply_ats: Mapped[str | None] = mapped_column(Text, nullable=True)
+    apply_board_slug: Mapped[str | None] = mapped_column(Text, nullable=True)
+    apply_resolved_from: Mapped[str | None] = mapped_column(Text, nullable=True)
+    apply_resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = _created()
 
 

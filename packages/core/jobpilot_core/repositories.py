@@ -40,6 +40,16 @@ def job_to_dict(job: models.Job) -> dict:
         "seniority": job.seniority,
         "dedupe_hash": job.dedupe_hash,
         "status": job.status,
+        # Apply agent stage 2. ``apply_stale`` is derived rather than stored: a scout run
+        # can rewrite ``url`` when a higher-precedence connector reports the same job, and
+        # the resolution belongs to whichever url was actually followed.
+        "apply_url": job.apply_url,
+        "apply_ats": job.apply_ats,
+        "apply_board_slug": job.apply_board_slug,
+        "apply_resolved_at": _iso(job.apply_resolved_at),
+        "apply_stale": bool(
+            job.apply_resolved_at is not None and job.apply_resolved_from != job.url
+        ),
         "created_at": _iso(job.created_at),
     }
 
@@ -1821,3 +1831,103 @@ async def delete_answer_bank_entry(
         )
     )
     return bool(result.rowcount)
+
+
+# --------------------------------------------------------------------------- #
+# Apply targets (apply agent, stage 2)
+# --------------------------------------------------------------------------- #
+async def get_jobs_needing_apply_resolution(
+    session: AsyncSession, user_id: uuid.UUID, *, limit: int = 200, force: bool = False
+) -> list[dict]:
+    """Jobs whose application target is unknown or stale, oldest-first.
+
+    "Stale" means ``url`` has changed since it was resolved — a scout run can legitimately
+    rewrite it when a higher-precedence connector reports the same job, and the old
+    terminal page may then belong to a different listing. ``force`` re-resolves everything
+    with a url, which is what you want after adding detection patterns.
+    """
+    stmt = select(models.Job).where(
+        models.Job.user_id == user_id, models.Job.url.isnot(None)
+    )
+    if not force:
+        stmt = stmt.where(
+            or_(
+                models.Job.apply_resolved_at.is_(None),
+                models.Job.apply_resolved_from != models.Job.url,
+            )
+        )
+    rows = (
+        (await session.execute(stmt.order_by(models.Job.created_at.asc()).limit(limit)))
+        .scalars()
+        .all()
+    )
+    # ``connector`` rides along because it often settles the platform outright,
+    # sparing a network hop entirely (see ats_detect.from_connector).
+    return [{"id": str(j.id), "url": j.url, "connector": j.connector} for j in rows]
+
+
+async def set_apply_targets(
+    session: AsyncSession, user_id: uuid.UUID, targets: list[dict]
+) -> int:
+    """Persist resolved apply targets. Each item: ``{id, apply_url, apply_ats,
+    apply_board_slug, apply_resolved_from}``.
+
+    Scoped by ``user_id`` so a job id alone cannot write to another user's row. Rows that
+    no longer exist (deleted mid-run) are skipped rather than failing the batch.
+    """
+    now = datetime.now(timezone.utc)
+    written = 0
+    for item in targets:
+        try:
+            job_id = uuid.UUID(str(item["id"]))
+        except (KeyError, ValueError):
+            continue
+        job = (
+            await session.execute(
+                select(models.Job).where(
+                    models.Job.user_id == user_id, models.Job.id == job_id
+                )
+            )
+        ).scalar_one_or_none()
+        if job is None:
+            continue
+        job.apply_url = item.get("apply_url")
+        job.apply_ats = item.get("apply_ats")
+        job.apply_board_slug = item.get("apply_board_slug")
+        # Record which url produced this answer, not the current one — they can differ if
+        # a scout run landed between reading and writing.
+        job.apply_resolved_from = item.get("apply_resolved_from") or job.url
+        job.apply_resolved_at = now
+        written += 1
+    await session.flush()
+    return written
+
+
+async def get_apply_coverage(session: AsyncSession, user_id: uuid.UUID) -> dict:
+    """How many jobs are reachable, and through which platform — the Stage 2 payoff.
+
+    Returns counts keyed by ``apply_ats`` plus totals, so the dashboard can say "412 of
+    703 resolved, 180 reachable via Greenhouse" without pulling every row.
+    """
+    rows = (
+        await session.execute(
+            select(models.Job.apply_ats, func.count())
+            .where(models.Job.user_id == user_id)
+            .group_by(models.Job.apply_ats)
+        )
+    ).all()
+    by_ats = {(ats or "unresolved"): int(count) for ats, count in rows}
+    total = sum(by_ats.values())
+    unresolved = by_ats.pop("unresolved", 0)
+    reachable = sum(
+        count
+        for ats, count in by_ats.items()
+        if ats not in ("aggregator", "unknown", "blocked")
+    )
+    return {
+        "total": total,
+        "resolved": total - unresolved,
+        "unresolved": unresolved,
+        "reachable": reachable,
+        "by_ats": dict(sorted(by_ats.items(), key=lambda kv: -kv[1])),
+    }

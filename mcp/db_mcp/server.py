@@ -528,5 +528,41 @@ async def delete_user_data(user_id: str | None = None) -> dict:
     return {"deleted": True, "files_deleted": files_deleted, "remaining_counts": remaining}
 
 
+# --------------------------------------------------------------------------- #
+# Apply targets (apply agent, stage 2)
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+async def get_jobs_needing_apply_resolution(limit: int = 200, force: bool = False) -> dict:
+    """Jobs whose application target is unknown or has gone stale, oldest first.
+
+    Stale means ``url`` changed since it was resolved — a scout run can rewrite it when a
+    higher-precedence connector reports the same job. ``force`` returns every job with a
+    url, for re-running after new ATS patterns are added.
+    """
+    uid = require_user_id()
+    async with session_scope() as session:
+        jobs = await repositories.get_jobs_needing_apply_resolution(
+            session, uid, limit=limit, force=force
+        )
+    return {"jobs": jobs}
+
+
+@mcp.tool()
+async def set_apply_targets(targets: list[dict]) -> dict:
+    """Persist resolved apply targets. Writes are scoped to the calling user."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        written = await repositories.set_apply_targets(session, uid, targets or [])
+    return {"written": written}
+
+
+@mcp.tool()
+async def get_apply_coverage() -> dict:
+    """Counts of how many jobs are reachable and via which ATS."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        return {"coverage": await repositories.get_apply_coverage(session, uid)}
+
+
 # ASGI app: validate the signed context on every request, bind user_id for the call.
 app = UserContextMiddleware(mcp.streamable_http_app(), settings)

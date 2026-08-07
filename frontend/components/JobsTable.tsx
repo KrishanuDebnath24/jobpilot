@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { CvDraft, Job } from "@/lib/types";
 import { ApiError, downloadCv, getBaseCvBlob, getCvDraftBlob } from "@/lib/api";
 import {
+  AtsBadge,
   Chip,
   DecisionPill,
   DimensionBars,
@@ -229,16 +230,31 @@ function JobDetail({ job, cvDraft }: { job: Job; cvDraft: CvDraft | null }) {
         </div>
       )}
 
-      {job.url && (
-        <a
-          href={job.url}
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex items-center gap-1 text-sm font-medium text-indigo-600 underline decoration-indigo-200 underline-offset-4 transition hover:text-indigo-700 hover:decoration-indigo-400"
-        >
-          View posting ↗
-        </a>
-      )}
+      <div className="flex flex-wrap items-center gap-4">
+        {job.url && (
+          <a
+            href={job.url}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 text-sm font-medium text-indigo-600 underline decoration-indigo-200 underline-offset-4 transition hover:text-indigo-700 hover:decoration-indigo-400"
+          >
+            View posting ↗
+          </a>
+        )}
+        {/* The resolved application page, when it differs from the listing link — this is
+            the page a later stage would actually fill in. */}
+        {job.apply_url && job.apply_url !== job.url && (
+          <a
+            href={job.apply_url}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 text-sm font-medium text-emerald-700 underline decoration-emerald-200 underline-offset-4 transition hover:decoration-emerald-400"
+            title={`Application form${job.apply_board_slug ? ` — ${job.apply_board_slug}` : ""}`}
+          >
+            Application form ↗
+          </a>
+        )}
+      </div>
     </div>
   );
 }
@@ -310,7 +326,12 @@ function JobRow({
         <td className="px-2 py-3 text-slate-700">{job.company ?? "—"}</td>
         <td className="px-2 py-3 text-slate-500">{job.location ?? "—"}</td>
         <td className="px-2 py-3 pr-4">
-          <SourceBadge connector={job.connector} />
+          <div className="flex flex-wrap items-center gap-1.5">
+            <SourceBadge connector={job.connector} />
+            {/* Where the form lives, once stage 2 has followed the link. Absent until
+                resolved, so an unresolved pool looks exactly as it did before. */}
+            <AtsBadge ats={job.apply_ats} slug={job.apply_board_slug} stale={job.apply_stale} />
+          </div>
         </td>
       </tr>
       {open && (

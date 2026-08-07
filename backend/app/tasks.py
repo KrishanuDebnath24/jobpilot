@@ -13,6 +13,7 @@ from .embed_runner import run_embed
 from .enhance_runner import run_enhance_tracked
 from .orchestrator import run_pipeline_graph
 from .qualify_runner import run_qualify_tracked
+from .resolve_runner import resolve_apply_targets
 from .scout_runner import run_scout_tracked
 
 
@@ -131,3 +132,11 @@ def scheduler_tick() -> dict:
     from .scheduler import run_scheduler_tick
 
     return run_async(run_scheduler_tick())
+
+
+@celery.task(name="apply.resolve")
+def apply_resolve(user_id: str, limit: int = 200, force: bool = False) -> dict:
+    """Apply agent stage 2: follow each listing's redirect chain to the page that hosts
+    the application form, and record which ATS serves it. Link-following only — no
+    browser, no LLM, nothing submitted."""
+    return run_async(resolve_apply_targets(uuid.UUID(user_id), limit=limit, force=force))

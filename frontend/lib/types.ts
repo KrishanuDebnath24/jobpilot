@@ -59,6 +59,15 @@ export type Job = {
   status: string;
   created_at: string | null;
   qualification: Qualification;
+  // Apply agent stage 2: where the application form actually lives. Most connectors
+  // store a tracking redirect in `url`; these are the terminal page it leads to.
+  // `apply_ats` is a platform id, "aggregator" (chain never left a job board) or
+  // "unknown". Null means not yet resolved. `apply_stale` = `url` changed since.
+  apply_url?: string | null;
+  apply_ats?: string | null;
+  apply_board_slug?: string | null;
+  apply_resolved_at?: string | null;
+  apply_stale?: boolean;
 };
 
 // Phase 5: Analyzer + Enhancer
@@ -471,4 +480,13 @@ export type SeedProfileResult = {
   reason?: string;
   fields?: string[];
   profile?: ApplicationProfile;
+};
+
+// Stage 2 coverage summary: how much of the pool has a reachable application form.
+export type ApplyCoverage = {
+  total: number;
+  resolved: number;
+  unresolved: number;
+  reachable: number;
+  by_ats: Record<string, number>;
 };

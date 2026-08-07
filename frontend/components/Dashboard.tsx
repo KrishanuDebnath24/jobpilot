@@ -27,6 +27,7 @@ import ResumeUpload from "./ResumeUpload";
 import SearchSettings, { type SearchSettingsMode } from "./SearchSettings";
 import QualifierSettings from "./QualifierSettings";
 import ApplicationProfileEditor from "./ApplicationProfile";
+import ApplyCoveragePanel from "./ApplyCoverage";
 
 type Decision = "all" | "qualified" | "disqualified" | "unscored";
 
@@ -501,6 +502,12 @@ export default function Dashboard() {
                   </div>
                 </dl>
               </section>
+            </div>
+
+            {/* Apply agent stage 2: which jobs have a real application form behind their
+                listing link. Link-following only — nothing is submitted. */}
+            <div className="mt-4">
+              <ApplyCoveragePanel />
             </div>
 
             <div className="mt-4">

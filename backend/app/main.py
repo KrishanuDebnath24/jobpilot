@@ -224,6 +224,18 @@ class AnswerUpsert(BaseModel):
     scope: str = "global"
 
 
+class ResolveApplyRequest(BaseModel):
+    """Batch size and whether to re-resolve rows that already have an answer.
+
+    ``force`` is for after new ATS patterns are added — previously "unknown" listings
+    deserve a second look, but a plain run must not re-hit employers' servers for jobs
+    already resolved.
+    """
+
+    limit: int = 200
+    force: bool = False
+
+
 class DeriveConfigRequest(BaseModel):
     """Ask the LLM to propose a market-canonical config from the resume (review-only, no
     write). ``hint`` is the optional free-text steer typed in the review dialog."""
@@ -559,6 +571,28 @@ async def update_application_profile(
 async def seed_application_profile(current_user=Depends(get_current_user)) -> dict:
     """Fill blank profile fields from the parsed résumé. Never overwrites a set value."""
     return await mcp_client.config_mcp(current_user.id, "seed_application_profile", {})
+
+
+@app.get("/apply/coverage", tags=["apply"])
+async def get_apply_coverage(current_user=Depends(get_current_user)) -> dict:
+    """How many jobs have a reachable application form, and through which ATS."""
+    return await mcp_client.db_mcp(current_user.id, "get_apply_coverage", {})
+
+
+@app.post("/apply/resolve", status_code=status.HTTP_202_ACCEPTED, tags=["apply"])
+async def resolve_apply_targets(
+    body: ResolveApplyRequest, current_user=Depends(get_current_user)
+) -> dict:
+    """Queue redirect resolution for jobs whose apply target is unknown or stale.
+
+    Returns 202 the moment the task is queued — resolving hundreds of listings is
+    deliberately paced, so the client polls ``/apply/coverage`` for progress rather than
+    waiting. Only follows links; nothing is submitted anywhere.
+    """
+    from .tasks import apply_resolve
+
+    task = apply_resolve.delay(str(current_user.id), body.limit, body.force)
+    return {"queued": True, "task_id": task.id, "limit": body.limit, "force": body.force}
 
 
 @app.get("/answer-bank", tags=["apply"])

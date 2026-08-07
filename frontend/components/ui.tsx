@@ -115,3 +115,86 @@ export function SourceBadge({ connector }: { connector: string | null }) {
     </span>
   );
 }
+
+/* Apply agent stage 2: which system hosts this job's application form.
+ *
+ * Three meaningfully different states, and the distinction matters — "aggregator" means
+ * the link never left a job board so there is no form to reach, which is different from
+ * "unknown" (a real page we don't have a handler for) and from not-yet-resolved. */
+const ATS_LABELS: Record<string, string> = {
+  greenhouse: "Greenhouse",
+  lever: "Lever",
+  workday: "Workday",
+  ashby: "Ashby",
+  smartrecruiters: "SmartRecruiters",
+  workable: "Workable",
+  teamtailor: "Teamtailor",
+  personio: "Personio",
+  recruitee: "Recruitee",
+  bamboohr: "BambooHR",
+  jobvite: "Jobvite",
+  breezy: "Breezy",
+  pinpoint: "Pinpoint",
+  icims: "iCIMS",
+  taleo: "Taleo",
+  successfactors: "SuccessFactors",
+  oraclecloud: "Oracle",
+  rezoomo: "Rezoomo",
+  occupop: "Occupop",
+};
+
+export function AtsBadge({
+  ats,
+  slug,
+  stale,
+}: {
+  ats: string | null | undefined;
+  slug?: string | null;
+  stale?: boolean;
+}) {
+  if (!ats) return null;
+
+  // "Blocked" is deliberately its own state. It means the host refused the request, so
+  // we never saw where the link goes — quite different from having looked and found no
+  // form. Showing it as "no form" would write off jobs that are perfectly applicable.
+  if (ats === "blocked") {
+    return (
+      <span
+        className="rounded-md border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700"
+        title="The site refused our request, so we couldn't see where this link leads. Open the posting yourself — it may well be applicable."
+      >
+        blocked
+      </span>
+    );
+  }
+
+  if (ats === "aggregator" || ats === "unknown") {
+    const isAgg = ats === "aggregator";
+    return (
+      <span
+        className="rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-medium text-slate-400"
+        title={
+          isAgg
+            ? "The link stays on a job board — no application form was reachable behind it."
+            : "Reached a real page, but it isn't a platform JobPilot recognises yet."
+        }
+      >
+        {isAgg ? "no form" : "unrecognised"}
+      </span>
+    );
+  }
+
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700"
+      title={
+        stale
+          ? "Resolved earlier, but the job's link has changed since — will re-resolve on the next run."
+          : `Application form hosted on ${ATS_LABELS[ats] ?? ats}${slug ? ` (${slug})` : ""}`
+      }
+    >
+      {ATS_LABELS[ats] ?? ats}
+      {stale && <span className="text-amber-600">·stale</span>}
+    </span>
+  );
+}
