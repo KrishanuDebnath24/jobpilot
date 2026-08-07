@@ -52,6 +52,24 @@ def test_is_roi_rejects_elsewhere_and_unknown(text):
     assert is_roi(text) is False
 
 
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        # Real Greenhouse/Muse labels. A job open in Dublin *and* elsewhere is still a
+        # Dublin job — rejecting it on the foreign half throws away a real opening.
+        ("Dublin, Ireland; London, England", True),
+        ("Dublin, Ireland; Madrid, Spain; Paris, France", True),
+        ("Amsterdam, The Netherlands; Dublin, Ireland; Paris, France", True),
+        ("London, England; Paris, France", False),
+        # The NI veto still applies per location, so Belfast alone cannot carry it.
+        ("Belfast, Northern Ireland; London, England", False),
+        ("Belfast, Northern Ireland; Dublin, Ireland", True),
+    ],
+)
+def test_is_roi_handles_multi_location_postings(label, expected):
+    assert is_roi(label) is expected
+
+
 def test_is_roi_rejects_belfast_even_when_the_source_says_ireland():
     """Real record from Workable's live Ireland feed: "Belfast, Ulster, Ireland" with
     countryName "Ireland". Belfast is the UK; the city has to beat the country label."""

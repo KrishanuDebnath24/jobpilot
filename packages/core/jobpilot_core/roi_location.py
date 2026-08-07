@@ -96,7 +96,19 @@ def is_roi(
     (Workable gives both); ``text`` is the free-form label otherwise. Structured country
     evidence is trusted over the text, because "Dublin, Ohio" and "Cork, Georgia" are
     real places and the text alone would admit them.
+
+    A posting open in several places is Irish if **any** of them is in the Republic —
+    "Dublin, Ireland; London, England" is a Dublin job you can apply to. Those are split
+    on ``;`` and judged per location, because the single-label rules below reject on any
+    foreign country signal and would otherwise throw the Dublin option away.
     """
+    if text and ";" in text:
+        parts = [p.strip() for p in text.split(";") if p.strip()]
+        if len(parts) > 1:
+            return any(
+                is_roi(p, country=country, country_code=country_code) for p in parts
+            )
+
     blob_all = " ".join(p for p in (text, country) if p).strip().lower()
     # An explicit Northern Ireland signal is decisive and is checked before anything
     # else, including a structured country field. Sources get this wrong in exactly one
