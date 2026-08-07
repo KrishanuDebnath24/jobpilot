@@ -40,11 +40,13 @@ scheduled pipelines).
    - `ANTHROPIC_API_KEY` (`sk-ant-…`) — **set a low Console spend cap first** (~$10/mo).
      `sources-mcp` and the LLM agents fail-fast without it.
    - `POSTGRES_PASSWORD`, `S3_ACCESS_KEY`/`S3_SECRET_KEY` — change from dev defaults.
-   - Connectors (optional, degrade gracefully): `ADZUNA_APP_ID/KEY`, `JOOBLE_API_KEY`,
-     `CAREERJET_API_KEY`, `RAPIDAPI_KEY`/`JSEARCH_API_KEY`.
+   - Connectors: Workable, Greenhouse and the crawler need **no keys**. Optional metered
+     sources (off unless listed in `sources[]`): `RAPIDAPI_KEY`/`JSEARCH_API_KEY`,
+     `APIFY_API_TOKEN`.
 2. **Secret hygiene** (enforced by `test_phase8_security.py`): the real `.env` is gitignored
    and never committed; the **frontend only ever gets `NEXT_PUBLIC_*`** (never a server
-   secret); keep client log level at WARNING in prod (Adzuna key can appear in query params).
+   secret); keep client log level at WARNING in prod (metered-source keys can appear in
+   query params — Apify passes its token as `?token=`).
 3. **Observability (optional, Phase 8a):** set `OTEL_EXPORTER_OTLP_ENDPOINT` to a collector
    you run to ship traces; else leave empty (local, no egress). No PII is ever traced.
 

@@ -82,7 +82,7 @@ def test_real_dotenv_is_not_tracked():
 def test_frontend_references_no_server_secrets():
     # The frontend container only ever gets NEXT_PUBLIC_*; no server secret may appear.
     r = _git("grep", "-nE",
-             r"ANTHROPIC_API_KEY|JWT_SECRET|MCP_SHARED_SECRET|DATABASE_URL|ADZUNA_APP_KEY|S3_SECRET_KEY",
+             r"ANTHROPIC_API_KEY|JWT_SECRET|MCP_SHARED_SECRET|DATABASE_URL|APIFY_API_TOKEN|S3_SECRET_KEY",
              "--", "frontend/")
     assert r.returncode == 1, f"server secret referenced in the frontend:\n{r.stdout}"
 

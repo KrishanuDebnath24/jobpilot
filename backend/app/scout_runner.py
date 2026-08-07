@@ -13,7 +13,7 @@ import logging
 import uuid
 
 from jobpilot_core import events, tracing
-from jobpilot_core.ats_boards import extract_greenhouse_slugs, merge_boards
+from jobpilot_core.ats_boards import merge_boards
 from jobpilot_core.profile_search import derive_search_terms, merge_search_terms
 from jobpilot_core.scout import normalize_raw, unique_contribution
 from jobpilot_core.settings import get_settings
@@ -113,31 +113,38 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
     errors: dict[str, str] = {}
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost_usd": 0.0}
 
-    if "adzuna" in sources:
+    # Free-text engines index by role and collapse on a long AND query, so they get the
+    # SINGLE primary role only — appending the skill list (or even a second role) empties
+    # the result set. Verified live: one role ~50 jobs vs 0 with the full skill list.
+    # Skills still enrich Greenhouse, Workable and the qualifier.
+    roi_location = (locations or ["Dublin, Ireland"])[0]
+    primary_role = roles[:1] or keywords[:1]
+
+    # JSearch is metered and only runs when explicitly listed in `sources`.
+    if "jsearch" in sources:
         await _run_connector(
-            user_id, "adzuna", "search_adzuna",
-            {"roles": roles, "locations": locations, "keywords": keywords},
+            user_id, "jsearch", "search_jsearch",
+            {"roles": primary_role, "keywords": [], "location": roi_location},
             raw_jobs, by_connector, errors, usage,
         )
 
-    # Aggregators give Republic-of-Ireland coverage (Adzuna can't). Free ones are on
-    # by default; JSearch is metered and only runs when explicitly in `sources`. Run
-    # them (and the crawler) BEFORE Greenhouse so we can harvest ATS slugs from their
-    # apply links and fold those boards into the Greenhouse fan-out below (Step 2).
-    #
-    # Free-text engines index by role and collapse on a long AND query, so we query
-    # them with the SINGLE primary role only — appending the skill list (or even a
-    # second role) empties the result set. Verified live: one role ~50 jobs vs 0 with
-    # the full skill list. Skills still enrich Adzuna, Greenhouse, and the qualifier.
-    roi_location = (locations or ["Dublin, Ireland"])[0]
-    primary_role = roles[:1] or keywords[:1]
-    for name in ("jooble", "careerjet", "jsearch"):
-        if name in sources:
-            await _run_connector(
-                user_id, name, f"search_{name}",
-                {"roles": primary_role, "keywords": [], "location": roi_location},
-                raw_jobs, by_connector, errors, usage,
-            )
+    # Workable's Ireland feed: free, full-text, and needs no employer list at all, so it
+    # is the broadest RoI source available. Filtered to the Republic inside the connector.
+    if "workable" in sources:
+        await _run_connector(
+            user_id, "workable", "search_workable",
+            {"roles": roles, "keywords": keywords, "location": settings.workable_location},
+            raw_jobs, by_connector, errors, usage,
+        )
+
+    # Apify/LinkedIn: metered and off unless a token is configured. Full text but no
+    # apply URL, so these land as read-only listings (see the connector docstring).
+    if "apify" in sources:
+        await _run_connector(
+            user_id, "apify", "search_apify_linkedin",
+            {"roles": primary_role, "keywords": keywords, "location": settings.apify_country},
+            raw_jobs, by_connector, errors, usage,
+        )
 
     # The Muse (free, full-text) filters its results client-side rather than by a
     # free-text query, so it gets the full role+keyword set (not just the primary role).
@@ -155,17 +162,17 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
             raw_jobs, by_connector, errors, usage,
         )
 
-    # Step 2: Greenhouse over configured employers + curated Ireland defaults + slugs
-    # harvested from the apply links of everything fetched so far. Per-board 404s are
-    # recorded, never fatal; the whole list is capped for politeness.
+    # Step 2: Greenhouse over the user's configured employers plus the curated set of
+    # verified Irish boards. Per-board 404s are recorded, never fatal; the list is capped
+    # for politeness. Slug harvesting used to run here, deriving boards from the apply
+    # links of everything fetched above — it is gone because it never worked: 0 of 398
+    # aggregator apply URLs held an ATS domain, and the aggregators feeding it have been
+    # removed. New boards are added to ats_boards after being verified, not guessed.
     greenhouse_boards: list[str] = []
     if "greenhouse" in sources:
-        harvested = extract_greenhouse_slugs(rj.get("url") for rj in raw_jobs)
         greenhouse_boards = merge_boards(
-            target_employers, harvested, cap=settings.scout_max_greenhouse_boards
+            target_employers, cap=settings.scout_max_greenhouse_boards
         )
-        if harvested:
-            logger.info("scout.greenhouse harvested slugs=%s", sorted(harvested))
         for company in greenhouse_boards:
             await _run_connector(
                 user_id, f"greenhouse:{company}", "fetch_greenhouse",

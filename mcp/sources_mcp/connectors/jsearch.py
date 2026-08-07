@@ -9,8 +9,8 @@ This is the one metered source: default-OFF in the search config, a hard
 ``jsearch_max_pages`` cap, and every call logged against quota. No LLM.
 
 NOTE: Google-for-Jobs currently returns **no Republic-of-Ireland results** via this
-API (verified: gb/de/us return jobs, ie returns 0). RoI coverage comes from Jooble/
-Careerjet/crawler; JSearch is kept for other markets + future coverage.
+API (verified: gb/de/us return jobs, ie returns 0). RoI coverage comes from Workable,
+Greenhouse and the crawler; JSearch is kept for other markets + future coverage.
 """
 
 from __future__ import annotations

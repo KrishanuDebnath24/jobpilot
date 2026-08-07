@@ -21,12 +21,12 @@ Implemented (Phase 2):
 - **`config_mcp/`** — user search config: `get_search_config`, `update_search_config`
   (`roles`, `locations`, `keywords`, `sources`, `target_employers`, `schedule`). Direct
   DB, user-scoped exactly like `db-mcp`.
-- **`sources_mcp/`** — the connector hub: `list_sources`, `search_adzuna` (API, NI via `gb`),
-  `fetch_greenhouse` (ATS), `search_jooble` / `search_careerjet` / `search_jsearch` (RoI
-  aggregators — Jooble/Careerjet free & on by default, JSearch metered & off by default), and
+- **`sources_mcp/`** — the connector hub: `list_sources`, `search_workable` (free, keyless,
+  widest RoI coverage), `fetch_greenhouse` / `fetch_workable_board` (ATS, real apply URLs),
+  `search_muse`, and the metered opt-ins `search_jsearch` / `search_apify_linkedin`, plus
   `run_crawl` (one polite Irish-board crawler with constrained **Haiku** extraction — the only
   LLM path). Holds no DB state but still requires a valid signed context (protects the
-  Adzuna/RapidAPI quota / Anthropic budget) and **fail-fasts at boot without a real
+  RapidAPI/Apify quota / Anthropic budget) and **fail-fasts at boot without a real
   `ANTHROPIC_API_KEY`**. Each connector returns the one raw job shape
   (`jobpilot_core.scout.RawJob`); Scout normalizes + dedupes (with `ats > crawl > aggregator`
   precedence) and persists via `db-mcp`.
@@ -39,5 +39,5 @@ Run locally from **this directory** (so `import mcp` resolves to the SDK, not th
 cd mcp && uvicorn db_mcp.server:app --port 8001
 cd mcp && uvicorn resume_mcp.server:app --port 8002
 cd mcp && uvicorn config_mcp.server:app --port 8003
-cd mcp && uvicorn sources_mcp.server:app --port 8004   # needs ANTHROPIC_API_KEY + Adzuna creds
+cd mcp && uvicorn sources_mcp.server:app --port 8004   # needs ANTHROPIC_API_KEY only
 ```

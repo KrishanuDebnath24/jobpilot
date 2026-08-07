@@ -19,17 +19,21 @@ from .schemas import JobIn
 
 _SOURCE_TYPES = {"api", "ats", "crawl", "seed"}
 
-# Source precedence for dedupe collapse: a job carried by both a *direct* source and
-# an *aggregator* keeps the direct record (canonical apply link, richer fields).
-# Order: ats (Greenhouse/company) > crawl (board) > aggregator (Adzuna/Jooble/
-# Careerjet/JSearch, all source_type='api'). Aggregators fill coverage gaps; they
-# never overwrite direct data.
+# Source precedence for dedupe collapse: a job carried by both a *direct* source and a
+# broader feed keeps the direct record (canonical apply link, richer fields).
+# Order: ats (Greenhouse board / Workable board) > crawl (board) > api (Workable feed,
+# The Muse, JSearch, Apify/LinkedIn). The api tier fills coverage gaps; it never
+# overwrites direct data. That tiering is what makes it safe to run the Workable feed
+# and a Workable board together: the board record wins, so the job keeps its real
+# application URL rather than the feed's advert link.
 _SOURCE_RANK = {"ats": 3, "crawl": 2, "api": 1, "seed": 0}
 
 # Addendum 2.2 (revised) — full-text-primary. WITHIN a source tier, a `full` record
 # beats a `snippet` one for the same dedupe_hash, so a snippet never wins a contest
-# against full text (e.g. JSearch full-text vs a Jooble snippet, both source_type
-# 'api'). This is the *secondary* precedence key: source tier decides first, then
+# against full text (both are source_type 'api', so the tier cannot separate them).
+# Every current connector emits `full`; the rule stays because it is what lets a
+# snippet-emitting source be added back without risk. This is the *secondary*
+# precedence key: source tier decides first, then
 # completeness. Snippets only ever add coverage; they never overwrite full text.
 # `hydrated` (Level 2 borrowed full text) sits between: it outranks a snippet — so a
 # re-scraped teaser can't clobber a job we already hydrated — but genuine full text
@@ -53,9 +57,9 @@ def record_precedence(source_type: str | None, completeness: str | None) -> tupl
 
 
 class RawJob(BaseModel):
-    """The common raw shape returned by every connector (adzuna / greenhouse / crawl)."""
+    """The common raw shape returned by every connector (workable / greenhouse / crawl)."""
 
-    connector: str  # e.g. "adzuna", "greenhouse:intercom", "crawl:irishjobs"
+    connector: str  # e.g. "workable", "greenhouse:tines", "crawl:irishjobs"
     source: str  # human-facing feed name
     source_type: str  # api | ats | crawl
     title: str | None = None
@@ -65,7 +69,8 @@ class RawJob(BaseModel):
     url: str | None = None
     external_id: str | None = None
     # Addendum 2.2: how complete `description` is. Direct sources (ATS/crawl/JSearch)
-    # emit "full"; aggregators (Adzuna/Jooble/Careerjet) emit "snippet" teaser text.
+    # emit "full". The snippet-emitting aggregators were removed; the flag remains so a
+    # teaser source could be re-added without it silently outranking real full text.
     description_completeness: str = "snippet"
     raw: dict = Field(default_factory=dict)  # the connector's original payload
 
@@ -260,7 +265,9 @@ def _match_title_rules(title_norm: str, rules: tuple[tuple[str, tuple[str, ...]]
 
 def _employment_from_raw(raw: dict) -> str | None:
     """Employment type from a connector's structured fields: JSearch `job_employment_type`,
-    then Adzuna `contract_type` (permanent|contract) + `contract_time` (full_time|part_time)."""
+    then the legacy Adzuna shape `contract_type` (permanent|contract) + `contract_time`
+    (full_time|part_time) — no current connector emits those, but existing rows carry them
+    and re-normalizing must not lose the field."""
     jt = raw.get("job_employment_type")
     if isinstance(jt, str):
         mapped = _JSEARCH_EMPLOYMENT.get(jt.strip().upper())

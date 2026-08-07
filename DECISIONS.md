@@ -1001,3 +1001,79 @@ Two fixes after the code review:
   drafts that are actually *attached* — exported (`pdf_ref`) AND built from the current upload
   (`base_resume_version == resume_version`) — the same filter the dashboard row uses, so the
   displayed CV and the scored CV can't diverge.
+
+## Source set narrowed to full-text, Republic-of-Ireland-only (2026-08-07)
+
+Adzuna, Jooble and Careerjet were **removed**, Workable and Apify/LinkedIn added, and the
+Greenhouse board list replaced with verified Irish boards. The reason is measurement, not
+preference.
+
+### Why the three aggregators went
+
+- **They returned teasers, not postings.** Adzuna exactly 500 characters, Careerjet ~270
+  average, Jooble ~312. A teaser cannot be qualified against or tailored to, so it costs a
+  request and contributes nothing downstream. Full text is not a nice-to-have here; it is
+  the input every later stage consumes.
+- **Nothing behind them was applyable.** The stage-2 resolver measured **0 reachable jobs**
+  across all three: their apply links are tracking redirects, and Adzuna's CloudFront
+  answers 403 to any non-browser. Cross-tabulated over the whole 354-job pool: 110
+  full-text jobs were reachable, **0 snippet jobs were**.
+- **Adzuna could not serve the Republic of Ireland at all.** Its API rejects `ie`
+  (`UNSUPPORTED_COUNTRY`), so it was configured for `gb` and had no client-side location
+  check — importing Great Britain and Northern Ireland into an Ireland-only pool. The
+  seeded default config even listed `"Belfast"` as a target location.
+
+### Why the slug harvester went with them
+
+`extract_greenhouse_slugs` derived board slugs from the apply links of fetched jobs, on the
+theory that aggregator listings would reveal ATS boards we did not know about. Measured:
+**0 of 398 aggregator apply URLs contained any ATS domain**, and the harvester produced 0
+boards over its lifetime. Its inputs are now deleted too. Boards are curated and verified
+in `jobpilot_core.ats_boards`, never inferred from a URL.
+
+`ats_detect.extract_board_slug` is **kept** — that is stage-2 apply-target resolution, which
+is load-bearing for the apply agent and works off resolved terminal URLs, not guesses.
+`AGGREGATOR_HOSTS` also keeps the three removed hosts: jobs already in the database carry
+those URLs and must still classify correctly.
+
+### What replaced them
+
+- **Workable** (free, no key, full text). Two modes: the `jobs.workable.com` location feed
+  needs no employer list at all (912 Irish jobs measured, 199 fetched in a 10-page run from
+  65 companies, median 3,693 characters), and per-employer boards at `apply.workable.com`
+  return a real `application_url`, so those are auto-applyable. The feed's URLs are adverts,
+  not forms, so they classify as `aggregator`/read-only — which is why both modes exist.
+- **Greenhouse board list**: 18 boards verified live *and* confirmed to be the named company
+  by checking job locations, plus 8 large employers with real Dublin presence. Excluded
+  despite resolving: `accenturefederalservices` (617 jobs, all US federal), `dmgmedia`,
+  `nuitee`, `scalapaysrl` — no Irish roles.
+- **Apify/LinkedIn**, metered and OFF by default. Full text but **no apply URL**: verified
+  twice that LinkedIn exposes the apply destination only to authenticated sessions
+  (`applyUrl` empty on 202 of 202 records; their own guest endpoint carries no apply link).
+  So it is a read-only source by nature. Scraping LinkedIn also breaches their User
+  Agreement — a deliberate operator opt-in, never a default. This sits deliberately beside
+  the stage-2 rule that we do not work around bot protection on sites that refuse us.
+
+### Republic-of-Ireland filtering is now enforced in code, not by a query parameter
+
+New `jobpilot_core.roi_location.is_roi`, applied by every connector. Server-side location
+facets leak, and the specific trap is that **Northern Ireland is not the Republic** while
+reading as though it is — a naive `"ireland" in text` admits Belfast, where work
+authorisation and tax both differ. Found live: Workable's own Ireland feed returns
+`"Belfast, Ulster, Ireland"` with `countryName: "Ireland"`, so an explicit NI signal is
+checked *before* the structured country field. Also rejects `"Dublin, Ohio"` and
+`"Cork, Georgia"` — Ireland exported its place names widely.
+
+Greenhouse needed this most: its existing filter reads `not locations or ...`, so it passed
+**every** location when no locations were configured, and several curated boards (Intercom,
+Stripe, Datadog, Cloudflare) are overwhelmingly non-Irish.
+
+### Two adjacent fixes
+
+- `extract_board_slug` returned fake slugs `"view"` and `"j"` for `jobs.workable.com/view/…`
+  and `apply.workable.com/j/…`. A wrong slug is worse than none — it points a later stage at
+  a board that does not exist. Reserved path segments are now excluded.
+- The Greenhouse description cap was hard-coded at 6,000 characters, cutting real postings
+  mid-document (Tines 9,872; Amach 8,387; Nearform 7,686). Requirements sit late in a
+  posting, so the cap was removing exactly what qualifying and tailoring need. Now
+  `ats_max_text_chars`, default 20,000.

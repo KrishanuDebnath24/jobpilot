@@ -134,26 +134,18 @@ class Settings(BaseSettings):
     cv_max_rounds: int = 0
     cv_tailor_max_jobs: int = 20  # bound a selection (spend guard)
 
-    # --- Adzuna connector (free developer tier). Backend/sources-mcp env only. ---
-    adzuna_app_id: str = ""
-    adzuna_app_key: str = ""
-    # Adzuna's API does NOT support the Republic of Ireland ("ie" -> UNSUPPORTED_COUNTRY).
-    # It DOES cover Northern Ireland (Belfast/Derry) under "gb", so that's the default;
-    # RoI (Dublin) coverage comes from the Greenhouse + crawler connectors. Config-driven
-    # so "ie" activates automatically if Adzuna ever adds it. See DECISIONS.md (Phase 2).
-    adzuna_country: str = "gb"
-    adzuna_results_per_page: int = 50  # Adzuna max page size
-    adzuna_max_locations: int = 3  # bound free-tier quota: one call per location, capped
+    # --- Adzuna / Jooble / Careerjet were removed (2026-08-07). All three returned
+    #     snippet teasers rather than full postings, and the stage-2 resolver measured
+    #     ZERO applyable jobs behind any of them: their apply links are tracking
+    #     redirects, and 0 of 398 contained an ATS domain. Adzuna additionally could not
+    #     serve the Republic of Ireland at all (its API rejects "ie") and was configured
+    #     for "gb", so it was importing Great Britain and Northern Ireland into an
+    #     Ireland-only pool. RoI coverage now comes from Workable + Greenhouse, both
+    #     full-text. See DECISIONS.md. ---
 
-    # --- Aggregator connectors for Republic-of-Ireland coverage (Adzuna can't serve
-    #     RoI). Backend/sources-mcp env only. Jooble + Careerjet are free (on by
-    #     default); JSearch is RapidAPI-metered (off by default, page-capped). ---
-    jooble_api_key: str = ""
-    careerjet_api_key: str = ""  # Careerjet affiliate id (affid)
-    careerjet_locale: str = "en_IE"  # the Ireland site
-    careerjet_user_ip: str = "127.0.0.1"  # representative server IP for attribution
-    # JSearch (Google-for-Jobs) has two provider options; the connector prefers
-    # OpenWeb Ninja (its canonical source) when JSEARCH_API_KEY is set, else RapidAPI.
+    # --- JSearch (Google-for-Jobs). Metered, OFF by default, page-capped. Kept because
+    #     unlike the removed aggregators it returns full descriptions. Two provider
+    #     options; prefers OpenWeb Ninja (canonical) when JSEARCH_API_KEY is set. ---
     jsearch_api_key: str = ""  # OpenWeb Ninja (X-API-Key header)
     jsearch_base_url: str = "https://api.openwebninja.com/jsearch/search-v2"
     rapidapi_key: str = ""  # JSearch via RapidAPI (fallback)
@@ -167,6 +159,37 @@ class Settings(BaseSettings):
     #     limits). Full-text, has genuine Dublin coverage. Backend/sources-mcp env. ---
     muse_api_key: str = ""
     muse_max_pages: int = 3  # pages fetched per run (20 results/page); bounds requests
+
+    # --- Workable. Free, no key, full-text, and the largest verified RoI pool we have
+    #     (912 jobs on jobs.workable.com's Ireland feed vs 126 across all known Irish
+    #     Greenhouse boards). Two modes: the location feed needs no employer list at
+    #     all, and per-board polling covers employers discovered by other means. ---
+    # Cap on plain-text description kept per ATS posting. Was 6,000 hard-coded in the
+    # Greenhouse connector, which cut real postings mid-document: Tines reaches 9,872
+    # characters, Amach 8,387, Nearform 7,686. Requirements sit late in a posting, so a
+    # low cap removed exactly what qualifying and tailoring need.
+    ats_max_text_chars: int = 20000
+
+    workable_location: str = "ireland"  # jobs.workable.com location facet
+    workable_page_size: int = 20  # the feed rejects limit>20 with HTTP 400
+    workable_max_pages: int = 10  # bounds a run; 10 x 20 covers most of the RoI pool
+    # Boards polled per run in per-employer mode (configured + harvested slugs).
+    workable_max_boards: int = 40
+
+    # --- Apify (metered scraping platform; LinkedIn actor). OFF by default and hard
+    #     capped, same cost-guard treatment as JSearch. Note what this source can and
+    #     cannot do: LinkedIn's public pages carry the full description but NO apply
+    #     URL (verified against LinkedIn's own guest endpoint — the apply destination
+    #     is shown only to authenticated sessions). So these jobs are full-text and
+    #     good for qualifying/tailoring, but ats_detect will correctly file their
+    #     linkedin.com URLs as `aggregator`, i.e. not auto-applyable. Scraping
+    #     LinkedIn also breaches their User Agreement; this is enabled deliberately
+    #     by the operator, never by default. ---
+    apify_api_token: str = ""
+    apify_linkedin_actor: str = "curious_coder~linkedin-jobs-scraper"
+    apify_max_results: int = 100  # hard per-run cost cap (~$1 per 1,000 results)
+    apify_timeout_seconds: float = 300.0  # actor runs are slow; ~100s for 200 jobs
+    apify_country: str = "Ireland"  # LinkedIn location facet
 
     # --- Scout retrieval tuning ---
     # Derive search terms (roles/keywords/locations) from the user's resume and merge
@@ -270,18 +293,6 @@ class Settings(BaseSettings):
                 "key (starts with 'sk-ant-') in the environment before starting a "
                 "service that makes LLM calls (Phase 2+)."
             )
-        return key
-
-    def require_jooble_key(self) -> str:
-        key = (self.jooble_api_key or "").strip()
-        if not key:
-            raise RuntimeError("JOOBLE_API_KEY is not configured (get one free at jooble.org/api/about)")
-        return key
-
-    def require_careerjet_affid(self) -> str:
-        key = (self.careerjet_api_key or "").strip()
-        if not key:
-            raise RuntimeError("CAREERJET_API_KEY (affiliate id) is not configured (careerjet.com/partners)")
         return key
 
     def jsearch_provider(self) -> tuple[str, str, dict]:

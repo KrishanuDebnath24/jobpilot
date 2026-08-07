@@ -142,7 +142,7 @@ services:
       retries: 5
 
   # sources-mcp — connector hub. Makes LLM calls (crawl), so it needs ANTHROPIC_API_KEY
-  # and the Adzuna creds (from .env); fail-fasts at boot without a real key. No DB.
+  # (from .env); fail-fasts at boot without a real key. No DB. Connectors need no keys.
   sources-mcp:
     image: jobpilot-mcp:local
     build:

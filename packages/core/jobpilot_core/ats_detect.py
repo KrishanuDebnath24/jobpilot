@@ -100,6 +100,15 @@ _SUBDOMAIN_SLUG: frozenset[str] = frozenset({
     "recruitee", "teamtailor", "personio", "workday", "bamboohr", "pinpoint",
 })
 
+#: First path segments that are part of the platform's own routing, never an employer.
+#: Without these the generic ``^/<segment>/`` patterns above happily return a slug for
+#: URLs that name no company at all — ``jobs.workable.com/view/<token>`` would yield
+#: ``"view"``, and Workable's short apply form ``apply.workable.com/j/<code>`` ``"j"``.
+#: A wrong slug is worse than none: it points a later stage at a board that isn't there.
+_RESERVED_PATH_SEGMENTS: frozenset[str] = frozenset({
+    "jobs", "careers", "embed", "apply", "view", "j", "job", "search", "company",
+})
+
 
 def from_connector(connector: str | None) -> tuple[str, str | None] | None:
     """Identify the ATS from the connector that fetched the job, with no network at all.
@@ -205,7 +214,7 @@ def extract_board_slug(url: str | None, ats: str | None = None) -> str | None:
         match = pattern.search(path)
         if match and match.group(1):
             slug = match.group(1)
-            if slug not in ("jobs", "careers", "embed", "apply"):
+            if slug not in _RESERVED_PATH_SEGMENTS:
                 return slug
     return None
 

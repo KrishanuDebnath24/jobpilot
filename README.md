@@ -28,7 +28,7 @@ backend/          FastAPI API (auth, /ready, resume, jobs, erasure, /scout/*,
 mcp/db_mcp/       db-mcp   — scoped CRUD, pipeline-run tracking, get_stage_status
 mcp/resume_mcp/   resume-mcp — parse_resume + get_structured_resume
 mcp/config_mcp/   config-mcp — get/update search + qualifier config (user-scoped)
-mcp/sources_mcp/  sources-mcp — connector hub: search_adzuna, fetch_greenhouse,
+mcp/sources_mcp/  sources-mcp — connector hub: search_workable, fetch_greenhouse,
                   run_crawl (Haiku extraction), aggregators, list_sources
 mcp/pipeline_mcp/ pipeline-mcp — control surface: run_full_pipeline, get_pipeline_status,
                   trigger_stage, list_runs, get_run (+ one-active-pipeline guard)
@@ -60,12 +60,13 @@ backend → frontend.
 - Frontend: http://localhost:3000
 
 > **Phase 2 needs credentials** (backend/`sources-mcp` env only, never the frontend or git):
-> `ANTHROPIC_API_KEY` (set a low Console spend cap first) and `ADZUNA_APP_ID`/`ADZUNA_APP_KEY`
-> from developer.adzuna.com. `sources-mcp` refuses to start without a real Anthropic key.
-> Adzuna covers Northern Ireland via `gb` (not the Republic of Ireland — see `DECISIONS.md`).
+> `ANTHROPIC_API_KEY` (set a low Console spend cap first). `sources-mcp` refuses to start
+> without a real Anthropic key. No connector needs credentials: Workable, Greenhouse and the
+> crawler are all keyless, full-text and filtered to the Republic of Ireland.
 >
 > **RoI coverage (addendum)** comes from aggregator connectors — free & on by default:
-> `JOOBLE_API_KEY` (jooble.org/api/about) and `CAREERJET_API_KEY` (careerjet.com/partners).
+> Optional metered sources, off unless listed in `sources[]`: `JSEARCH_API_KEY` /
+> `RAPIDAPI_KEY`, and `APIFY_API_TOKEN` (LinkedIn — full text but read-only).
 > `RAPIDAPI_KEY` enables the metered JSearch connector (Indeed/LinkedIn reach) — **off by
 > default**; subscribe to JSearch on RapidAPI and add `jsearch` to your `sources[]` to use it.
 > Any connector without its key degrades gracefully (recorded on the run, never fatal).

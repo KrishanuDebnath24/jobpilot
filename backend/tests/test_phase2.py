@@ -3,8 +3,8 @@
 Layered so CI (no external keys) still gets real coverage:
 - pure unit: dedupe/normalize + crawler robots politeness (no network/LLM),
 - ``config_service``: config-mcp CRUD + isolation (needs DB only),
-- ``sources_stack``: live Adzuna/Greenhouse + Scout run tracking + Celery task
-  (skips unless a real Anthropic key + Adzuna creds are present).
+- ``sources_stack``: live Workable/Greenhouse + Scout run tracking + Celery task
+  (skips unless a real Anthropic key is present; both connectors are keyless).
 """
 
 from __future__ import annotations
@@ -587,50 +587,60 @@ def test_merge_search_terms_config_leads_profile_extends():
 # --------------------------------------------------------------------------- #
 # Pure unit — Greenhouse slug harvest + board merge (Step 2; no network)
 # --------------------------------------------------------------------------- #
-def test_extract_greenhouse_slugs():
-    from jobpilot_core.ats_boards import extract_greenhouse_slugs
-
-    urls = [
-        "https://boards.greenhouse.io/intercom/jobs/12345",
-        "https://job-boards.greenhouse.io/stripe/jobs/999",
-        "https://boards.greenhouse.io/embed/job_board?for=datadog&token=1",
-        "https://www.adzuna.co.uk/jobs/land/ad/123",  # not greenhouse -> ignored
-        None,
-    ]
-    assert extract_greenhouse_slugs(urls) == {"intercom", "stripe", "datadog"}
+# `extract_greenhouse_slugs` was deleted along with the aggregator connectors that fed
+# it. It harvested board slugs from the apply links of fetched jobs, and measured against
+# the real pool it produced nothing: 0 of 398 aggregator apply URLs contained any ATS
+# domain. Boards are now curated and verified in ats_boards, never guessed from a URL.
 
 
 def test_merge_boards_unions_and_caps():
     from jobpilot_core.ats_boards import DEFAULT_GREENHOUSE_BOARDS, merge_boards
 
-    boards = merge_boards(["MyCo", "intercom"], {"newco", "stripe"}, cap=40)
+    boards = merge_boards(["MyCo", "tines"], cap=60)
     assert boards[0] == "myco"  # configured first, lowercased
-    assert "intercom" in boards and "stripe" in boards and "newco" in boards
+    assert "tines" in boards
     assert len(boards) == len(set(boards))  # de-duped
-    # Defaults are folded in.
+    # Curated defaults are folded in.
     assert set(DEFAULT_GREENHOUSE_BOARDS).issubset(set(boards))
     # Cap is honored.
-    assert len(merge_boards([f"c{i}" for i in range(100)], set(), cap=10)) == 10
+    assert len(merge_boards([f"c{i}" for i in range(100)], cap=10)) == 10
+
+
+def test_default_boards_are_lowercase_and_unique():
+    """The board list is mapped straight into an API path, so a stray capital or a
+    duplicate is a wasted request (or a 404 recorded as a connector error)."""
+    from jobpilot_core.ats_boards import DEFAULT_GREENHOUSE_BOARDS as boards
+
+    assert boards == [b.lower().strip() for b in boards]
+    assert len(boards) == len(set(boards))
+    # Boards verified as having no Irish roles must stay out of an Ireland-only pool.
+    for excluded in ("accenturefederalservices", "dmgmedia", "nuitee", "scalapaysrl"):
+        assert excluded not in boards
 
 
 # --------------------------------------------------------------------------- #
 # Addendum 2.2 — description completeness tagging (no network/LLM)
 # --------------------------------------------------------------------------- #
 def test_connector_tags_description_completeness():
-    """Connectors set the source-appropriate completeness, and normalize_raw carries
-    it through to the persisted shape."""
-    from sources_mcp.connectors.adzuna import _to_raw as adzuna_raw
-    from sources_mcp.connectors.careerjet import _to_raw as careerjet_raw
-    from sources_mcp.connectors.jooble import _to_raw as jooble_raw
+    """Every remaining connector reports `full`, and normalize_raw carries the flag
+    through to the persisted shape. The snippet-emitting connectors (Adzuna, Jooble,
+    Careerjet) were removed — a teaser cannot be qualified against or tailored to."""
+    from sources_mcp.connectors.apify import _to_raw as apify_raw
     from sources_mcp.connectors.jsearch import _to_raw as jsearch_raw
+    from sources_mcp.connectors.themuse import _to_raw as muse_raw
+    from sources_mcp.connectors.workable import _board_to_raw, _feed_to_raw
 
-    assert jooble_raw({"title": "x", "snippet": "t"}).description_completeness == "snippet"
-    assert careerjet_raw({"title": "x", "description": "t"}).description_completeness == "snippet"
-    assert adzuna_raw({"title": "x"}).description_completeness == "snippet"
     assert jsearch_raw({"job_title": "x"}).description_completeness == "full"
+    assert muse_raw({"name": "x", "contents": "<p>body</p>"}).description_completeness == "full"
+    assert _feed_to_raw({"title": "x", "description": "<p>b</p>"}, "Dublin").description_completeness == "full"
+    assert _board_to_raw({"title": "x", "description": "<p>b</p>"}, "acme", "Acme").description_completeness == "full"
+    assert apify_raw({"title": "x", "descriptionText": "body"}).description_completeness == "full"
+    # Apify is the one source that can legitimately come back empty-bodied.
+    assert apify_raw({"title": "x", "descriptionText": ""}).description_completeness == "snippet"
 
-    ji = normalize_raw(jooble_raw({"title": "x", "company": "c", "snippet": "t"}))
-    assert ji.description_completeness == "snippet"
+    ji = normalize_raw(_feed_to_raw({"title": "x", "company": {"title": "c"},
+                                     "description": "<p>body</p>"}, "Dublin"))
+    assert ji.description_completeness == "full"
 
 
 async def test_completeness_persisted_and_precedence(mcp_services):
@@ -703,9 +713,9 @@ async def test_search_config_crud_and_isolation(config_service):
     try:
         assert (await _call(config_service, a, "get_search_config"))["config"]["roles"] == []
         upd = await _call(config_service, a, "update_search_config",
-                          {"roles": ["Backend Engineer"], "sources": ["adzuna", "greenhouse"],
-                           "target_employers": ["stripe"]})
-        assert upd["config"]["sources"] == ["adzuna", "greenhouse"]
+                          {"roles": ["Backend Engineer"], "sources": ["workable", "greenhouse"],
+                           "target_employers": ["tines"]})
+        assert upd["config"]["sources"] == ["workable", "greenhouse"]
         # partial update keeps roles
         await _call(config_service, a, "update_search_config", {"keywords": ["python"]})
         after = await _call(config_service, a, "get_search_config")
@@ -721,30 +731,65 @@ async def test_search_config_crud_and_isolation(config_service):
 # --------------------------------------------------------------------------- #
 # Live connectors + Scout run tracking (skips without keys)
 # --------------------------------------------------------------------------- #
-async def test_scout_adzuna_and_greenhouse_persist_idempotent(sources_stack):
+async def test_scout_workable_and_greenhouse_persist_idempotent(sources_stack):
+    """Both keyless full-text sources, end to end: Workable's feed (api tier) and a
+    Greenhouse board (ats tier), persisted and idempotent on re-run."""
     from app import mcp_client
     from app.scout_runner import run_scout
 
     uid = await _mk_user()
     try:
         await mcp_client.config_mcp(uid, "update_search_config", {
-            "roles": ["Software Engineer"], "locations": ["Dublin", "Belfast"],
-            "keywords": ["python"], "sources": ["adzuna", "greenhouse"],
-            "target_employers": ["stripe"]})
+            "roles": [], "locations": ["Dublin"], "keywords": [],
+            "sources": ["workable", "greenhouse"], "target_employers": ["tines"]})
         r1 = await run_scout(uid)
         assert r1["errors"] == {}
-        assert r1["by_connector"].get("adzuna", 0) > 0
-        assert r1["by_connector"].get("greenhouse:stripe", 0) > 0
+        assert r1["by_connector"].get("workable", 0) > 0
+        assert r1["by_connector"].get("greenhouse:tines", 0) > 0
         assert r1["new"] == r1["unique"] > 0
 
         jobs = (await mcp_client.db_mcp(uid, "get_jobs", {"limit": 5000}))["jobs"]
         types = {j["source_type"] for j in jobs}
         assert {"api", "ats"} <= types
         assert len({j["dedupe_hash"] for j in jobs}) == len(jobs)  # no dup rows
+        # Ireland-only, and full text throughout: the point of this source set.
+        assert all(j["description_completeness"] in ("full", "hydrated") for j in jobs)
 
-        r2 = await run_scout(uid)  # idempotent
-        assert r2["new"] == 0
-        assert len((await mcp_client.db_mcp(uid, "get_jobs", {"limit": 5000}))["jobs"]) == len(jobs)
+        # Idempotency, stated as the invariant that actually holds against a *live* feed:
+        # re-running must not duplicate anything it already stored. Asserting new == 0
+        # would be flaky — Workable's feed is a live cursor over ~900 Irish jobs, so a
+        # genuinely new posting can arrive between two runs seconds apart.
+        hashes_before = {j["dedupe_hash"] for j in jobs}
+        r2 = await run_scout(uid)
+        after = (await mcp_client.db_mcp(uid, "get_jobs", {"limit": 5000}))["jobs"]
+        hashes_after = {j["dedupe_hash"] for j in after}
+        assert len(hashes_after) == len(after), "re-running produced duplicate rows"
+        assert hashes_before <= hashes_after, "a previously stored job disappeared"
+        assert r2["new"] == len(hashes_after) - len(hashes_before)
+    finally:
+        await _cleanup(uid)
+
+
+async def test_scout_pool_is_republic_of_ireland_only(sources_stack):
+    """Every persisted job sits in the Republic. Northern Ireland is the case that
+    matters: it reads as Irish and is a different jurisdiction."""
+    from jobpilot_core.roi_location import is_roi
+
+    from app import mcp_client
+    from app.scout_runner import run_scout
+
+    uid = await _mk_user()
+    try:
+        await mcp_client.config_mcp(uid, "update_search_config", {
+            "roles": [], "locations": [], "keywords": [],
+            # Boards that are mostly non-Irish; the connector filter must hold.
+            "sources": ["workable", "greenhouse"],
+            "target_employers": ["intercom", "stripe", "datadog"]})
+        await run_scout(uid)
+        jobs = (await mcp_client.db_mcp(uid, "get_jobs", {"limit": 5000}))["jobs"]
+        assert jobs, "expected some jobs to verify"
+        leaked = [j["location"] for j in jobs if not is_roi(j["location"])]
+        assert leaked == [], f"non-RoI jobs reached the pool: {leaked[:10]}"
     finally:
         await _cleanup(uid)
 
@@ -756,11 +801,11 @@ async def test_scout_graceful_degradation_and_run_tracking(sources_stack):
     uid = await _mk_user()
     try:
         await mcp_client.config_mcp(uid, "update_search_config", {
-            "roles": ["Software Engineer"], "locations": ["Belfast"], "keywords": ["python"],
-            "sources": ["adzuna", "greenhouse"], "target_employers": ["no-such-board-xyz-123"]})
+            "roles": [], "locations": ["Dublin"], "keywords": [],
+            "sources": ["workable", "greenhouse"], "target_employers": ["no-such-board-xyz-123"]})
         summary = await run_scout_tracked(uid)
         assert "greenhouse:no-such-board-xyz-123" in summary["errors"]  # recorded
-        assert summary["by_connector"].get("adzuna", 0) > 0  # good connector still ran
+        assert summary["by_connector"].get("workable", 0) > 0  # good connector still ran
 
         runs = (await mcp_client.db_mcp(uid, "get_pipeline_runs", {"stage": "scout"}))["runs"]
         assert len(runs) == 1 and runs[0]["status"] == "completed"  # not fatal
@@ -779,8 +824,8 @@ def test_celery_scout_task_runs_and_tracks(sources_stack):
     uid = _run(_mk_user())
     try:
         _run(mcp_client.config_mcp(uid, "update_search_config", {
-            "roles": ["Software Engineer"], "locations": ["Belfast"], "keywords": ["python"],
-            "sources": ["adzuna"]}))
+            "roles": [], "locations": ["Dublin"], "keywords": [],
+            "sources": ["workable"]}))
         result = scout_run.apply(args=[str(uid)])
         summary = result.get()
         assert summary["new"] > 0 and "run_id" in summary

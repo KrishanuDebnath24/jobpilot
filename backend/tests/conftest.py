@@ -165,7 +165,7 @@ def _stop(procs):
 
 @pytest.fixture(scope="session")
 def config_service():
-    """config-mcp alone (no Anthropic/Adzuna keys needed) — runs in CI."""
+    """config-mcp alone (no keys needed at all) — runs in CI."""
     if not _db_reachable():
         pytest.skip("database not reachable")
     _apply_schema()
@@ -181,15 +181,16 @@ def config_service():
 @pytest.fixture(scope="session")
 def sources_stack(tmp_path_factory):
     """db-mcp + config-mcp + sources-mcp for the live-connector tests. Skips unless a
-    real Anthropic key + Adzuna creds are present (sources-mcp fail-fasts otherwise),
-    so CI without secrets skips cleanly."""
+    real Anthropic key is present (sources-mcp fail-fasts otherwise), so CI without
+    secrets skips cleanly. No connector credentials are needed any more: Workable and
+    Greenhouse are both keyless."""
     if not _db_reachable():
         pytest.skip("database not reachable")
     from jobpilot_core.settings import get_settings
 
     s = get_settings()
-    if not (s.anthropic_api_key.startswith("sk-ant-") and s.adzuna_app_id and s.adzuna_app_key):
-        pytest.skip("ANTHROPIC_API_KEY / Adzuna credentials not configured")
+    if not s.anthropic_api_key.startswith("sk-ant-"):
+        pytest.skip("ANTHROPIC_API_KEY not configured")
     _apply_schema()
     env = {
         **os.environ,

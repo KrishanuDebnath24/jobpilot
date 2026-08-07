@@ -13,30 +13,27 @@ from jobpilot_core.security import hash_password
 from jobpilot_core.settings import get_settings
 
 
-# Ireland-focused default so Scout has something sensible to fan out on. Targets a
-# couple of Dublin-HQ'd employers with public Greenhouse boards for the ATS path.
+# Republic-of-Ireland default so Scout has something sensible to fan out on.
 DEFAULT_SEARCH_CONFIG = {
     "roles": ["Software Engineer", "Backend Engineer"],
-    # Dublin (Republic of Ireland) is served by Greenhouse + the crawler; Belfast
-    # (Northern Ireland) is where Adzuna's `gb` coverage lands island-of-Ireland jobs.
-    "locations": ["Dublin", "Belfast"],
+    # Republic of Ireland only. Belfast was here while Adzuna supplied "gb" coverage;
+    # Adzuna is gone and Northern Ireland is a different jurisdiction (different work
+    # authorisation and tax), so it is deliberately not seeded.
+    "locations": ["Dublin"],
     "keywords": ["python"],
-    # Adzuna (NI), Greenhouse (ATS/RoI), crawler (RoI), + free aggregators for RoI
-    # breadth. JSearch is metered, so it stays OFF until a user opts in.
-    "sources": ["adzuna", "greenhouse", "crawl", "jooble", "careerjet"],
-    # Addendum 2.2 (revised) step 3: `target_employers` is the cheapest full-text lever
-    # — every RoI employer with a public Greenhouse board adds full-text ATS jobs at
-    # zero metered cost. Grown to a batch of Dublin-HQ'd/large-RoI-presence employers.
-    # A slug that doesn't resolve is recorded as a connector error, never fatal, so
-    # curate this list against live boards (boards.greenhouse.io/<slug>).
+    # All full-text and RoI-filtered. Workable needs no employer list and is the
+    # broadest source; Greenhouse carries the verified Irish boards. JSearch and Apify
+    # are metered, so both stay OFF until a user opts in.
+    "sources": ["workable", "greenhouse", "crawl", "muse"],
+    # `target_employers` extends the curated Greenhouse board list in
+    # jobpilot_core.ats_boards with the user's own picks. A slug that doesn't resolve is
+    # recorded as a connector error, never fatal — but verify against a live board
+    # (boards.greenhouse.io/<slug>) *and* check the job locations, because a name-derived
+    # slug resolves to the wrong company often enough to matter.
     "target_employers": [
-        "intercom",
-        "stripe",
         "workhuman",
-        "tines",
         "wayflyer",
         "hubspot",
-        "udemy",
     ],
     "schedule": None,
 }

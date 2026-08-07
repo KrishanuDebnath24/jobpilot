@@ -7,17 +7,19 @@ import ResumeUpload from "./ResumeUpload";
 
 export type SearchSettingsMode = "onboarding" | "edit" | "review";
 
+// Every source is full-text and filtered to the Republic of Ireland. Adzuna, Jooble and
+// Careerjet were removed: they returned teaser snippets with no reachable application
+// form behind them, and Adzuna could only serve Great Britain and Northern Ireland.
 const SOURCES: { id: string; label: string; note: string }[] = [
+  { id: "workable", label: "Workable", note: "full-text · free · widest coverage" },
   { id: "greenhouse", label: "Greenhouse", note: "ATS · full-text · free" },
   { id: "crawl", label: "Crawler", note: "Irish board · free" },
-  { id: "jooble", label: "Jooble", note: "free" },
-  { id: "careerjet", label: "Careerjet", note: "free" },
   { id: "muse", label: "The Muse", note: "full-text · free" },
-  { id: "adzuna", label: "Adzuna", note: "NI coverage" },
   { id: "jsearch", label: "JSearch", note: "metered — opt in" },
+  { id: "apify", label: "LinkedIn (Apify)", note: "metered · read-only — opt in" },
 ];
-// Sensible free defaults for a brand-new user (matches the seeded default set minus Adzuna).
-const DEFAULT_SOURCES = ["greenhouse", "crawl", "jooble", "careerjet", "muse"];
+// Free defaults for a brand-new user (matches the seeded set).
+const DEFAULT_SOURCES = ["workable", "greenhouse", "crawl", "muse"];
 
 /** Comma/Enter-to-add chip editor for a string list. */
 function ChipInput({
