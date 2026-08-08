@@ -20,14 +20,11 @@ import Suggestions from "./Suggestions";
 import GapCloseProposals from "./GapCloseProposals";
 import Chat from "./Chat";
 import Ask from "./Ask";
-import Gates from "./Gates";
 import TailoredCVs from "./TailoredCVs";
-import CostPanel from "./CostPanel";
-import ResumeUpload from "./ResumeUpload";
+import CvPanel from "./CvPanel";
 import SearchSettings, { type SearchSettingsMode } from "./SearchSettings";
 import QualifierSettings from "./QualifierSettings";
 import ApplicationProfileEditor from "./ApplicationProfile";
-import ApplyCoveragePanel from "./ApplyCoverage";
 
 type Decision = "all" | "qualified" | "disqualified" | "unscored";
 
@@ -119,6 +116,64 @@ function Stat({
   );
 }
 
+/** Header actions — the things you configure rather than watch. They live in the top-right
+ *  of the Dashboard header and each opens a dialog, so the screen below stays about jobs. */
+function HeaderAction({
+  label,
+  onClick,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={label}
+      className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 shadow-card transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900 active:scale-[0.98]"
+    >
+      {children}
+      <span className="hidden sm:inline">{label}</span>
+    </button>
+  );
+}
+
+/** Inline glyphs for the header actions — same no-dependency approach as NavIcon. */
+function ActionIcon({ name }: { name: "cv" | "search" | "score" }) {
+  const common = {
+    className: "h-3.5 w-3.5 shrink-0",
+    viewBox: "0 0 20 20",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.6,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+  };
+  if (name === "cv")
+    return (
+      <svg {...common}>
+        <path d="M11.5 2.5H6a1.5 1.5 0 0 0-1.5 1.5v12A1.5 1.5 0 0 0 6 17.5h8a1.5 1.5 0 0 0 1.5-1.5V6.5Z" />
+        <path d="M11.5 2.5v4h4M7.5 11h5M7.5 14h3" />
+      </svg>
+    );
+  if (name === "search")
+    return (
+      <svg {...common}>
+        <circle cx="9" cy="9" r="5.5" />
+        <path d="m13 13 4 4" />
+      </svg>
+    );
+  return (
+    <svg {...common}>
+      <path d="M4 6h12M4 10h12M4 14h12" />
+      <circle cx="8" cy="6" r="1.6" fill="currentColor" stroke="none" />
+      <circle cx="13" cy="10" r="1.6" fill="currentColor" stroke="none" />
+      <circle cx="6.5" cy="14" r="1.6" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 export default function Dashboard() {
   const [view, setView] = useState<View>("dashboard");
   const [authed, setAuthed] = useState<boolean | null>(null);
@@ -157,6 +212,9 @@ export default function Dashboard() {
   // Qualifier config: scoring weights/threshold + the must-have hard filter.
   const [qualifierConfig, setQualifierConfig] = useState<QualifierConfig | null>(null);
   const [qualifierOpen, setQualifierOpen] = useState(false);
+
+  // The CV dialog: résumé on file, upload, and the assemble/export loop.
+  const [cvOpen, setCvOpen] = useState(false);
 
   const loadQualifierConfig = useCallback(async () => {
     try {
@@ -211,7 +269,10 @@ export default function Dashboard() {
     loadCvContext(); // new upload → refresh résumé id so stale tailored CVs drop off the rows
     try {
       const { proposal, has_resume } = await deriveSearchConfig();
-      if (has_resume) openSettings("review", proposal);
+      if (has_resume) {
+        setCvOpen(false); // the review dialog takes over from here — don't stack two
+        openSettings("review", proposal);
+      }
     } catch {
       /* propose is best-effort; the user can still edit config manually */
     }
@@ -435,7 +496,23 @@ export default function Dashboard() {
                   : current.hint}
               </p>
             </div>
-            <div className="ml-auto flex items-center gap-3">
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+              {/* Configuration lives here, out of the way of the jobs below. Dashboard only —
+                  the review screens have their own controls and shouldn't compete. */}
+              {view === "dashboard" && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <HeaderAction label="Your CV / résumé" onClick={() => setCvOpen(true)}>
+                    <ActionIcon name="cv" />
+                  </HeaderAction>
+                  <HeaderAction label="Search settings" onClick={() => openSettings("edit")}>
+                    <ActionIcon name="search" />
+                  </HeaderAction>
+                  <HeaderAction label="Scoring & filters" onClick={() => setQualifierOpen(true)}>
+                    <ActionIcon name="score" />
+                  </HeaderAction>
+                  <span className="mx-1 hidden h-5 w-px bg-slate-200 sm:block" />
+                </div>
+              )}
               <span className="hidden text-sm text-slate-500 sm:inline">{email}</span>
               <button
                 onClick={logout}
@@ -458,110 +535,13 @@ export default function Dashboard() {
 
             <PipelineLive onJobsChanged={loadJobs} />
 
-            {/* The two conversational agents, side by side: the Concierge acts; Ask answers
-                (read-only). Distinct privilege sets — Ask has no action tools. */}
-            <div className="mt-5 grid gap-4 lg:grid-cols-2">
-              <Chat onChanged={onConciergeChanged} selectedJobIds={[...selected]} />
-              <Ask />
-            </div>
-            <div className="mt-4 grid gap-4 lg:grid-cols-2">
-              <Gates onChanged={loadJobs} />
-              <CostPanel />
-            </div>
-            <div className="mt-4 grid gap-4 lg:grid-cols-2">
-              <ResumeUpload onUploaded={onResumeUploaded} />
-              <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-card transition-shadow hover:shadow-card-hover">
-                <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-                  <div>
-                    <h2 className="text-sm font-semibold text-slate-900">Search settings</h2>
-                    <p className="text-xs text-slate-500">What Scout searches for.</p>
-                  </div>
-                  <button
-                    onClick={() => openSettings("edit")}
-                    className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 active:scale-[0.98]"
-                  >
-                    Edit
-                  </button>
-                </div>
-                <dl className="space-y-2 px-4 py-3 text-xs">
-                  <div className="flex gap-2">
-                    <dt className="w-20 shrink-0 font-medium text-slate-400">Roles</dt>
-                    <dd className="text-slate-700">{config?.roles?.join(", ") || "—"}</dd>
-                  </div>
-                  <div className="flex gap-2">
-                    <dt className="w-20 shrink-0 font-medium text-slate-400">Locations</dt>
-                    <dd className="text-slate-700">{config?.locations?.join(", ") || "—"}</dd>
-                  </div>
-                  <div className="flex gap-2">
-                    <dt className="w-20 shrink-0 font-medium text-slate-400">Keywords</dt>
-                    <dd className="text-slate-700">{config?.keywords?.join(", ") || "—"}</dd>
-                  </div>
-                  <div className="flex gap-2">
-                    <dt className="w-20 shrink-0 font-medium text-slate-400">Sources</dt>
-                    <dd className="text-slate-700">{config?.sources?.join(", ") || "—"}</dd>
-                  </div>
-                </dl>
-              </section>
-            </div>
-
-            {/* Apply agent stage 2: which jobs have a real application form behind their
-                listing link. Link-following only — nothing is submitted. */}
-            <div className="mt-4">
-              <ApplyCoveragePanel />
-            </div>
-
-            <div className="mt-4">
-              <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-card transition-shadow hover:shadow-card-hover">
-                <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
-                  <div>
-                    <h2 className="text-sm font-semibold text-slate-900">Scoring &amp; filters</h2>
-                    <p className="text-xs text-slate-500">
-                      How Qualify scores jobs — and the must-have hard filter.
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => setQualifierOpen(true)}
-                    className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 active:scale-[0.98]"
-                  >
-                    Edit
-                  </button>
-                </div>
-                <dl className="grid gap-2 px-4 py-3 text-xs sm:grid-cols-2">
-                  <div className="flex gap-2">
-                    <dt className="w-24 shrink-0 font-medium text-slate-400">Must-have</dt>
-                    <dd className="text-slate-700">{qualifierConfig?.must_have?.join(", ") || "—"}</dd>
-                  </div>
-                  <div className="flex gap-2">
-                    <dt className="w-24 shrink-0 font-medium text-slate-400">Threshold</dt>
-                    <dd className="text-slate-700">{qualifierConfig?.threshold ?? "—"}</dd>
-                  </div>
-                  <div className="flex gap-2">
-                    <dt className="w-24 shrink-0 font-medium text-slate-400">Nice-to-have</dt>
-                    <dd className="truncate text-slate-700">
-                      {qualifierConfig?.nice_to_have?.join(", ") || "—"}
-                    </dd>
-                  </div>
-                  <div className="flex gap-2">
-                    <dt className="w-24 shrink-0 font-medium text-slate-400">Weights</dt>
-                    <dd className="text-slate-700">
-                      {qualifierConfig?.weights_json
-                        ? `skills ${qualifierConfig.weights_json.skills ?? "—"} · exp ${
-                            qualifierConfig.weights_json.experience ?? "—"
-                          } · roles ${qualifierConfig.weights_json.roles_match ?? "—"}`
-                        : "—"}
-                    </dd>
-                  </div>
-                </dl>
-              </section>
-            </div>
-
             {error && (
               <p className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
                 {error}
               </p>
             )}
 
-            <div className="mb-3 mt-6 flex flex-wrap items-center gap-3">
+            <div className="mb-3 mt-5 flex flex-wrap items-center gap-3">
               <div className="flex rounded-lg border border-slate-200 bg-white p-0.5 text-sm shadow-card">
                 {(["all", "qualified", "disqualified", "unscored"] as Decision[]).map((d) => (
                   <button
@@ -630,6 +610,14 @@ export default function Dashboard() {
               onToggleSelect={toggleSelect}
               cvDraftByJobId={cvDraftByJobId}
             />
+
+            {/* The two conversational agents, side by side: the Concierge acts; Ask answers
+                (read-only). Distinct privilege sets — Ask has no action tools. They sit under
+                the table now — you pick jobs first, then talk about them. */}
+            <div className="mt-5 grid gap-4 lg:grid-cols-2">
+              <Chat onChanged={onConciergeChanged} selectedJobIds={[...selected]} />
+              <Ask />
+            </div>
           </Screen>
 
           <Screen active={view === "suggest"}>
@@ -664,6 +652,14 @@ export default function Dashboard() {
           <Screen active={view === "apply-profile"}>
             <ApplicationProfileEditor />
           </Screen>
+
+          {cvOpen && (
+            <CvPanel
+              onClose={() => setCvOpen(false)}
+              onUploaded={onResumeUploaded}
+              onChanged={loadCvContext}
+            />
+          )}
 
           {settings.open && (
             <SearchSettings

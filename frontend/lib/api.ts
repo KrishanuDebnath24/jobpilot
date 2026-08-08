@@ -2,16 +2,13 @@ import type {
   AnswerBankEntry,
   AnswerKind,
   ApplicationProfile,
-  ApplyCoverage,
   ApplyPreview,
   ChatMessage,
   ChatTurn,
-  CostReport,
   CvDraft,
   CvReport,
   GapClose,
   GapClosePatch,
-  GateConfig,
   Job,
   PendingGate,
   PipelineEvent,
@@ -209,7 +206,9 @@ export const setSuggestionStatus = (id: string, status: "accepted" | "dismissed"
     method: "POST",
   });
 
-// --- Phase 6: Concierge chat + gates + apply-to-resume ---
+// --- Phase 6: Concierge chat + apply-to-resume ---
+// Gates are approved through the Concierge's own tools now — the dashboard panel that
+// toggled them (and its /gates helpers) is gone.
 export const createChatSession = () =>
   request<{ id: string }>("/chat/sessions", { method: "POST" });
 export const listChatSessions = () =>
@@ -222,23 +221,6 @@ export const postChatMessage = (id: string, text: string, selectedJobIds?: strin
   request<ChatTurn>(`/chat/sessions/${id}/message`, {
     method: "POST",
     body: JSON.stringify({ text, selected_job_ids: selectedJobIds ?? [] }),
-  });
-
-export const getGates = () => request<GateConfig>("/gates");
-export const updateGate = (gate_key: string, enabled: boolean) =>
-  request<GateConfig>("/gates", {
-    method: "POST",
-    body: JSON.stringify({ gate_key, enabled }),
-  });
-export const approveGate = (gate_id: string) =>
-  request<{ status: string }>("/pipeline/gate/approve", {
-    method: "POST",
-    body: JSON.stringify({ gate_id }),
-  });
-export const skipGate = (gate_id: string) =>
-  request<{ status: string }>("/pipeline/gate/skip", {
-    method: "POST",
-    body: JSON.stringify({ gate_id }),
   });
 
 export const prepareApply = (confirmed_skills?: string[]) =>
@@ -400,9 +382,6 @@ export async function downloadCv(draftId: string, fmt: "pdf" | "docx"): Promise<
   URL.revokeObjectURL(url);
 }
 
-// --- Phase 8b: per-user LLM cost report ---
-export const getCostReport = () => request<CostReport>("/cost/report");
-
 // --- Phase 7: Query agent (read-only Q&A over data + work status) ---
 export const createQuerySession = () =>
   request<{ id: string }>("/query/session", { method: "POST" });
@@ -498,15 +477,3 @@ export const upsertAnswer = (body: {
 
 export const deleteAnswer = (entryId: string) =>
   request<{ deleted: boolean }>(`/answer-bank/${entryId}`, { method: "DELETE" });
-
-// --- Apply agent (stage 2): where each job's application form lives ---
-export const getApplyCoverage = () =>
-  request<{ coverage: ApplyCoverage }>("/apply/coverage").then((r) => r.coverage);
-
-// Queues redirect resolution; returns 202 immediately. Poll getApplyCoverage for
-// progress — resolving hundreds of listings is paced on purpose.
-export const resolveApplyTargets = (limit = 200, force = false) =>
-  request<{ queued: boolean; task_id: string }>("/apply/resolve", {
-    method: "POST",
-    body: JSON.stringify({ limit, force }),
-  });
