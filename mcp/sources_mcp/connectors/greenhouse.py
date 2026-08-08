@@ -21,6 +21,7 @@ import re
 
 import httpx
 from bs4 import BeautifulSoup
+from jobpilot_core.job_match import location_matches, match_tokens, title_matches
 from jobpilot_core.roi_location import is_roi
 from jobpilot_core.scout import RawJob
 from jobpilot_core.settings import Settings
@@ -33,18 +34,11 @@ class GreenhouseError(RuntimeError):
     """Greenhouse call failed (unknown board or non-200)."""
 
 
-def _tokens(*groups: list[str] | None) -> set[str]:
-    out: set[str] = set()
-    for group in groups:
-        for phrase in group or []:
-            out.update(w for w in re.split(r"\W+", phrase.lower()) if len(w) > 2)
-    return out
+_tokens = match_tokens
 
 
 def _matches(title: str, location: str, terms: set[str], locations: list[str]) -> bool:
-    loc_ok = not locations or any(loc.lower() in (location or "").lower() for loc in locations)
-    term_ok = not terms or any(t in (title or "").lower() for t in terms)
-    return loc_ok and term_ok
+    return location_matches(location, locations) and title_matches(title, terms)
 
 
 def _text(content_html: str | None, limit: int) -> str:

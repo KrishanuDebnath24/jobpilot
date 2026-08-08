@@ -32,6 +32,7 @@ import re
 
 import httpx
 from bs4 import BeautifulSoup
+from jobpilot_core.job_match import match_tokens, title_matches
 from jobpilot_core.roi_location import is_roi
 from jobpilot_core.scout import RawJob
 from jobpilot_core.settings import Settings
@@ -46,16 +47,8 @@ class WorkableError(RuntimeError):
     """Workable call failed (unknown board or non-200)."""
 
 
-def _tokens(*groups: list[str] | None) -> set[str]:
-    out: set[str] = set()
-    for group in groups:
-        for phrase in group or []:
-            out.update(w for w in re.split(r"\W+", phrase.lower()) if len(w) > 2)
-    return out
-
-
-def _title_matches(title: str | None, terms: set[str]) -> bool:
-    return not terms or any(t in (title or "").lower() for t in terms)
+_tokens = match_tokens
+_title_matches = title_matches
 
 
 def _strip(*html_parts: str | None) -> str:
