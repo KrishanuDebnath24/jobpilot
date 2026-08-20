@@ -947,3 +947,44 @@ async def test_deleting_an_unknown_id_is_a_no_op(mcp_services):
         assert out["deleted"] == 0
     finally:
         await _cleanup(uid)
+
+
+async def test_analyze_runs_synchronously_by_default(monkeypatch):
+    """A 20-job selection must not silently go asynchronous.
+
+    The Batch API is half price but takes as long as it takes — a measured 43 minutes for
+    18 jobs, to save about five cents. That is the wrong trade for a run with a human
+    waiting on it, so batching is opt-in via a positive ``analyze_batch_threshold``."""
+    from app import analyze_runner
+
+    assert S.analyze_batch_threshold == 0, "batching must be off by default"
+
+    picked = {}
+
+    async def _sync(user_id, jobs, resume, settings, batch_id, usage, errors):
+        picked["mode"] = "sync"
+        return []
+
+    async def _batch(*a, **kw):
+        picked["mode"] = "batch"
+        return []
+
+    async def _resume_mcp(uid, tool, args):
+        return {"resume": {"structured": BASE}}
+
+    async def _select(user_id, job_ids, all_qualified):
+        return [{"id": f"j{i}"} for i in range(20)]
+
+    monkeypatch.setattr(analyze_runner, "_run_sync", _sync)
+    monkeypatch.setattr(analyze_runner, "_run_batch", _batch)
+    monkeypatch.setattr(analyze_runner, "_select_jobs", _select)
+    monkeypatch.setattr(analyze_runner.mcp_client, "resume_mcp", _resume_mcp)
+    monkeypatch.setattr(analyze_runner, "_emit", lambda *a, **kw: _noop())
+
+    out = await analyze_runner.run_analyze(uuid.uuid4(), job_ids=[f"j{i}" for i in range(20)])
+    assert picked["mode"] == "sync"
+    assert out["mode"] == "sync"
+
+
+async def _noop():
+    return None

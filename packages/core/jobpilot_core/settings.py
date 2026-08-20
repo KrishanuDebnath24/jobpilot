@@ -92,7 +92,11 @@ class Settings(BaseSettings):
     analyze_max_jobs: int = 200  # hard cap on jobs analyzed per run (spend guard)
     # Selected/single mode runs synchronous cached calls; at/above this count a run
     # switches to the Batch API (50% cheaper, non-interactive).
-    analyze_batch_threshold: int = 8
+    # 0 disables the Batch API entirely: analyze always runs synchronously. The batch is
+    # half price but asynchronous, and it was costing ~40 minutes of wall clock to save
+    # ~5c on a 20-job run — a bad trade for a run someone is sitting and watching. Set a
+    # positive threshold to re-enable batching at that job count.
+    analyze_batch_threshold: int = 0
     batch_poll_interval_seconds: float = 10.0  # how often the batch node polls status
     batch_max_wait_seconds: int = 1800  # give up (gracefully) after this
     analyze_max_desc_chars: int = 6000  # cap job description sent to the LLM (spend guard)

@@ -1,9 +1,10 @@
 """Analyzer orchestration (Phase 5, 5a/5b/5c).
 
 For a scope (selected ``job_ids`` or all qualified jobs): read resume + jobs via MCP,
-run the Analyzer over them, and persist per-job ``analyses`` via db-mcp. Few jobs →
-**synchronous, prompt-cached** calls; many (≥ ``analyze_batch_threshold``) → the
-**Batch API** (50% off, cached). Then a **deterministic rollup** (no LLM) into an
+run the Analyzer over them, and persist per-job ``analyses`` via db-mcp. Calls are
+**synchronous** by default; set ``analyze_batch_threshold`` above 0 to route runs of at
+least that many jobs through the **Batch API** (50% off, but asynchronous — it bought ~5c
+on a 20-job run at the cost of ~40 minutes, so it is off). Then a **deterministic rollup** (no LLM) into an
 aggregate summary. Reads resume via resume-mcp, jobs via db-mcp; never a direct ORM
 write. ``user_id`` from the trusted context. Per-job error isolation.
 """
@@ -156,7 +157,8 @@ async def run_analyze(
 
     usage = LLMUsage(model=settings.analyzer_model)
     errors: dict[str, str] = {}
-    mode = "batch" if len(jobs) >= settings.analyze_batch_threshold else "sync"
+    threshold = settings.analyze_batch_threshold
+    mode = "batch" if threshold > 0 and len(jobs) >= threshold else "sync"
     if mode == "batch":
         analyses = await _run_batch(user_id, jobs, resume, settings, batch_id, usage, errors,
                                     unbounded=unbounded_batch, on_wait=on_wait)
