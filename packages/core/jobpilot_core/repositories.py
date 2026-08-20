@@ -776,6 +776,38 @@ async def set_gap_close_items(
     return suggestion
 
 
+async def delete_gap_close(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    suggestion_ids: list[uuid.UUID],
+) -> int:
+    """Drop the gap-close proposal sets on the caller's own suggestion rows.
+
+    Clears ``gap_close_json`` only — it never deletes the row. The row is shared with the
+    honest Enhancer buckets (``skills_to_add`` / ``bullet_rewrites_json``) and its ``status``
+    drives apply-to-resume, so deleting it to get rid of a proposal set would take out
+    résumé-grounded work the user never asked to lose. Returns the number of rows cleared.
+    """
+    if not suggestion_ids:
+        return 0
+    rows = (
+        await session.execute(
+            select(models.Suggestion).where(
+                models.Suggestion.user_id == user_id,
+                models.Suggestion.id.in_(suggestion_ids),
+            )
+        )
+    ).scalars().all()
+    cleared = 0
+    for s in rows:
+        if s.gap_close_json is None:
+            continue
+        s.gap_close_json = None
+        cleared += 1
+    await session.flush()
+    return cleared
+
+
 async def get_analyses(session: AsyncSession, user_id: uuid.UUID) -> list[dict]:
     res = await session.execute(
         select(models.Analysis)

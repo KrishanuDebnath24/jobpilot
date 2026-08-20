@@ -9,6 +9,7 @@ import type {
   CvReport,
   GapClose,
   GapClosePatch,
+  GapCloseStatus,
   Job,
   PendingGate,
   PipelineEvent,
@@ -291,6 +292,17 @@ export const gapCloseCvs = (job_ids: string[]) =>
   request<{ task_id: string; job_count: number }>("/cv/gap-close", {
     method: "POST",
     body: JSON.stringify({ job_ids }),
+  });
+/** Live progress of the current/last gap-close run. The run has no pipeline_runs row and can
+ *  outlive the page, so the backend keeps a durable record and we poll it. */
+export const getGapCloseStatus = () =>
+  request<{ progress: GapCloseStatus | null }>("/cv/gap-close/status").then((r) => r.progress);
+/** Discard whole proposal sets. Clears only gap_close_json — the underlying suggestion row
+ *  and its honest Enhancer buckets survive. */
+export const deleteGapClose = (suggestion_ids: string[]) =>
+  request<{ deleted: number }>("/suggestions/gap-close/delete", {
+    method: "POST",
+    body: JSON.stringify({ suggestion_ids }),
   });
 /** Accept / reject / edit individual gap-close proposals. Accepting = the candidate attests
  *  they can back the item in an interview. */

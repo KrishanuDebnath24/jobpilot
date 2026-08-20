@@ -5,15 +5,36 @@ import type {
   GapClose,
   GapCloseKind,
   GapClosePatch,
+  GapCloseStatus,
   Suggestion,
 } from "@/lib/types";
-import { gapCloseCvs, getSuggestions, reviewGapClose } from "@/lib/api";
+import {
+  deleteGapClose,
+  gapCloseCvs,
+  getGapCloseStatus,
+  getSuggestions,
+  reviewGapClose,
+} from "@/lib/api";
 import StageStrip from "./StageStrip";
 
 const GAP_STAGES = [
-  { key: "analyze", label: "analyze the jobs", unobservable: true },
+  { key: "analyze", label: "analyze the jobs" },
   { key: "propose", label: "close gaps (skills, rewrites, new bullets)" },
 ];
+
+/** A run is finished only when the backend says so — not when the UI got bored waiting. */
+const RUNNING_PHASES: GapCloseStatus["phase"][] = ["starting", "analyzing", "proposing"];
+const isRunning = (s: GapCloseStatus | null): boolean =>
+  s !== null && RUNNING_PHASES.includes(s.phase);
+
+/** "12m 30s" — the analyze batch can run long enough that seconds alone stop meaning much. */
+function humanSeconds(total: number): string {
+  const s = Math.max(0, Math.round(total));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
 
 /* Phase 6.6 — gap-close proposals.
  *
@@ -66,15 +87,6 @@ function countUndecided(gc: GapClose | null): number {
     0,
   );
 }
-/** Fingerprint used to detect that a background gap-close run has landed. */
-function fingerprint(rows: Suggestion[]): string {
-  return rows
-    .filter((s) => s.job_id)
-    .map((s) => `${s.job_id}:${JSON.stringify(s.gap_close_json ?? null).length}`)
-    .sort()
-    .join("|");
-}
-
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function ItemRow({
@@ -234,6 +246,8 @@ function JobProposals({
   open,
   onToggleOpen,
   onReviewed,
+  selected,
+  onToggleSelected,
 }: {
   suggestion: Suggestion;
   title: string;
@@ -241,6 +255,9 @@ function JobProposals({
   open: boolean;
   onToggleOpen: () => void;
   onReviewed: () => Promise<void> | void;
+  /** Ticked for deletion. Selection is owned by the list so it survives a card collapsing. */
+  selected: boolean;
+  onToggleSelected: () => void;
 }) {
   const gc = suggestion.gap_close_json;
   const [busy, setBusy] = useState(false);
@@ -314,6 +331,14 @@ function JobProposals({
       }`}
     >
       <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggleSelected}
+          aria-label={`Select ${title} for deletion`}
+          title="Select this job's proposals"
+          className="h-3.5 w-3.5 shrink-0 cursor-pointer rounded border-slate-300 text-rose-600 focus:ring-rose-400"
+        />
         <button
           onClick={onToggleOpen}
           aria-expanded={open}
@@ -401,6 +426,64 @@ function JobProposals({
   );
 }
 
+/** The detail line under the stage strip: which phase, how far in, and what it is waiting on.
+ *  The analyze phase reports the batch it is blocked on, because that is where the minutes go. */
+function ProgressDetail({ status }: { status: GapCloseStatus | null }) {
+  if (!status) return null;
+  const failed = Object.keys(status.errors ?? {}).length;
+  const pct = status.total > 0 ? Math.round((status.done / status.total) * 100) : 0;
+  return (
+    <div className="mt-2 rounded-lg border border-amber-200 bg-white/70 px-3 py-2 text-xs text-slate-600">
+      {status.phase === "analyzing" ? (
+        <p>
+          Analyzing <span className="font-medium text-slate-900">{status.analyzing}</span> job(s)
+          with no analysis yet
+          {status.batch_id ? (
+            <>
+              {" "}
+              — sent as one model batch, waiting for it to come back
+              {typeof status.waited_seconds === "number"
+                ? ` (${humanSeconds(status.waited_seconds)} so far)`
+                : ""}
+              .
+            </>
+          ) : (
+            "."
+          )}
+        </p>
+      ) : status.phase === "proposing" ? (
+        <p>
+          Proposing — <span className="font-medium text-slate-900">{status.done}</span> of{" "}
+          {status.total} job(s) done.
+        </p>
+      ) : status.phase === "starting" ? (
+        <p>Starting…</p>
+      ) : status.phase === "failed" ? (
+        <p className="text-rose-700">Failed: {status.error ?? "unknown error"}</p>
+      ) : (
+        <p>
+          Finished — <span className="font-medium text-slate-900">{status.done}</span> of{" "}
+          {status.total} job(s) proposed{failed > 0 ? `, ${failed} unfinished` : ""}.
+        </p>
+      )}
+      {status.total > 0 && (
+        <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-amber-100">
+          <div
+            className="h-full rounded-full bg-amber-500 transition-all duration-500"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      )}
+      {status.dropped > 0 && (
+        <p className="mt-1.5 text-amber-700">
+          {status.dropped} of the {status.requested} job(s) you selected were left out — one run
+          is capped at {status.total}.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function GapCloseProposals({
   selectedJobIds,
   jobTitleById,
@@ -421,6 +504,21 @@ export default function GapCloseProposals({
   // empty after a run. Collapsing it does NOT spring back open.
   const [openJobId, setOpenJobId] = useState<string | null>(null);
   const seenAny = useRef(false);
+  // Live server-side progress. This is what makes the analyze step visible: it produces no
+  // proposals at all until it finishes, so without it the panel looked idle for the whole wait.
+  const [status, setStatus] = useState<GapCloseStatus | null>(null);
+  // Proposal sets ticked for deletion, by suggestion id.
+  const [selectedForDelete, setSelectedForDelete] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
+  // One watcher at a time, and it must stop when the panel unmounts.
+  const watching = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -465,42 +563,126 @@ export default function GapCloseProposals({
     }
   }, [visible]);
 
-  /* The runner is a Celery task with no pipeline_runs row, so there's nothing to poll by id.
-   * Instead: snapshot a fingerprint of the stored proposal sets, trigger, and wait for it to
-   * change. That detects a regenerate (same job count, different content) as well as a first
-   * run, which a plain "does every job have proposals yet" check would miss. */
+  /* Watch a run to completion — however long that takes.
+   *
+   * This used to give up after 80 × 3s and tell you to go check the worker, which was the
+   * worst possible answer: above `analyze_batch_threshold` jobs the run goes through the
+   * Anthropic Batch API and legitimately takes far longer than four minutes, so the panel
+   * abandoned a perfectly healthy run and showed nothing. The backend now publishes a durable
+   * progress record, so the exit condition is the *run's* phase, not our patience.
+   *
+   * Proposals are re-read on every tick too, so each job's card appears as it lands rather
+   * than all at once at the end. */
+  const watchRun = useCallback(async () => {
+    if (watching.current) return;
+    watching.current = true;
+    setBusy(true);
+    try {
+      for (;;) {
+        const st = await getGapCloseStatus().catch(() => null);
+        if (!mounted.current) return;
+        if (st) setStatus(st);
+
+        const fresh = await getSuggestions().catch(() => null);
+        if (!mounted.current) return;
+        if (fresh) {
+          setRows(fresh);
+          if (!seenAny.current) {
+            const first = fresh.find((s) => s.job_id && countTotal(s.gap_close_json) > 0);
+            if (first) {
+              seenAny.current = true;
+              setOpenJobId(first.id);
+            }
+          }
+        }
+
+        if (!isRunning(st)) {
+          if (st?.phase === "done") {
+            setProposed(true);
+            const failed = Object.keys(st.errors ?? {}).length;
+            setMsg(
+              failed === 0
+                ? `Done — proposals ready for ${st.done} of ${st.total} job(s). Review each item below.`
+                : `Done — ${st.done} of ${st.total} job(s) proposed, ${failed} could not be completed.`,
+            );
+          } else if (st?.phase === "failed") {
+            setMsg(`Run failed: ${st.error ?? "unknown error"}`);
+          }
+          return;
+        }
+        await sleep(3000);
+      }
+    } finally {
+      watching.current = false;
+      if (mounted.current) {
+        setBusy(false);
+        setStartedAt(null);
+      }
+    }
+  }, []);
+
+  /* A run outlives the page that started it, so on mount we ask whether one is already going
+   * and re-attach to it. Reloading mid-run now shows the run, not an empty panel. */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const st = await getGapCloseStatus().catch(() => null);
+      if (cancelled || !st) return;
+      setStatus(st);
+      if (isRunning(st)) {
+        setStartedAt(Date.parse(st.started_at) || Date.now());
+        void watchRun();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [watchRun]);
+
   const propose = async () => {
     setBusy(true);
     setProposed(false);
     setStartedAt(Date.now());
     setMsg("");
+    setStatus(null);
     try {
-      const before = fingerprint(await getSuggestions());
       await gapCloseCvs(selectedJobIds);
-      for (let i = 0; i < 80; i++) {
-        await sleep(3000);
-        const fresh = await getSuggestions();
-        if (fingerprint(fresh) !== before) {
-          setRows(fresh);
-          setProposed(true);
-          setHidden(new Set());   // fresh proposals deserve a fresh look
-          // Jump straight to the first job that has something to review.
-          const first = fresh.find((s) => s.job_id && countTotal(s.gap_close_json) > 0);
-          if (first) setOpenJobId(first.id);
-          setMsg("Proposals ready — review each item below.");
-          return;
-        }
-      }
-      setMsg(
-        "Still running after 4 minutes. If this doesn't resolve, check the Celery worker is " +
-          "up — the task is queued either way and will appear here when it finishes.",
-      );
+      setHidden(new Set());   // a fresh run deserves a fresh look
+      seenAny.current = false;
+      await watchRun();
+    } catch (e) {
+      setMsg(String(e));
+      setBusy(false);
+      setStartedAt(null);
+    }
+  };
+
+  const toggleSelectedForDelete = (id: string) =>
+    setSelectedForDelete((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const removeSelected = async () => {
+    const ids = [...selectedForDelete];
+    if (ids.length === 0) return;
+    const label = ids.length === 1 ? "this job's proposals" : `proposals for ${ids.length} jobs`;
+    if (!window.confirm(`Delete ${label}? Accepted items are discarded with them. The jobs, and any suggestions from "Analyze & suggest", are not affected.`))
+      return;
+    setDeleting(true);
+    setMsg("");
+    try {
+      const { deleted } = await deleteGapClose(ids);
+      setSelectedForDelete(new Set());
+      setOpenJobId((cur) => (cur && ids.includes(cur) ? null : cur));
       await refresh();
+      setMsg(`Deleted proposals for ${deleted} job(s).`);
     } catch (e) {
       setMsg(String(e));
     } finally {
-      setBusy(false);
-      setStartedAt(null);
+      setDeleting(false);
     }
   };
 
@@ -539,18 +721,23 @@ export default function GapCloseProposals({
         </button>
       </div>
 
-      {busy && (
-        <StageStrip
-          title={`Closing gaps for ${selectedJobIds.length} job(s)`}
-          stages={GAP_STAGES}
-          startedAt={startedAt}
-          tone="amber"
-          stateOf={(k) => {
-            if (k === "propose") return proposed ? "done" : "active";
-            return "active";   // analyze runs first and can't be observed from here
-          }}
-          note="Runs the model once per job. ◌ = can't be observed from here, so it is never ticked."
-        />
+      {(busy || isRunning(status)) && (
+        <div className="mb-3">
+          <StageStrip
+            title={`Closing gaps for ${status?.total ?? selectedJobIds.length} job(s)`}
+            stages={GAP_STAGES}
+            startedAt={startedAt}
+            tone="amber"
+            stateOf={(k) => {
+              // Both stages are reported by the runner now, so neither has to be guessed.
+              if (k === "analyze") return status && status.phase !== "analyzing" && status.phase !== "starting" ? "done" : "active";
+              if (status?.phase === "done") return "done";
+              return status?.phase === "proposing" ? "active" : "pending";
+            }}
+            note="Runs to completion — there is no time limit, and closing this page doesn't stop it."
+          />
+          <ProgressDetail status={status} />
+        </div>
       )}
 
       {msg && !busy && <p className="mb-2 mt-2 text-xs text-slate-600">{msg}</p>}
@@ -564,14 +751,44 @@ export default function GapCloseProposals({
           </span>
           {/* View only — nothing is deleted, and a card returns by itself if it stops being
               fully reviewed (regenerated proposals arrive undecided). */}
-          <button
-            onClick={() => setHidden(new Set(reviewed.map((s) => s.id)))}
-            disabled={reviewed.length === 0 || hiddenCount === reviewed.length}
-            className="ml-auto rounded-md border border-slate-200 bg-white px-2 py-1 font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 disabled:opacity-40"
-            title="Hide jobs you've finished reviewing — view only, nothing is deleted"
-          >
-            Clear reviewed from view ({reviewed.length})
-          </button>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            {/* Deletion is destructive and permanent, so it is always explicit: tick the jobs
+                you mean, then confirm. Nothing here is removed by tidying the view. */}
+            <button
+              onClick={() =>
+                setSelectedForDelete((prev) =>
+                  prev.size === visible.length
+                    ? new Set()
+                    : new Set(visible.map((s) => s.id)),
+                )
+              }
+              disabled={visible.length === 0}
+              className="rounded-md border border-slate-200 bg-white px-2 py-1 font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 disabled:opacity-40"
+            >
+              {selectedForDelete.size === visible.length && visible.length > 0
+                ? "Select none"
+                : `Select all (${visible.length})`}
+            </button>
+            <button
+              onClick={removeSelected}
+              disabled={selectedForDelete.size === 0 || deleting}
+              className="flex items-center gap-1.5 rounded-md border border-rose-200 bg-rose-50 px-2 py-1 font-medium text-rose-700 transition hover:border-rose-300 hover:bg-rose-100 disabled:opacity-40 disabled:hover:bg-rose-50"
+              title="Delete the ticked proposal sets — the jobs themselves are untouched"
+            >
+              {deleting && (
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-rose-300 border-t-rose-700" />
+              )}
+              {deleting ? "Deleting…" : `Delete selected${selectedForDelete.size ? ` (${selectedForDelete.size})` : ""}`}
+            </button>
+            <button
+              onClick={() => setHidden(new Set(reviewed.map((s) => s.id)))}
+              disabled={reviewed.length === 0 || hiddenCount === reviewed.length}
+              className="rounded-md border border-slate-200 bg-white px-2 py-1 font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 disabled:opacity-40"
+              title="Hide jobs you've finished reviewing — view only, nothing is deleted"
+            >
+              Clear reviewed from view ({reviewed.length})
+            </button>
+          </div>
           {hiddenCount > 0 && (
             <button
               onClick={() => setHidden(new Set())}
@@ -611,6 +828,8 @@ export default function GapCloseProposals({
                 open={openJobId === s.id}
                 onToggleOpen={() => setOpenJobId((cur) => (cur === s.id ? null : s.id))}
                 onReviewed={refresh}
+                selected={selectedForDelete.has(s.id)}
+                onToggleSelected={() => toggleSelectedForDelete(s.id)}
               />
             ))}
           </div>

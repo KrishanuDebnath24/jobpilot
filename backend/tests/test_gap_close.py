@@ -707,3 +707,243 @@ async def test_tailor_only_defaults_to_using_attested_content(monkeypatch):
 
     sig = inspect.signature(run_align)
     assert sig.parameters["use_attested"].default is True
+
+
+# --------------------------------------------------------------------------- #
+# Running to completion instead of to a clock.
+#
+# A 20-job selection sends the analyze step through the Batch API, which routinely runs
+# longer than the old 30-minute ceiling. Hitting that ceiling raised out of `_ensure_analyses`
+# — outside the per-job error isolation — so a batch that was merely slow destroyed the entire
+# run, including the jobs that were already analysed and needed nothing from it. These pin the
+# two halves of the fix: the wait can be unbounded, and a failing analyze step is survivable.
+# --------------------------------------------------------------------------- #
+class LLMUsageStub:
+    """Stands in for the usage object a *collected batch* returns — counters only."""
+    input_tokens = output_tokens = 0
+    cache_read_input_tokens = cache_creation_input_tokens = 0
+
+
+def _usage():
+    """The real accumulator the runner writes into (it calls .add and sets .batch)."""
+    from jobpilot_core.llm import LLMUsage
+
+    return LLMUsage(model="test-model")
+
+
+class _FakeBatchClock:
+    """``get_batch_status`` that stays in_progress for ``pending`` polls, then ends."""
+
+    def __init__(self, pending: int):
+        self.pending, self.polls = pending, 0
+
+    async def __call__(self, settings, bid):
+        self.polls += 1
+        return "in_progress" if self.polls <= self.pending else "ended"
+
+
+def _batch_harness(monkeypatch, clock, *, max_wait: int):
+    from app import analyze_runner
+
+    async def _no_sleep(_seconds):
+        return None
+
+    async def _submit(settings, requests):
+        return "msgbatch_test"
+
+    async def _collect(settings, bid, tool, model):
+        return {}, LLMUsageStub()
+
+    monkeypatch.setattr(analyze_runner.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(analyze_runner, "submit_batch", _submit)
+    monkeypatch.setattr(analyze_runner, "get_batch_status", clock)
+    monkeypatch.setattr(analyze_runner, "collect_batch_results", _collect)
+    monkeypatch.setattr(analyze_runner.analyzer, "batch_params", lambda j, r, s: {})
+    monkeypatch.setattr(S, "batch_max_wait_seconds", max_wait)
+    monkeypatch.setattr(S, "batch_poll_interval_seconds", 0.0)
+    return analyze_runner
+
+
+async def test_bounded_batch_wait_still_gives_up_at_the_deadline(monkeypatch):
+    """The default stays bounded — unbounded is opt-in, not a silent change for every caller."""
+    clock = _FakeBatchClock(pending=10_000)
+    ar = _batch_harness(monkeypatch, clock, max_wait=0)
+    with pytest.raises(TimeoutError):
+        await ar._run_batch(uuid.uuid4(), [{"id": "j1"}], BASE, S, "b1",
+                            _usage(), {}, unbounded=False)
+
+
+async def test_unbounded_batch_wait_outlasts_the_deadline(monkeypatch):
+    """With ``unbounded``, a batch slower than ``batch_max_wait_seconds`` is waited out.
+
+    The loop still terminates on its own: Anthropic expires a batch at 24h and an expired
+    batch reports "ended" like any other, so "no timeout" cannot mean "hangs forever"."""
+    clock = _FakeBatchClock(pending=50)
+    ar = _batch_harness(monkeypatch, clock, max_wait=0)   # deadline already passed
+    out = await ar._run_batch(uuid.uuid4(), [{"id": "j1"}], BASE, S, "b1",
+                              _usage(), {}, unbounded=True)
+    assert out == []
+    assert clock.polls > 50, "must have kept polling past the deadline it was given"
+
+
+async def test_unbounded_wait_reports_that_it_is_still_waiting(monkeypatch):
+    """The wait is the part the user stares at, so it has to be observable while it happens."""
+    clock = _FakeBatchClock(pending=3)
+    ar = _batch_harness(monkeypatch, clock, max_wait=0)
+    seen: list[dict] = []
+
+    async def _on_wait(info):
+        seen.append(info)
+
+    await ar._run_batch(uuid.uuid4(), [{"id": "j1"}], BASE, S, "b1",
+                        _usage(), {}, unbounded=True, on_wait=_on_wait)
+    assert len(seen) == 3
+    assert seen[0]["batch_id"] == "msgbatch_test"
+    assert seen[0]["batch_status"] == "in_progress"
+
+
+def _gap_close_harness(monkeypatch, *, analyses: dict, proposals=RAW):
+    """Wire run_gap_close to fakes: MCP reads/writes, the model, and the progress record."""
+    from app import gap_close_runner as gcr
+
+    written: dict = {}
+    progress: list = []
+
+    async def _resume_mcp(uid, tool, args):
+        return {"resume": {"structured": BASE}}
+
+    async def _db_mcp(uid, tool, args):
+        if tool == "get_analyses":
+            return {"analyses": [{"job_id": jid, "extracted_json": a}
+                                 for jid, a in analyses.items()]}
+        if tool == "upsert_gap_close":
+            written[args["job_id"]] = args["gap_close"]
+            return {"suggestion": {"id": "s1", "job_id": args["job_id"]}}
+        raise AssertionError(f"unexpected tool {tool}")
+
+    async def _propose(analysis, resume, settings):
+        return _FakeRes(copy.deepcopy(proposals))
+
+    async def _set_progress(kind, uid, payload):
+        progress.append(copy.deepcopy(payload))
+
+    monkeypatch.setattr(gcr.mcp_client, "resume_mcp", _resume_mcp)
+    monkeypatch.setattr(gcr.mcp_client, "db_mcp", _db_mcp)
+    monkeypatch.setattr(gcr.gap_closer, "propose_gap_close", _propose)
+    monkeypatch.setattr(gcr.run_progress, "set_progress", _set_progress)
+    return gcr, written, progress
+
+
+async def test_failing_analyze_step_no_longer_discards_the_whole_run(monkeypatch):
+    """The regression that lost a 20-job run: one unfinished batch binned everything.
+
+    Jobs that already had an analysis owe the analyze step nothing, so they must still be
+    proposed for — and the failure has to be reported, not swallowed."""
+    gcr, written, _ = _gap_close_harness(monkeypatch, analyses={"job-1": {"role": "x"}})
+
+    async def _boom(user_id, job_ids=None, **kw):
+        raise TimeoutError("batch did not finish")
+
+    monkeypatch.setattr("app.analyze_runner.run_analyze", _boom)
+
+    out = await gcr.run_gap_close(uuid.uuid4(), ["job-1", "job-2"])
+
+    assert out["proposed"] == 1, "the already-analysed job must survive the analyze failure"
+    assert "job-1" in written
+    assert "_analyze" in out["errors"] and "TimeoutError" in out["errors"]["_analyze"]
+    assert "job-2" in out["errors"]
+
+
+async def test_progress_is_reported_per_phase_and_per_job(monkeypatch):
+    """The run outlives any page watching it, so its progress has to be readable at any moment
+    — including during analyze, which persists nothing until it finishes."""
+    gcr, _, progress = _gap_close_harness(
+        monkeypatch, analyses={"job-1": {"role": "x"}, "job-2": {"role": "y"}})
+
+    out = await gcr.run_gap_close(uuid.uuid4(), ["job-1", "job-2"])
+
+    assert out["proposed"] == 2
+    phases = [p["phase"] for p in progress]
+    assert phases[0] == "starting" and phases[-1] == "done"
+    assert "proposing" in phases
+    final = progress[-1]
+    assert (final["done"], final["total"]) == (2, 2)
+    # Progress advances during the run, not only at the end.
+    assert [p["done"] for p in progress if p["phase"] == "proposing"] == [0, 1, 2]
+
+
+async def test_progress_records_the_selection_the_spend_cap_dropped(monkeypatch):
+    """Selecting more than the cap silently ran a subset. Now the shortfall is on the record,
+    so the UI can say which jobs were left out instead of quietly returning fewer."""
+    monkeypatch.setattr(S, "gap_close_max_jobs", 2)
+    gcr, _, progress = _gap_close_harness(
+        monkeypatch, analyses={"job-1": {"role": "x"}, "job-2": {"role": "y"}})
+
+    await gcr.run_gap_close(uuid.uuid4(), ["job-1", "job-2", "job-3"])
+
+    assert progress[-1]["requested"] == 3
+    assert progress[-1]["total"] == 2
+    assert progress[-1]["dropped"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# Deleting proposal sets
+# --------------------------------------------------------------------------- #
+async def test_deleting_a_proposal_set_leaves_the_honest_row_intact(mcp_services):
+    """Deleting proposals must clear only ``gap_close_json``.
+
+    The set shares its row with the Enhancer's résumé-grounded buckets and the ``status`` that
+    apply-to-resume reads, so deleting the row to be rid of a proposal set would quietly
+    destroy evidence-backed work the user never asked to lose."""
+    db = mcp_services["db"]
+    uid = await _mk_user()
+    try:
+        job_id = await _seed_job(db, uid)
+        await _call(db, uid, "upsert_suggestion", {
+            "job_id": job_id, "skills_to_add": ["Docker"],
+            "projects_json": {"projects": []}, "bullet_rewrites_json": {"bullet_rewrites": []}})
+        sid = (await _call(db, uid, "get_suggestions", {}))["suggestions"][0]["id"]
+        await _call(db, uid, "update_suggestion_status",
+                    {"suggestion_id": sid, "status": "accepted"})
+        await _call(db, uid, "upsert_gap_close",
+                    {"job_id": job_id, "gap_close": gap_closer.with_item_ids(RAW)})
+
+        out = await _call(db, uid, "delete_gap_close", {"suggestion_ids": [sid]})
+        assert out["deleted"] == 1
+
+        row = (await _call(db, uid, "get_suggestions", {}))["suggestions"][0]
+        assert row["gap_close_json"] is None, "the proposal set is gone"
+        assert row["skills_to_add"] == ["Docker"], "the honest bucket must survive"
+        assert row["status"] == "accepted", "the honest lifecycle must be untouched"
+    finally:
+        await _cleanup(uid)
+
+
+async def test_delete_cannot_reach_another_users_proposals(mcp_services):
+    """Scope comes from the signed context token, never the argument."""
+    db = mcp_services["db"]
+    owner, stranger = await _mk_user(), await _mk_user()
+    try:
+        job_id = await _seed_job(db, owner)
+        await _call(db, owner, "upsert_gap_close",
+                    {"job_id": job_id, "gap_close": gap_closer.with_item_ids(RAW)})
+        sid = (await _call(db, owner, "get_suggestions", {}))["suggestions"][0]["id"]
+
+        out = await _call(db, stranger, "delete_gap_close", {"suggestion_ids": [sid]})
+        assert out["deleted"] == 0
+
+        row = (await _call(db, owner, "get_suggestions", {}))["suggestions"][0]
+        assert row["gap_close_json"] is not None, "another user's delete must not land"
+    finally:
+        await _cleanup(owner)
+        await _cleanup(stranger)
+
+
+async def test_deleting_an_unknown_id_is_a_no_op(mcp_services):
+    db = mcp_services["db"]
+    uid = await _mk_user()
+    try:
+        out = await _call(db, uid, "delete_gap_close", {"suggestion_ids": [str(uuid.uuid4())]})
+        assert out["deleted"] == 0
+    finally:
+        await _cleanup(uid)

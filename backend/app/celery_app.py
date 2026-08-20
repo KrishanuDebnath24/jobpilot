@@ -37,8 +37,12 @@ celery.conf.update(
     broker_connection_retry_on_startup=True,
     # Redis broker restores an unacked (crashed) task after this window — so it must
     # exceed the longest task, or a still-running orchestrator/stage gets redelivered
-    # and double-runs. 6h > any pipeline; crash-recovery redelivery happens within it.
-    broker_transport_options={"visibility_timeout": 21600},
+    # and double-runs. Gap-close waits out its analyze batch with no deadline of its own,
+    # and Anthropic only expires a batch at 24h, so the ceiling on a legitimate task is now
+    # ~24h rather than the ~6h a pipeline used to need. 26h keeps redelivery strictly a
+    # crash-recovery mechanism; a shorter window would start a second, duplicate-spend run
+    # on top of one that is merely still waiting.
+    broker_transport_options={"visibility_timeout": 26 * 3600},
     # Control plane / data plane split: the orchestrator waits on stages, so it must
     # not share a worker pool with them (a waiting orchestrator would starve the
     # stage it's waiting for). Route it to its own queue, consumed by a dedicated

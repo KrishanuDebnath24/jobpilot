@@ -121,6 +121,30 @@ export type GapClose = {
   new_bullets?: GapCloseNewBullet[];
 };
 export type GapCloseKind = "claimed_skills" | "bullet_rewrites" | "new_bullets";
+/** Durable progress of a gap-close run. The runner writes this on every phase change and
+ *  after every job, so the panel can show what's happening even across a page reload — and
+ *  during the analyze step, which produces nothing observable until it finishes. */
+export type GapCloseStatus = {
+  phase: "starting" | "analyzing" | "proposing" | "done" | "failed";
+  /** Jobs the run is working through (after the gap_close_max_jobs spend cap). */
+  total: number;
+  /** Jobs selected before the cap; `dropped` > 0 means the tail was not included. */
+  requested: number;
+  dropped: number;
+  done: number;
+  job_ids: string[];
+  started_at: string;
+  finished_at?: string;
+  ts: string;
+  errors?: Record<string, string>;
+  error?: string;
+  cost_usd?: number;
+  /** Analyze phase only — how many jobs needed analysing first, and the batch it's waiting on. */
+  analyzing?: number;
+  batch_id?: string;
+  batch_status?: string;
+  waited_seconds?: number;
+};
 /** One entry of a review submission — accept/reject plus any edited wording. */
 export type GapClosePatch = {
   kind: GapCloseKind;

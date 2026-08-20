@@ -198,6 +198,21 @@ async def set_gap_close_items(suggestion_id: str, items: list[dict]) -> dict:
 
 
 @mcp.tool()
+async def delete_gap_close(suggestion_ids: list[str]) -> dict:
+    """Delete the gap-close proposal sets on the caller's own suggestion rows.
+
+    Clears ``gap_close_json`` and nothing else: the row also carries the honest Enhancer
+    buckets and the ``status`` that apply-to-resume reads, so the row itself survives. Scope
+    comes from the trusted context — only the caller's own rows can be cleared. Returns
+    ``{deleted}``."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        n = await repositories.delete_gap_close(
+            session, uid, [uuid.UUID(s) for s in (suggestion_ids or [])])
+        return {"deleted": n}
+
+
+@mcp.tool()
 async def update_suggestion_status(suggestion_id: str, status: str) -> dict:
     uid = require_user_id()
     async with session_scope() as session:

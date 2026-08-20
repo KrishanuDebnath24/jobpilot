@@ -289,6 +289,12 @@ class GapCloseReviewRequest(BaseModel):
     items: list[GapCloseItemPatch]
 
 
+class GapCloseDeleteRequest(BaseModel):
+    """Phase 6.6: discard whole proposal sets. Identified by suggestion id (what the review
+    endpoint uses), and only the caller's own rows can be touched."""
+    suggestion_ids: list[str]
+
+
 class CvDraftEditRequest(BaseModel):
     """Phase 6.6: deterministic edits to one attached draft (no LLM). Adding a skill the
     résumé doesn't evidence is recorded as ``user_confirmed`` — the candidate's own word."""
@@ -965,6 +971,32 @@ async def review_gap_close(
     if not out.get("suggestion"):
         raise HTTPException(status_code=404, detail="suggestion not found")
     return out
+
+
+@app.get("/cv/gap-close/status", tags=["cv"])
+async def cv_gap_close_status(current_user=Depends(get_current_user)) -> dict:
+    """Live progress of the caller's gap-close run.
+
+    The runner has no ``pipeline_runs`` row to poll, and it can outlive any page the user has
+    open — so it keeps a durable progress record instead. ``{"progress": null}`` simply means
+    no run has been started (or its record has aged out)."""
+    from .gap_close_runner import PROGRESS_KIND
+    from .run_progress import get_progress
+
+    return {"progress": await get_progress(PROGRESS_KIND, current_user.id)}
+
+
+@app.post("/suggestions/gap-close/delete", tags=["cv"])
+async def delete_gap_close(
+    body: GapCloseDeleteRequest, current_user=Depends(get_current_user)
+) -> dict:
+    """Discard gap-close proposal sets the user doesn't want to review.
+
+    Clears ``gap_close_json`` on those rows only. The suggestion row itself and its honest
+    Enhancer buckets survive, so this can never delete résumé-grounded work as a side effect
+    of tidying up proposals."""
+    return await mcp_client.db_mcp(
+        current_user.id, "delete_gap_close", {"suggestion_ids": body.suggestion_ids})
 
 
 @app.get("/cv/drafts", tags=["cv"])

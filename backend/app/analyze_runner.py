@@ -82,20 +82,30 @@ async def _run_sync(user_id, jobs, resume, settings, batch_id, usage, errors) ->
     return analyses
 
 
-async def _run_batch(user_id, jobs, resume, settings, batch_id, usage, errors) -> list[dict]:
+async def _run_batch(user_id, jobs, resume, settings, batch_id, usage, errors,
+                     *, unbounded: bool = False, on_wait=None) -> list[dict]:
     by_id = {j["id"]: j for j in jobs}
     requests = [
         {"custom_id": j["id"], "params": analyzer.batch_params(j, resume, settings)}
         for j in jobs
     ]
     bid = await submit_batch(settings, requests)
-    deadline = time.monotonic() + settings.batch_max_wait_seconds
-    while time.monotonic() < deadline:
-        if await get_batch_status(settings, bid) == "ended":
+    # ``unbounded`` drops OUR deadline and waits for the batch to reach a terminal state. That
+    # is still guaranteed to end: Anthropic expires a batch 24h after creation, and an expired
+    # batch reports "ended" like any other, so the loop always terminates on its own.
+    deadline = None if unbounded else time.monotonic() + settings.batch_max_wait_seconds
+    waited = 0.0
+    while True:
+        batch_status = await get_batch_status(settings, bid)
+        if batch_status == "ended":
             break
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError(f"batch {bid} did not finish within {settings.batch_max_wait_seconds}s")
+        if on_wait is not None:
+            await on_wait({"batch_id": bid, "batch_status": batch_status,
+                           "waited_seconds": int(waited)})
         await asyncio.sleep(settings.batch_poll_interval_seconds)
-    else:
-        raise TimeoutError(f"batch {bid} did not finish within {settings.batch_max_wait_seconds}s")
+        waited += settings.batch_poll_interval_seconds
 
     results, busage = await collect_batch_results(
         settings, bid, analyzer.ANALYZER_TOOL, settings.analyzer_model
@@ -121,7 +131,13 @@ async def run_analyze(
     job_ids: list[str] | None = None,
     all_qualified: bool = False,
     pipeline_id: uuid.UUID | str | None = None,
+    *,
+    unbounded_batch: bool = False,
+    on_wait=None,
 ) -> dict:
+    """``unbounded_batch`` removes the batch-wait deadline for callers that would rather wait
+    than lose the run (gap-close). ``on_wait`` is awaited on every poll while a batch is still
+    running, so a caller can surface "still waiting" to the user."""
     settings = get_settings()
     pid = str(pipeline_id) if pipeline_id else None
     batch_id = str(uuid.uuid4())  # correlates all analyses from this run
@@ -142,7 +158,8 @@ async def run_analyze(
     errors: dict[str, str] = {}
     mode = "batch" if len(jobs) >= settings.analyze_batch_threshold else "sync"
     if mode == "batch":
-        analyses = await _run_batch(user_id, jobs, resume, settings, batch_id, usage, errors)
+        analyses = await _run_batch(user_id, jobs, resume, settings, batch_id, usage, errors,
+                                    unbounded=unbounded_batch, on_wait=on_wait)
     else:
         analyses = await _run_sync(user_id, jobs, resume, settings, batch_id, usage, errors)
 
