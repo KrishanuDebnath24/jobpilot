@@ -311,6 +311,13 @@ export const reviewGapClose = (suggestionId: string, items: GapClosePatch[]) =>
     `/suggestions/${suggestionId}/gap-close/review`,
     { method: "POST", body: JSON.stringify({ items }) },
   );
+/** Delete drafts outright, with the PDF/DOCX they rendered. The jobs survive, so a deleted
+ *  draft can simply be tailored again. Ids only — there is no "delete all". */
+export const deleteCvDrafts = (draft_ids: string[]) =>
+  request<{ deleted: number; files_deleted: number }>("/cv/drafts/delete", {
+    method: "POST",
+    body: JSON.stringify({ draft_ids }),
+  });
 /** Structural edits to one draft (no LLM): add/remove skills and bullets. Resets the draft
  *  to draft_ready and detaches its stale PDF/DOCX. */
 export const editCvDraft = (

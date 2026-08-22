@@ -350,3 +350,62 @@ async def test_cv_draft_lifecycle_and_erasure():
     finally:
         async with session_scope() as s:
             await R.delete_user_cascade(s, uid)
+
+
+@requires_db
+async def test_delete_cv_drafts_takes_the_draft_and_leaves_the_job():
+    """Deleting a CV must not delete the pipeline work behind it: the job, its
+    qualification and its suggestions are what a re-tailor needs, and losing them to a
+    tidy-up would be unrecoverable."""
+    import jobpilot_core.repositories as R
+    from jobpilot_core.db import session_scope
+
+    async with session_scope() as s:
+        uid, jid = await _mk_user_and_job(s)
+    try:
+        async with session_scope() as s:
+            d = await R.upsert_cv_draft(
+                s, uid, jid, None, {"skills": ["Go"]}, {"experience": []}, None, 0.5)
+            did = d.id
+        async with session_scope() as s:
+            await R.set_cv_draft_export(s, uid, did, "resumes/u/cv/a.pdf", "resumes/u/cv/a.docx")
+
+        async with session_scope() as s:
+            # Refs must be readable BEFORE the delete — afterwards the row is the only
+            # record of where the files were, so they would be orphaned in storage.
+            refs = await R.cv_file_refs_for_drafts(s, uid, [did])
+            assert sorted(refs) == ["resumes/u/cv/a.docx", "resumes/u/cv/a.pdf"]
+            assert await R.delete_cv_drafts(s, uid, []) == 0  # empty means nothing, not all
+            assert await R.delete_cv_drafts(s, uid, [did]) == 1
+
+        async with session_scope() as s:
+            assert await R.get_cv_drafts(s, uid) == []
+            assert (await R.count_user_rows(s, uid))["jobs"] == 1  # the job survived
+            assert await R.cv_file_refs_for_drafts(s, uid, [did]) == []
+    finally:
+        async with session_scope() as s:
+            await R.delete_user_cascade(s, uid)
+
+
+@requires_db
+async def test_delete_cv_drafts_cannot_reach_another_users_draft():
+    import jobpilot_core.repositories as R
+    from jobpilot_core.db import session_scope
+
+    async with session_scope() as s:
+        owner, owner_job = await _mk_user_and_job(s)
+    async with session_scope() as s:
+        other, _ = await _mk_user_and_job(s)
+    try:
+        async with session_scope() as s:
+            did = (await R.upsert_cv_draft(
+                s, owner, owner_job, None, {"skills": []}, {"experience": []}, None, 0.5)).id
+        async with session_scope() as s:
+            assert await R.delete_cv_drafts(s, other, [did]) == 0
+            assert await R.cv_file_refs_for_drafts(s, other, [did]) == []
+        async with session_scope() as s:
+            assert len(await R.get_cv_drafts(s, owner)) == 1  # untouched
+    finally:
+        for uid in (owner, other):
+            async with session_scope() as s:
+                await R.delete_user_cascade(s, uid)

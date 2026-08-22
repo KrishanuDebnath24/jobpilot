@@ -395,6 +395,32 @@ async def set_cv_draft_content(draft_id: str, tailored_content_json: dict) -> di
         return {"draft": {"id": str(d.id), "status": d.status} if d else None}
 
 
+@mcp.tool()
+async def delete_cv_drafts(draft_ids: list[str]) -> dict:
+    """Delete the caller's tailored-CV drafts and the PDF/DOCX files they rendered.
+
+    Drafts only — the jobs, qualifications and suggestions behind them survive, so tidying
+    up CVs never destroys the pipeline work that produced them. Explicit ids only: there is
+    deliberately no "delete all" flag, because the whole screen is one click away from it.
+    DB first, then files: refs are read in the same transaction as the delete so they match
+    exactly what went, and a failed file delete leaves a harmless orphan rather than a row
+    pointing at a file that no longer exists. Scope comes from the trusted context.
+    """
+    uid = require_user_id()
+    ids = [uuid.UUID(d) for d in (draft_ids or [])]
+    async with session_scope() as session:
+        refs = await repositories.cv_file_refs_for_drafts(session, uid, ids)
+        deleted = await repositories.delete_cv_drafts(session, uid, ids)
+    files_deleted = 0
+    for ref in refs:
+        try:
+            await asyncio.to_thread(get_storage(settings).delete, ref)
+            files_deleted += 1
+        except Exception:  # noqa: BLE001 - a stuck file must not fail the delete
+            pass
+    return {"deleted": deleted, "files_deleted": files_deleted}
+
+
 # --------------------------------------------------------------------------- #
 # Phase 7 — embeddings I/O (the worker computes vectors; db-mcp stores/searches them)
 # --------------------------------------------------------------------------- #

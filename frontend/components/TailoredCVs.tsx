@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CvDraft, CvReport, Job, TailoredContent } from "@/lib/types";
 import {
   approveCvDrafts,
+  deleteCvDrafts,
   downloadCv,
   editCvDraft,
   exportCvs,
@@ -268,7 +269,6 @@ export default function TailoredCVs({
     () => [...picked].filter((id) => draftReady.some((d) => d.id === id)),
     [picked, draftReady],
   );
-  const allReadyPicked = draftReady.length > 0 && pickedReady.length === draftReady.length;
 
   // Approved drafts with no rendered file — the ones that genuinely need exporting. Editing a
   // draft clears its pdf_ref on purpose (the old file no longer matches the content), so an
@@ -294,6 +294,33 @@ export default function TailoredCVs({
     [drafts, hidden],
   );
   const hiddenCount = drafts.length - visible.length;
+  // Everything ticked that still exists. Approve/reject narrow this to draft_ready; delete
+  // does not, because an approved or rejected draft is exactly what you want to clear out.
+  const pickedDrafts = useMemo(() => drafts.filter((d) => picked.has(d.id)), [drafts, picked]);
+  const allVisiblePicked = visible.length > 0 && visible.every((d) => picked.has(d.id));
+
+  /* A real delete, unlike "Clear finished from view": the rows go, and so do the PDF/DOCX
+     they rendered. The jobs are untouched, so anything removed by mistake can just be
+     tailored again — which is what makes a confirm-and-go flow acceptable here. */
+  const removeSelected = async () => {
+    const ids = pickedDrafts.map((d) => d.id);
+    if (ids.length === 0) return;
+    const attached = pickedDrafts.filter((d) => d.status === "approved" && d.pdf_ref).length;
+    const note = attached
+      ? `\n\n${attached} of them ${attached === 1 ? "is" : "are"} attached to a job row and will come off it.`
+      : "";
+    if (
+      !window.confirm(
+        `Delete ${ids.length} draft(s) and their exported PDF/DOCX? This cannot be undone. ` +
+          `The jobs themselves are not affected — you can tailor them again.${note}`,
+      )
+    )
+      return;
+    await run("delete", async () => {
+      await deleteCvDrafts(ids);
+      setPicked(new Set());
+    });
+  };
 
   return (
     <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-card">
@@ -368,10 +395,11 @@ export default function TailoredCVs({
       {drafts.length > 0 && (
         <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-2 text-xs">
           <button
-            onClick={() => setPicked(new Set(allReadyPicked ? [] : draftReady.map((d) => d.id)))}
+            onClick={() => setPicked(new Set(allVisiblePicked ? [] : visible.map((d) => d.id)))}
             className="rounded-md border border-slate-200 bg-white px-2 py-1 font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 active:scale-95"
+            title="Tick every draft in the list. Approve and reject still only act on the ones awaiting review."
           >
-            {allReadyPicked ? "Clear" : "Select all"}
+            {allVisiblePicked ? "Clear" : "Select all"}
           </button>
           <button
             onClick={() => run("approve-sel", () => approveCvDrafts(pickedReady))}
@@ -476,6 +504,14 @@ export default function TailoredCVs({
             title="Hide approved and rejected drafts from this list — view only, nothing is deleted"
           >
             Clear finished from view ({finished.length})
+          </button>
+          <button
+            onClick={removeSelected}
+            disabled={!!busy || !!op || pickedDrafts.length === 0}
+            className="rounded-md border border-rose-200 bg-rose-50 px-2 py-1 font-medium text-rose-700 transition hover:border-rose-300 hover:bg-rose-100 active:scale-95 disabled:opacity-40 disabled:hover:bg-rose-50"
+            title="Delete the ticked drafts and their exported files for good. The jobs are untouched, so they can be tailored again."
+          >
+            {busy === "delete" ? "Deleting…" : `Delete selected (${pickedDrafts.length})`}
           </button>
           {hiddenCount > 0 && (
             <button

@@ -1626,6 +1626,45 @@ async def cv_file_refs_for_jobs(
     return refs
 
 
+async def cv_file_refs_for_drafts(
+    session: AsyncSession, user_id: uuid.UUID, draft_ids: list[uuid.UUID]
+) -> list[str]:
+    """The storage refs of specific drafts, collected BEFORE they are deleted — the row is
+    the only record of where its rendered files live, so reading them afterwards is
+    impossible and the objects would be orphaned. Scoped to ``user_id``."""
+    if not draft_ids:
+        return []
+    res = await session.execute(
+        select(models.CvDraft.pdf_ref, models.CvDraft.docx_ref).where(
+            models.CvDraft.user_id == user_id, models.CvDraft.id.in_(draft_ids)
+        )
+    )
+    refs: list[str] = []
+    for pdf_ref, docx_ref in res.all():
+        if pdf_ref:
+            refs.append(pdf_ref)
+        if docx_ref:
+            refs.append(docx_ref)
+    return refs
+
+
+async def delete_cv_drafts(
+    session: AsyncSession, user_id: uuid.UUID, draft_ids: list[uuid.UUID]
+) -> int:
+    """Delete specific tailored-CV drafts. Only the drafts: the jobs they were built for,
+    their qualifications and any suggestions are untouched, so clearing out CVs can never
+    take the underlying pipeline work with it. Scoped to ``user_id``, and an empty list
+    deletes nothing rather than everything. Returns rows deleted."""
+    if not draft_ids:
+        return 0
+    res = await session.execute(
+        delete(models.CvDraft).where(
+            models.CvDraft.user_id == user_id, models.CvDraft.id.in_(draft_ids)
+        )
+    )
+    return int(res.rowcount or 0)
+
+
 async def disqualified_job_ids(session: AsyncSession, user_id: uuid.UUID) -> list[uuid.UUID]:
     """Ids of the caller's jobs whose current qualification decision is ``disqualified``.
     Jobs with no qualification yet (unscored) are excluded — only an explicit disqualified

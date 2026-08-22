@@ -255,7 +255,8 @@ function JobProposals({
   open: boolean;
   onToggleOpen: () => void;
   onReviewed: () => Promise<void> | void;
-  /** Ticked for deletion. Selection is owned by the list so it survives a card collapsing. */
+  /** Ticked. Selection is owned by the list, so it survives a card collapsing, and it
+   *  drives both actions: tailor these jobs, or delete these proposals. */
   selected: boolean;
   onToggleSelected: () => void;
 }) {
@@ -491,8 +492,8 @@ export default function GapCloseProposals({
 }: {
   selectedJobIds: string[];
   jobTitleById: (id: string) => string;
-  /** Replace the dashboard's job selection. Accepted proposals are stored against the job,
-   *  not against the tick in the table, so this is what hands them back to "Tailor only"
+  /** Select these jobs and open Tailored CVs. Accepted proposals are stored against the
+   *  job, not against the tick in the table, so this is what hands them to "Tailor only"
    *  without hunting down the same rows again. */
   onSelectJobs: (ids: string[]) => void;
 }) {
@@ -512,8 +513,9 @@ export default function GapCloseProposals({
   // Live server-side progress. This is what makes the analyze step visible: it produces no
   // proposals at all until it finishes, so without it the panel looked idle for the whole wait.
   const [status, setStatus] = useState<GapCloseStatus | null>(null);
-  // Proposal sets ticked for deletion, by suggestion id.
-  const [selectedForDelete, setSelectedForDelete] = useState<Set<string>>(new Set());
+  // Proposal sets ticked, by suggestion id. Drives both actions below: send these jobs to
+  // be tailored, or delete their proposals. Ticking is not itself destructive.
+  const [ticked, setTicked] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
   // One watcher at a time, and it must stop when the panel unmounts.
   const watching = useRef(false);
@@ -554,13 +556,6 @@ export default function GapCloseProposals({
         .filter((s) => countAccepted(s.gap_close_json) > 0)
         .map((s) => s.job_id as string),
     [withProposals],
-  );
-  const acceptedAreSelected = useMemo(
-    () =>
-      acceptedJobIds.length > 0 &&
-      selectedJobIds.length === acceptedJobIds.length &&
-      acceptedJobIds.every((id) => selectedJobIds.includes(id)),
-    [acceptedJobIds, selectedJobIds],
   );
   // Fully reviewed = every item decided, so the card has nothing left to ask of you.
   const reviewed = useMemo(
@@ -679,16 +674,24 @@ export default function GapCloseProposals({
     }
   };
 
-  const toggleSelectedForDelete = (id: string) =>
-    setSelectedForDelete((prev) => {
+  const toggleTicked = (id: string) =>
+    setTicked((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
 
+  /* Tailor exactly what is ticked, rather than every job that has an accepted item. A
+     20-job review is normally worked through in batches, and tailoring costs tokens per
+     job, so "all or nothing" was the wrong granularity. */
+  const tickedJobIds = useMemo(
+    () => visible.filter((s) => ticked.has(s.id)).map((s) => s.job_id as string),
+    [visible, ticked],
+  );
+
   const removeSelected = async () => {
-    const ids = [...selectedForDelete];
+    const ids = [...ticked];
     if (ids.length === 0) return;
     const label = ids.length === 1 ? "this job's proposals" : `proposals for ${ids.length} jobs`;
     if (!window.confirm(`Delete ${label}? Accepted items are discarded with them. The jobs, and any suggestions from "Analyze & suggest", are not affected.`))
@@ -697,7 +700,7 @@ export default function GapCloseProposals({
     setMsg("");
     try {
       const { deleted } = await deleteGapClose(ids);
-      setSelectedForDelete(new Set());
+      setTicked(new Set());
       setOpenJobId((cur) => (cur && ids.includes(cur) ? null : cur));
       await refresh();
       setMsg(`Deleted proposals for ${deleted} job(s).`);
@@ -778,7 +781,7 @@ export default function GapCloseProposals({
                 you mean, then confirm. Nothing here is removed by tidying the view. */}
             <button
               onClick={() =>
-                setSelectedForDelete((prev) =>
+                setTicked((prev) =>
                   prev.size === visible.length
                     ? new Set()
                     : new Set(visible.map((s) => s.id)),
@@ -787,20 +790,28 @@ export default function GapCloseProposals({
               disabled={visible.length === 0}
               className="rounded-md border border-slate-200 bg-white px-2 py-1 font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50 disabled:opacity-40"
             >
-              {selectedForDelete.size === visible.length && visible.length > 0
+              {ticked.size === visible.length && visible.length > 0
                 ? "Select none"
                 : `Select all (${visible.length})`}
             </button>
             <button
+              onClick={() => onSelectJobs(tickedJobIds)}
+              disabled={tickedJobIds.length === 0}
+              className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 font-medium text-emerald-700 transition hover:border-emerald-300 hover:bg-emerald-100 active:scale-95 disabled:opacity-40 disabled:hover:bg-emerald-50"
+              title="Select just these jobs and open Tailored CVs, ready for “Tailor only”"
+            >
+              Tailor ticked ({tickedJobIds.length})
+            </button>
+            <button
               onClick={removeSelected}
-              disabled={selectedForDelete.size === 0 || deleting}
+              disabled={ticked.size === 0 || deleting}
               className="flex items-center gap-1.5 rounded-md border border-rose-200 bg-rose-50 px-2 py-1 font-medium text-rose-700 transition hover:border-rose-300 hover:bg-rose-100 disabled:opacity-40 disabled:hover:bg-rose-50"
               title="Delete the ticked proposal sets — the jobs themselves are untouched"
             >
               {deleting && (
                 <span className="h-3 w-3 animate-spin rounded-full border-2 border-rose-300 border-t-rose-700" />
               )}
-              {deleting ? "Deleting…" : `Delete selected${selectedForDelete.size ? ` (${selectedForDelete.size})` : ""}`}
+              {deleting ? "Deleting…" : `Delete ticked (${ticked.size})`}
             </button>
             <button
               onClick={() => setHidden(new Set(reviewed.map((s) => s.id)))}
@@ -850,8 +861,8 @@ export default function GapCloseProposals({
                 open={openJobId === s.id}
                 onToggleOpen={() => setOpenJobId((cur) => (cur === s.id ? null : s.id))}
                 onReviewed={refresh}
-                selected={selectedForDelete.has(s.id)}
-                onToggleSelected={() => toggleSelectedForDelete(s.id)}
+                selected={ticked.has(s.id)}
+                onToggleSelected={() => toggleTicked(s.id)}
               />
             ))}
           </div>
@@ -867,17 +878,14 @@ export default function GapCloseProposals({
                   across {acceptedJobIds.length} job(s). Run “Tailor only” in Tailored CVs to build
                   drafts that include them, then review, edit, approve and export as usual.
                 </p>
-                {/* This is what makes “Tailor only” reachable: it is disabled on an empty
-                    selection, and accepting items here never selected the jobs itself. */}
+                {/* Accepting an item never selects its job, and “Tailor only” is disabled
+                    on an empty selection — so without this the accepted work is stranded. */}
                 <button
                   onClick={() => onSelectJobs(acceptedJobIds)}
-                  disabled={acceptedAreSelected}
-                  className="shrink-0 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 font-medium text-emerald-700 transition hover:border-emerald-300 hover:bg-emerald-100 active:scale-95 disabled:opacity-40 disabled:hover:bg-emerald-50"
-                  title="Tick exactly these jobs on the Dashboard, ready for “Tailor only”"
+                  className="shrink-0 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 font-medium text-emerald-700 transition hover:border-emerald-300 hover:bg-emerald-100 active:scale-95"
+                  title="Select every job with an accepted item and open Tailored CVs. To do a subset, tick the cards above and use “Tailor ticked”."
                 >
-                  {acceptedAreSelected
-                    ? `These ${acceptedJobIds.length} job(s) are selected`
-                    : `Select these ${acceptedJobIds.length} job(s)`}
+                  Tailor all {acceptedJobIds.length} job(s)
                 </button>
               </>
             )}

@@ -701,7 +701,12 @@ export default function Dashboard() {
             <GapCloseProposals
               selectedJobIds={[...selected]}
               jobTitleById={(id) => jobs.find((j) => j.id === id)?.title ?? "Job"}
-              onSelectJobs={(ids) => setSelected(new Set(ids))}
+              // Selecting the jobs is only half of it — the button that acts on them
+              // lives on the next screen, so go there rather than leave the user to find it.
+              onSelectJobs={(ids) => {
+                setSelected(new Set(ids));
+                setView("tailored");
+              }}
             />
           </Screen>
 

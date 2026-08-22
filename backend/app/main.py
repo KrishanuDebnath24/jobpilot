@@ -271,6 +271,12 @@ class CvIdsRequest(BaseModel):
     draft_ids: list[str] | None = None
 
 
+class CvDraftDeleteRequest(BaseModel):
+    """Delete tailored-CV drafts outright. Ids are required and there is no ``all`` flag:
+    unlike approve/reject this cannot be undone, so it never happens by omission."""
+    draft_ids: list[str]
+
+
 class GapCloseItemPatch(BaseModel):
     """Phase 6.6: one item of the user's review of a gap-close proposal set. ``accepted``
     None leaves it undecided; the text fields let the user edit the wording before
@@ -1002,6 +1008,18 @@ async def delete_gap_close(
 @app.get("/cv/drafts", tags=["cv"])
 async def cv_drafts(status: str | None = None, current_user=Depends(get_current_user)) -> dict:
     return await mcp_client.db_mcp(current_user.id, "get_cv_drafts", {"status": status})
+
+
+@app.post("/cv/drafts/delete", tags=["cv"])
+async def delete_cv_drafts(
+    body: CvDraftDeleteRequest, current_user=Depends(get_current_user)
+) -> dict:
+    """Delete tailored-CV drafts and their rendered files.
+
+    Rejecting a draft keeps it (and its history); this removes it. The jobs those drafts
+    were built for are untouched, so the same job can be tailored again from scratch."""
+    return await mcp_client.db_mcp(
+        current_user.id, "delete_cv_drafts", {"draft_ids": body.draft_ids})
 
 
 @app.get("/cv/drafts/{draft_id}", tags=["cv"])
