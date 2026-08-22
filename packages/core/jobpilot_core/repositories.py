@@ -1120,12 +1120,57 @@ async def get_active_pipeline(
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
+async def active_run_stages(session: AsyncSession, user_id: uuid.UUID) -> list[str]:
+    """Distinct stages the user currently has open — what the caller needs heartbeats for."""
+    res = await session.execute(
+        select(models.PipelineRun.stage)
+        .where(
+            models.PipelineRun.user_id == user_id,
+            models.PipelineRun.status.in_(ACTIVE_STATUSES),
+        )
+        .distinct()
+    )
+    return [row[0] for row in res.all()]
+
+
+async def reap_stale_runs(
+    session: AsyncSession, user_id: uuid.UUID, alive: set[str], grace_seconds: int
+) -> int:
+    """Fail-close every run row — umbrella AND stage — whose worker has stopped beating.
+
+    ``alive`` is the set of stages that have heartbeat recently (see ``events.alive_stages``);
+    anything else that has been active past ``grace_seconds`` is a row nobody is going to
+    close. The grace period exists only to cover the gap between opening a row and the first
+    beat, so this is fast — a dead run clears in minutes, not the hour the old age-only
+    umbrella reaper needed.
+
+    Reaping stage rows is the part that used to be missing: only the umbrella was ever
+    reaped, so a ``qualify`` row orphaned by a lost worker sat at 'running' for good and the
+    UI honestly reported a task that no longer existed. Returns the number reaped."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=grace_seconds)
+    stmt = select(models.PipelineRun).where(
+        models.PipelineRun.user_id == user_id,
+        models.PipelineRun.status.in_(ACTIVE_STATUSES),
+        models.PipelineRun.started_at < cutoff,
+        models.PipelineRun.stage.notin_(list(alive)) if alive else text("true"),
+    )
+    stale = (await session.execute(stmt)).scalars().all()
+    now = datetime.now(timezone.utc)
+    for run in stale:
+        run.status = "failed"
+        run.finished_at = now
+        run.error = "reaped: the worker running this stage stopped reporting (restart or crash)"
+    if stale:
+        await session.flush()
+    return len(stale)
+
+
 async def reap_stale_pipelines(
     session: AsyncSession, user_id: uuid.UUID, ttl_seconds: int
 ) -> int:
-    """Fail-close any umbrella that has been 'active' longer than ``ttl_seconds`` (a
-    worker died mid-run). Prevents a crashed run from locking the user out forever.
-    Returns the number reaped."""
+    """Age-only umbrella reaper. Superseded by ``reap_stale_runs``, which uses a heartbeat
+    and also covers stage rows; kept as the backstop for a run that predates heartbeating
+    (its stage will never beat, so age is the only signal left). Returns the number reaped."""
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
     stmt = select(models.PipelineRun).where(
         models.PipelineRun.user_id == user_id,

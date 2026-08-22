@@ -35,6 +35,9 @@ async def _emit(user_id: uuid.UUID, event: dict) -> None:
         await events.publish_event(get_settings().redis_url, user_id, event)
     except Exception as exc:  # noqa: BLE001
         logger.warning("qualify.emit failed: %s", exc)
+    # Liveness, not delivery: the event bus is pub/sub and drops what nobody is listening
+    # to, whereas the reaper has to be able to tell "still working" from "worker died".
+    await events.beat(get_settings().redis_url, user_id, event.get("stage", "qualify"))
 
 
 def _version_of(job: dict) -> tuple | None:
@@ -82,20 +85,36 @@ async def run_qualify(
     counts = {"scored": 0, "qualified": 0, "disqualified": 0, "gated_out": 0, "skipped": 0}
     errors: dict[str, str] = {}
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost_usd": 0.0}
-    total = len(jobs)
-    await _emit(user_id, events.make_event(
-        "qualify", events.STARTED, pipeline_id=pid, counts={"total": total}))
 
-    for processed, job in enumerate(jobs, start=1):
+    # Resolve the work set BEFORE reporting a total.
+    #
+    # A job already scored against this same effective CV and config is skipped - which is
+    # what makes an interrupted run cheap to resume: re-running qualify scores the jobs that
+    # still need it, not the whole pool. That was always true, but `total` counted every job
+    # in the pool, so a resumed run announced "0 of 1189" and looked like it was starting
+    # over. Deciding the set up front makes the number the work actually left to do.
+    todo: list[dict] = []
+    for job in jobs:
+        _, _, cv_version = select_effective_resume(
+            resume, resume_version, draft_by_job.get(job["id"]))
+        if not requalify_all and _version_of(job) == (cv_version, config_version):
+            counts["skipped"] += 1
+            continue
+        todo.append(job)
+    # One run is capped; the rest stay unscored and are picked up by the next run.
+    if len(todo) > settings.qualify_max_jobs:
+        counts["skipped"] += len(todo) - settings.qualify_max_jobs
+        todo = todo[: settings.qualify_max_jobs]
+
+    total = len(todo)
+    await _emit(user_id, events.make_event(
+        "qualify", events.STARTED, pipeline_id=pid,
+        counts={"total": total, "already_scored": counts["skipped"], "pool": len(jobs)}))
+
+    for processed, job in enumerate(todo, start=1):
         try:
             eff_resume, cv_source, cv_version = select_effective_resume(
                 resume, resume_version, draft_by_job.get(job["id"]))
-            if not requalify_all and _version_of(job) == (cv_version, config_version):
-                counts["skipped"] += 1
-                continue
-            if counts["scored"] >= settings.qualify_max_jobs:
-                counts["skipped"] += 1
-                continue
 
             det = score_deterministic(eff_resume, job, qcfg)
             llm_data = None

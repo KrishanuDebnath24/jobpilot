@@ -231,6 +231,11 @@ services:
   # through db-mcp. Does NOT consume the orchestrator queue.
   worker:
     image: jobpilot-backend:local
+    # A warm Celery shutdown finishes the task in hand before exiting. Docker's default
+    # grace period is 10s, which turns any deploy into a guillotine for a running stage —
+    # a 17-minute qualify was lost to exactly that. New work is refused the moment SIGTERM
+    # arrives, so this only ever delays a restart by the tail of genuine work.
+    stop_grace_period: 30m
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -269,6 +274,11 @@ services:
   # LLM-free; needs DATABASE_URL (Postgres checkpointer) + db-mcp (reconciliation).
   orchestrator-worker:
     image: jobpilot-backend:local
+    # A warm Celery shutdown finishes the task in hand before exiting. Docker's default
+    # grace period is 10s, which turns any deploy into a guillotine for a running stage —
+    # a 17-minute qualify was lost to exactly that. New work is refused the moment SIGTERM
+    # arrives, so this only ever delays a restart by the tail of genuine work.
+    stop_grace_period: 30m
     build:
       context: .
       dockerfile: backend/Dockerfile

@@ -24,6 +24,7 @@ logger = logging.getLogger("jobpilot.enhance")
 async def _emit(user_id: uuid.UUID, event: dict) -> None:
     try:
         await events.publish_event(get_settings().redis_url, user_id, event)
+        await events.beat(get_settings().redis_url, user_id, event.get("stage", "enhance"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("enhance.emit failed: %s", exc)
 

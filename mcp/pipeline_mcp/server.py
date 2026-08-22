@@ -17,7 +17,7 @@ from __future__ import annotations
 import uuid
 
 from celery import Celery
-from jobpilot_core import gates, repositories
+from jobpilot_core import events, gates, repositories
 from jobpilot_core.db import session_scope
 from jobpilot_core.mcp_auth import UserContextMiddleware, require_user_id
 from jobpilot_core.settings import get_settings
@@ -33,6 +33,28 @@ _celery = Celery("jobpilot-pipeline-mcp", broker=settings.redis_url, backend=set
 _celery.conf.update(task_serializer="json", accept_content=["json"], result_serializer="json")
 
 
+async def _reap(uid) -> int:
+    """Close any run row whose worker has stopped beating, for this user.
+
+    Called on every read as well as every trigger, so the UI heals itself. Before this, a
+    stage row orphaned by a lost worker was never reaped at all — it sat at 'running'
+    forever — and the umbrella needed an hour AND a fresh trigger to clear, which locked
+    the user out of starting a new pipeline in the meantime.
+
+    Never raises: a reap failure must degrade to "the old status" and never break status."""
+    try:
+        async with session_scope() as session:
+            stages = await repositories.active_run_stages(session, uid)
+            if not stages:
+                return 0
+            alive = await events.alive_stages(
+                settings.redis_url, uid, stages, settings.run_stale_seconds)
+            return await repositories.reap_stale_runs(
+                session, uid, alive, settings.run_grace_seconds)
+    except Exception:  # noqa: BLE001 - status must survive a failed reap
+        return 0
+
+
 @mcp.tool()
 async def run_full_pipeline() -> dict:
     """Kick off an autonomous Scout→Qualify run. Enforces **one active pipeline per
@@ -42,7 +64,10 @@ async def run_full_pipeline() -> dict:
     uid = require_user_id()
     pid = uuid.uuid4()
 
+    await _reap(uid)
     async with session_scope() as session:
+        # Age-only backstop, for an umbrella opened before heartbeating existed: its stage
+        # will never beat, so nothing but age can ever release it.
         await repositories.reap_stale_pipelines(session, uid, settings.pipeline_stale_seconds)
 
     try:
@@ -76,8 +101,12 @@ def _pending_gate(pipeline: dict | None) -> dict | None:
 @mcp.tool()
 async def get_pipeline_status() -> dict:
     """Current stage + per-stage counts for the active run, or the most recent one.
-    Includes ``pending_gate`` when the pipeline is paused awaiting a review approval."""
+    Includes ``pending_gate`` when the pipeline is paused awaiting a review approval.
+
+    Reaps dead runs first: this is the endpoint the live UI polls, so healing here is what
+    turns "a spinner for a task that no longer exists" into a failed run you can retry."""
     uid = require_user_id()
+    await _reap(uid)
     async with session_scope() as session:
         active = await repositories.get_active_pipeline(session, uid)
         if active and active.pipeline_id:
@@ -151,6 +180,7 @@ async def trigger_stage(
 async def list_runs(limit: int = 20) -> dict:
     """Recent pipeline executions (grouped by pipeline_id), newest first."""
     uid = require_user_id()
+    await _reap(uid)
     async with session_scope() as session:
         return {"runs": await repositories.list_pipelines(session, uid, limit=limit)}
 

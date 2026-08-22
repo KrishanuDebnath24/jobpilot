@@ -185,6 +185,88 @@ async def test_reap_stale_pipeline_frees_the_guard():
 
 
 @requires_db
+async def test_reap_closes_an_orphaned_stage_row_not_just_the_umbrella():
+    """The bug this exists for: only the umbrella was ever reaped, so a stage row left
+    'running' by a lost worker stayed that way forever and the UI showed a spinner for a
+    task that no longer existed."""
+    uid = await _mk_user()
+    try:
+        pid = uuid.uuid4()
+        old = datetime.now(timezone.utc) - timedelta(seconds=3600)
+        async with session_scope() as s:
+            umbrella = await repositories.open_pipeline(s, uid, pid)
+            umbrella.started_at = old
+            run = await repositories.create_pipeline_run(s, uid, "qualify", pipeline_id=pid)
+            run.status = "running"
+            run.started_at = old
+        async with session_scope() as s:
+            stages = await repositories.active_run_stages(s, uid)
+            assert set(stages) == {"pipeline", "qualify"}
+            # Nothing is beating, so both are dead.
+            reaped = await repositories.reap_stale_runs(s, uid, alive=set(), grace_seconds=120)
+        assert reaped == 2
+        async with session_scope() as s:
+            rows = await repositories.get_pipeline_runs(s, uid, stage="qualify")
+            assert rows[0]["status"] == "failed" and "stopped reporting" in (rows[0]["error"] or "")
+            assert await repositories.get_active_pipeline(s, uid) is None
+    finally:
+        async with session_scope() as s:
+            await repositories.delete_user_cascade(s, uid)
+
+
+@requires_db
+async def test_reap_never_touches_a_stage_that_is_still_beating():
+    """The dangerous direction. Reaping a live run is far worse than showing a stale one,
+    so a stage that still reports must survive however long it has been going."""
+    uid = await _mk_user()
+    try:
+        pid = uuid.uuid4()
+        old = datetime.now(timezone.utc) - timedelta(seconds=7200)
+        async with session_scope() as s:
+            umbrella = await repositories.open_pipeline(s, uid, pid)
+            umbrella.started_at = old
+            run = await repositories.create_pipeline_run(s, uid, "qualify", pipeline_id=pid)
+            run.status = "running"
+            run.started_at = old
+        async with session_scope() as s:
+            reaped = await repositories.reap_stale_runs(
+                s, uid, alive={"qualify", "pipeline"}, grace_seconds=120)
+        assert reaped == 0
+        async with session_scope() as s:
+            assert await repositories.get_active_pipeline(s, uid) is not None
+    finally:
+        async with session_scope() as s:
+            await repositories.delete_user_cascade(s, uid)
+
+
+@requires_db
+async def test_reap_spares_a_run_still_inside_its_grace_period():
+    """A row is opened before its first beat; reaping in that window would kill every run
+    at the moment it starts."""
+    uid = await _mk_user()
+    try:
+        pid = uuid.uuid4()
+        async with session_scope() as s:
+            await repositories.open_pipeline(s, uid, pid)  # started_at = now
+        async with session_scope() as s:
+            assert await repositories.reap_stale_runs(
+                s, uid, alive=set(), grace_seconds=120) == 0
+    finally:
+        async with session_scope() as s:
+            await repositories.delete_user_cascade(s, uid)
+
+
+async def test_alive_stages_reports_everything_alive_when_redis_is_down():
+    """Fail-safe direction: an unreadable heartbeat must never be read as "they all died",
+    or one broker hiccup would mass-reap every healthy run."""
+    from jobpilot_core import events
+
+    alive = await events.alive_stages(
+        "redis://127.0.0.1:6390/0", uuid.uuid4(), ["scout", "qualify"], stale_seconds=600)
+    assert alive == {"scout", "qualify"}
+
+
+@requires_db
 async def test_list_scheduled_users_is_a_system_read():
     uid = await _mk_user()
     try:

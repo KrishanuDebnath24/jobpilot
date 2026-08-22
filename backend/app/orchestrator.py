@@ -28,6 +28,7 @@ import uuid
 from typing import TypedDict
 
 from jobpilot_core import events, gates
+from jobpilot_core.repositories import UMBRELLA_STAGE
 from jobpilot_core.settings import Settings, get_settings
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.graph import END, START, StateGraph
@@ -64,6 +65,7 @@ class PipelineState(TypedDict, total=False):
 async def _emit(user_id: uuid.UUID, event: dict) -> None:
     try:
         await events.publish_event(get_settings().redis_url, user_id, event)
+        await events.beat(get_settings().redis_url, user_id, event.get("stage", "pipeline"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("orchestrator.emit failed: %s", exc)
 
@@ -90,6 +92,9 @@ async def _await_stage(
     async with events.subscribe(settings.redis_url, user_id) as ps:
         gen = events.listen(ps, timeout=2.0)
         while time.monotonic() < deadline:
+            # Waiting IS the orchestrator's work, and it emits nothing while it does it, so
+            # the umbrella has to beat here or the reaper would read a healthy run as dead.
+            await events.beat(settings.redis_url, user_id, UMBRELLA_STAGE)
             row = await _stage_status(user_id, pipeline_id, stage)
             if row and row["status"] in _TERMINAL:
                 return row

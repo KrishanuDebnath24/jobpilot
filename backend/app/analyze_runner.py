@@ -33,6 +33,7 @@ logger = logging.getLogger("jobpilot.analyze")
 async def _emit(user_id: uuid.UUID, event: dict) -> None:
     try:
         await events.publish_event(get_settings().redis_url, user_id, event)
+        await events.beat(get_settings().redis_url, user_id, event.get("stage", "analyze"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("analyze.emit failed: %s", exc)
 

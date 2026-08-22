@@ -51,7 +51,14 @@ class Settings(BaseSettings):
     orchestrator_queue: str = "orchestrator"
     data_queue: str = "celery"  # Celery's default queue (the existing worker)
     stage_timeout_seconds: int = 1800  # max wait for one stage to finish
-    pipeline_stale_seconds: int = 3600  # reap an umbrella stuck 'running' past this
+    pipeline_stale_seconds: int = 3600  # age-only backstop for pre-heartbeat umbrellas
+    # A running stage beats while it works; this is how long it may go quiet before it is
+    # declared dead. Must exceed the longest gap between beats — qualify beats every 10
+    # jobs, the orchestrator every ~2.5s while it waits — with room for a slow model call.
+    run_stale_seconds: int = 600
+    # Grace between opening a run row and its first heartbeat, so a just-queued stage is
+    # never reaped before it has had a chance to report.
+    run_grace_seconds: int = 120
     beat_tick_seconds: int = 60  # how often the scheduler checks for due pipelines
 
     # --- Anthropic (Phase 2+). Required in services that call an LLM

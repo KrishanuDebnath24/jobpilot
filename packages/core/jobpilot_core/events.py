@@ -17,12 +17,15 @@ sees its own user's events — one user's status can't leak onto another's strea
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator
 
 import redis.asyncio as aioredis
+
+logger = logging.getLogger("jobpilot.events")
 
 _PREFIX = "jobpilot:events"
 
@@ -55,6 +58,73 @@ def make_event(
         "ts": datetime.now(timezone.utc).isoformat(),
         **extra,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Liveness heartbeat
+#
+# A ``pipeline_runs`` row is opened by the worker and closed by the worker. If the worker
+# dies in between — OOM, a container restart, a laptop closing — nothing closes it, and the
+# row says "running" forever: the UI shows a spinner for a task that no longer exists.
+#
+# Age alone cannot distinguish that from a stage that is merely slow, and reaping a live run
+# is far worse than showing a stale one. So a running stage writes a heartbeat, and only a
+# stage that has stopped beating is considered dead. Fail-soft in both directions: a Redis
+# outage must never fail a run (the write is swallowed) and must never mass-reap live runs
+# (an unreadable heartbeat is reported as "unknown", and the caller keeps the row).
+# --------------------------------------------------------------------------- #
+_BEAT_PREFIX = "jobpilot:beat"
+_BEAT_TTL_SECONDS = 6 * 3600  # comfortably longer than any stage; the timestamp is the signal
+
+
+def beat_key(user_id: uuid.UUID | str, stage: str) -> str:
+    return f"{_BEAT_PREFIX}:{user_id}:{stage}"
+
+
+async def beat(redis_url: str, user_id: uuid.UUID | str, stage: str) -> None:
+    """Record that ``stage`` is still alive for this user. Never raises."""
+    try:
+        client = aioredis.from_url(redis_url, decode_responses=True)
+        try:
+            await client.set(
+                beat_key(user_id, stage),
+                datetime.now(timezone.utc).isoformat(),
+                ex=_BEAT_TTL_SECONDS,
+            )
+        finally:
+            await client.aclose()
+    except Exception as exc:  # noqa: BLE001 - liveness bookkeeping must not sink a run
+        logger.warning("events.beat failed stage=%s: %s", stage, exc)
+
+
+async def alive_stages(
+    redis_url: str, user_id: uuid.UUID | str, stages: list[str], stale_seconds: int
+) -> set[str]:
+    """Which of ``stages`` have beaten within ``stale_seconds``.
+
+    On any Redis error every stage is reported alive, so a broker hiccup can never be read
+    as "every run died" — the reaper then does nothing, which is the safe direction."""
+    try:
+        client = aioredis.from_url(redis_url, decode_responses=True)
+        try:
+            values = await client.mget([beat_key(user_id, s) for s in stages])
+        finally:
+            await client.aclose()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("events.alive_stages failed: %s", exc)
+        return set(stages)  # unknown == alive; never reap on a Redis failure
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_seconds)
+    alive: set[str] = set()
+    for stage, raw in zip(stages, values):
+        if not raw:
+            continue
+        try:
+            if datetime.fromisoformat(raw) >= cutoff:
+                alive.add(stage)
+        except ValueError:
+            alive.add(stage)  # unparseable: treat as alive rather than reap on a bad read
+    return alive
 
 
 async def publish_event(redis_url: str, user_id: uuid.UUID | str, event: dict) -> int:

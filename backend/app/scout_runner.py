@@ -65,6 +65,7 @@ async def _emit(user_id: uuid.UUID, event: dict) -> None:
         await events.publish_event(get_settings().redis_url, user_id, event)
     except Exception as exc:  # noqa: BLE001
         logger.warning("scout.emit failed: %s", exc)
+    await events.beat(get_settings().redis_url, user_id, event.get("stage", "scout"))
 
 # High enough to cover a full scout batch for the counts below (Phase-2 volumes).
 _COUNT_LIMIT = 5000
