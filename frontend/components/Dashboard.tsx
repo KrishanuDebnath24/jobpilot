@@ -174,10 +174,41 @@ function ActionIcon({ name }: { name: "cv" | "search" | "score" }) {
   );
 }
 
+/* The job selection has to outlive the page.
+ *
+ * Every screen after Dashboard acts on it — "Propose" on gap-close, "Prepare CVs" and
+ * "Tailor only" on Tailored CVs are all disabled while it is empty — but it used to live in
+ * React state alone. So signing back in the next day left a full set of reviewed gap-close
+ * proposals with no button able to act on them, and no way back except re-ticking every row
+ * by hand. It is stored per user, because signing in as someone else must never inherit a
+ * selection, and pruned against the jobs actually in the pool so an id whose job is gone
+ * drops out instead of being posted to the backend. */
+const selectionKey = (userId: string) => `jobpilot_selected_${userId}`;
+
+function readSelection(userId: string): string[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const parsed = JSON.parse(localStorage.getItem(selectionKey(userId)) ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return []; // corrupt entry — start clean rather than wedge the dashboard
+  }
+}
+
+function writeSelection(userId: string, ids: string[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(selectionKey(userId), JSON.stringify(ids));
+  } catch {
+    /* storage blocked or full — the selection just won't survive the reload */
+  }
+}
+
 export default function Dashboard() {
   const [view, setView] = useState<View>("dashboard");
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [email, setEmail] = useState<string>("");
+  const [userId, setUserId] = useState<string>("");
   const [jobs, setJobs] = useState<Job[]>([]);
   const [decision, setDecision] = useState<Decision>("all");
   const [source, setSource] = useState<string>("all");
@@ -185,6 +216,10 @@ export default function Dashboard() {
   const [seniority, setSeniority] = useState<string>("all");
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Whose stored selection has been read back in. State rather than a ref on purpose: it
+  // stops the effect that writes the selection running in the same commit as the one that
+  // restores it, which would persist the still-empty initial set over what we just read.
+  const [restoredFor, setRestoredFor] = useState<string | null>(null);
   const loadingJobs = useRef(false);
 
   // Search config + the settings modal (onboarding / edit / review) that manages it.
@@ -287,6 +322,31 @@ export default function Dashboard() {
     });
   }, []);
 
+  // Read the stored selection back once getMe has told us who is signed in, then keep the
+  // stored copy in step with every tick and untick.
+  useEffect(() => {
+    if (!userId || restoredFor === userId) return;
+    setSelected(new Set(readSelection(userId)));
+    setRestoredFor(userId);
+  }, [userId, restoredFor]);
+
+  useEffect(() => {
+    if (!userId || restoredFor !== userId) return;
+    writeSelection(userId, [...selected]);
+  }, [userId, restoredFor, selected]);
+
+  // Drop ids whose job has left the pool. Guarded on a non-empty load: a failed or still
+  // in-flight fetch leaves `jobs` empty, and that must not be read as "every job is gone".
+  useEffect(() => {
+    if (jobs.length === 0) return;
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const live = new Set(jobs.map((j) => j.id));
+      const kept = [...prev].filter((id) => live.has(id));
+      return kept.length === prev.size ? prev : new Set(kept);
+    });
+  }, [jobs]);
+
   // Single-flight job reload — PipelineLive calls this live during a run.
   const loadJobs = useCallback(async () => {
     if (loadingJobs.current) return;
@@ -315,6 +375,7 @@ export default function Dashboard() {
       try {
         const me = await getMe();
         setEmail(me.email);
+        setUserId(me.id);
         setAuthed(true);
       } catch {
         setToken(null);
@@ -343,6 +404,7 @@ export default function Dashboard() {
     try {
       const me = await getMe();
       setEmail(me.email);
+      setUserId(me.id);
     } catch {
       /* ignore */
     }
@@ -352,6 +414,11 @@ export default function Dashboard() {
   const logout = () => {
     setToken(null);
     setAuthed(false);
+    // The stored selection stays put — it is keyed per user, and surviving a sign-out is the
+    // whole point. Only the in-memory copy is dropped, so the next sign-in restores its own.
+    setSelected(new Set());
+    setRestoredFor(null);
+    setUserId("");
   };
 
   const sources = useMemo(
@@ -634,6 +701,7 @@ export default function Dashboard() {
             <GapCloseProposals
               selectedJobIds={[...selected]}
               jobTitleById={(id) => jobs.find((j) => j.id === id)?.title ?? "Job"}
+              onSelectJobs={(ids) => setSelected(new Set(ids))}
             />
           </Screen>
 

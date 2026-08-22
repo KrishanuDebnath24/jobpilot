@@ -487,9 +487,14 @@ function ProgressDetail({ status }: { status: GapCloseStatus | null }) {
 export default function GapCloseProposals({
   selectedJobIds,
   jobTitleById,
+  onSelectJobs,
 }: {
   selectedJobIds: string[];
   jobTitleById: (id: string) => string;
+  /** Replace the dashboard's job selection. Accepted proposals are stored against the job,
+   *  not against the tick in the table, so this is what hands them back to "Tailor only"
+   *  without hunting down the same rows again. */
+  onSelectJobs: (ids: string[]) => void;
 }) {
   const [rows, setRows] = useState<Suggestion[]>([]);
   const [busy, setBusy] = useState(false);
@@ -539,6 +544,23 @@ export default function GapCloseProposals({
   const totalAccepted = useMemo(
     () => withProposals.reduce((n, s) => n + countAccepted(s.gap_close_json), 0),
     [withProposals],
+  );
+  // The jobs with something to actually fold into a draft — i.e. exactly what "Tailor only"
+  // is for. Offered as a one-click selection because it is otherwise only reconstructable by
+  // remembering which rows were ticked, and the table's ticks don't survive a sign-out.
+  const acceptedJobIds = useMemo(
+    () =>
+      withProposals
+        .filter((s) => countAccepted(s.gap_close_json) > 0)
+        .map((s) => s.job_id as string),
+    [withProposals],
+  );
+  const acceptedAreSelected = useMemo(
+    () =>
+      acceptedJobIds.length > 0 &&
+      selectedJobIds.length === acceptedJobIds.length &&
+      acceptedJobIds.every((id) => selectedJobIds.includes(id)),
+    [acceptedJobIds, selectedJobIds],
   );
   // Fully reviewed = every item decided, so the card has nothing left to ask of you.
   const reviewed = useMemo(
@@ -833,17 +855,33 @@ export default function GapCloseProposals({
               />
             ))}
           </div>
-          <p className="mt-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs leading-relaxed text-slate-600">
+          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs leading-relaxed text-slate-600">
             {totalAccepted === 0 ? (
-              <>Nothing accepted yet — “Tailor only” will run on your résumé evidence alone.</>
+              <p>Nothing accepted yet — “Tailor only” will run on your résumé evidence alone.</p>
             ) : (
               <>
-                <span className="font-semibold text-emerald-700">{totalAccepted} item(s) accepted.</span>{" "}
-                Run “Tailor only” in Tailored CVs to build drafts that include them, then review,
-                edit, approve and export as usual.
+                <p className="min-w-0 flex-1">
+                  <span className="font-semibold text-emerald-700">
+                    {totalAccepted} item(s) accepted
+                  </span>{" "}
+                  across {acceptedJobIds.length} job(s). Run “Tailor only” in Tailored CVs to build
+                  drafts that include them, then review, edit, approve and export as usual.
+                </p>
+                {/* This is what makes “Tailor only” reachable: it is disabled on an empty
+                    selection, and accepting items here never selected the jobs itself. */}
+                <button
+                  onClick={() => onSelectJobs(acceptedJobIds)}
+                  disabled={acceptedAreSelected}
+                  className="shrink-0 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 font-medium text-emerald-700 transition hover:border-emerald-300 hover:bg-emerald-100 active:scale-95 disabled:opacity-40 disabled:hover:bg-emerald-50"
+                  title="Tick exactly these jobs on the Dashboard, ready for “Tailor only”"
+                >
+                  {acceptedAreSelected
+                    ? `These ${acceptedJobIds.length} job(s) are selected`
+                    : `Select these ${acceptedJobIds.length} job(s)`}
+                </button>
               </>
             )}
-          </p>
+          </div>
         </>
       )}
     </section>
