@@ -64,6 +64,7 @@ CV_SCHEMA = {
                 "properties": {
                     "title": {"type": "string", "description": "LOCKED — copy verbatim"},
                     "company": {"type": "string", "description": "LOCKED — copy verbatim"},
+                    "location": {"type": "string", "description": "LOCKED — copy verbatim"},
                     "dates": {"type": "string", "description": "LOCKED — copy verbatim"},
                     "bullets": {
                         "type": "array", "items": {"type": "string"},
@@ -188,7 +189,7 @@ def _locked_block(snapshot: dict) -> str:
     for i, e in enumerate(snapshot.get("experience") or []):
         lines.append(
             f"experience[{i}]: title={e.get('title')!r} company={e.get('company')!r} "
-            f"dates={e.get('dates')!r}"
+            f"location={e.get('location')!r} dates={e.get('dates')!r}"
         )
     for ed in snapshot.get("education") or []:
         lines.append(f"education: {ed.get('text')!r}" if isinstance(ed, dict) else f"education: {ed!r}")

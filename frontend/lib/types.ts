@@ -391,7 +391,14 @@ export type TailoredContent = {
   contact?: { name?: string; email?: string; phone?: string; location?: string; links?: string[] };
   summary?: string;
   skills?: string[];
-  experience?: { title?: string; company?: string; dates?: string; bullets?: string[] }[];
+  experience?: {
+    title?: string;
+    company?: string;
+    /** Where the role was based. Locked like the employer, and printed opposite it. */
+    location?: string;
+    dates?: string;
+    bullets?: string[];
+  }[];
   education?: { text?: string }[];
   certifications?: string[];
   additional_sections?: { heading?: string; items?: string[] }[];

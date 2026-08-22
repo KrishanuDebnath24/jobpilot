@@ -16,8 +16,17 @@ class Contact(BaseModel):
 class ExperienceItem(BaseModel):
     title: str | None = None
     company: str | None = None
+    location: str | None = None  # where the role was based; printed opposite the employer
     dates: str | None = None
     bullets: list[str] = Field(default_factory=list)
+
+
+class AdditionalSection(BaseModel):
+    """A headed section the CV carries beyond the typed ones — Projects, Publications,
+    Languages. Captured so tailoring and the render can never silently drop it."""
+
+    heading: str
+    items: list[str] = Field(default_factory=list)
 
 
 class EducationItem(BaseModel):
@@ -38,6 +47,7 @@ class StructuredResume(BaseModel):
     experience: list[ExperienceItem] = Field(default_factory=list)
     education: list[EducationItem] = Field(default_factory=list)
     certifications: list[str] = Field(default_factory=list)
+    additional_sections: list[AdditionalSection] = Field(default_factory=list)
 
 
 class JobIn(BaseModel):

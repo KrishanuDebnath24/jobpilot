@@ -655,7 +655,10 @@ function CvPreview({ content, className = "" }: { content: TailoredContent; clas
         {roles.map((role, i) => (
           <div key={i}>
             <p className="font-medium text-slate-800">
-              {role.title} @ {role.company} <span className="font-normal text-slate-400">({role.dates})</span>
+              {role.title} @ {role.company}
+              <span className="font-normal text-slate-400">
+                {role.location ? ` · ${role.location}` : ""} ({role.dates})
+              </span>
             </p>
             <ul className="mt-0.5 space-y-0.5 pl-3">
               {(role.bullets ?? []).map((b, bi) => (
@@ -711,8 +714,8 @@ function DraftEditor({
   return (
     <div className="rounded-lg border border-sky-200 bg-sky-50/50 p-2.5">
       <p className="mb-2.5 leading-relaxed text-slate-600">
-        Edit before approving — employer, title, dates and education are locked and can’t be
-        changed here. A skill your résumé doesn’t evidence is recorded as{" "}
+        Edit before approving — employer, title, location, dates and education are locked and
+        can’t be changed here. A skill your résumé doesn’t evidence is recorded as{" "}
         <span className="font-medium text-amber-700">user-confirmed</span> (your word, not a citation).
       </p>
 
@@ -763,7 +766,9 @@ function DraftEditor({
         <div key={i} className="mb-3">
           <p className="mb-1 font-medium text-slate-600">
             {role.title} @ {role.company}{" "}
-            <span className="font-normal text-slate-400">({role.dates} — locked)</span>
+            <span className="font-normal text-slate-400">
+              ({[role.location, role.dates].filter(Boolean).join(" · ")} — locked)
+            </span>
           </p>
           <ul className="mb-1 space-y-1">
             {(role.bullets ?? []).map((b, bi) => (

@@ -41,7 +41,7 @@ import re
 
 # The locked set, enumerated for the schema / review UI / docs.
 LOCKED_TOP_FIELDS = ("contact", "education")  # whole structures, immutable
-LOCKED_EXPERIENCE_FIELDS = ("title", "company", "dates")  # per role: who/what/when
+LOCKED_EXPERIENCE_FIELDS = ("title", "company", "location", "dates")  # who/what/where/when
 MODIFIABLE_FIELDS = ("summary", "skills", "experience.bullets", "section_order")
 
 # Sections carried through tailoring untouched in content, so the rendered CV keeps every
@@ -76,8 +76,8 @@ def _norm(s: str | None) -> str:
 # --------------------------------------------------------------------------- #
 def extract_locked_snapshot(base_resume: dict) -> dict:
     """The immutable facts of the base resume: contact, education, and each role's
-    (title, company, dates). Stored on the draft as ``locked_snapshot_json`` and
-    compared against on every validation."""
+    (title, company, location, dates). Stored on the draft as ``locked_snapshot_json``
+    and compared against on every validation."""
     return {
         "contact": copy.deepcopy(base_resume.get("contact") or {}),
         "education": copy.deepcopy(base_resume.get("education") or []),
@@ -104,6 +104,7 @@ def enforce_locked(tailored: dict, snapshot: dict) -> dict:
         fixed.append({
             "title": locked.get("title"),
             "company": locked.get("company"),
+            "location": locked.get("location"),
             "dates": locked.get("dates"),
             "bullets": list(te.get("bullets") or []),  # the one modifiable part of a role
         })

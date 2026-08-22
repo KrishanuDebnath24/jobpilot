@@ -31,8 +31,11 @@ BASE = {
     "summary": "Backend engineer.",
     "skills": ["Python", "Go", "Kubernetes", "SQL"],
     "experience": [
-        {"title": "Software Engineer", "company": "Acme", "dates": "2019–2023",
+        {"title": "Software Engineer", "company": "Acme", "location": "Dublin, Ireland",
+         "dates": "2019–2023",
          "bullets": ["Built REST APIs in Python", "Ran Postgres and deployments"]},
+        # No location: a resume parsed before the field existed must still render and still
+        # validate, so one role deliberately carries none.
         {"title": "Junior Developer", "company": "Beta Ltd", "dates": "2017–2019",
          "bullets": ["Maintained internal tooling"]},
     ],
@@ -48,8 +51,10 @@ def test_snapshot_captures_the_locked_facts():
     assert snap["contact"] == BASE["contact"]
     assert snap["education"] == BASE["education"]
     assert snap["experience"] == [
-        {"title": "Software Engineer", "company": "Acme", "dates": "2019–2023"},
-        {"title": "Junior Developer", "company": "Beta Ltd", "dates": "2017–2019"},
+        {"title": "Software Engineer", "company": "Acme", "location": "Dublin, Ireland",
+         "dates": "2019–2023"},
+        {"title": "Junior Developer", "company": "Beta Ltd", "location": None,
+         "dates": "2017–2019"},
     ]
 
 
@@ -60,8 +65,8 @@ def test_validate_locked_catches_every_kind_of_drift():
         "contact": {**BASE["contact"], "email": "someone-else@x.ie"},
         "skills": BASE["skills"],
         "experience": [
-            {"title": "Senior Software Engineer", "company": "Acme Corp", "dates": "2018–2023",
-             "bullets": ["…"]},
+            {"title": "Senior Software Engineer", "company": "Acme Corp", "location": "Berlin",
+             "dates": "2018–2023", "bullets": ["…"]},
         ],
         "education": [{"text": "MSc AI, Somewhere, 2018"}],
     }
@@ -70,6 +75,7 @@ def test_validate_locked_catches_every_kind_of_drift():
     joined = " ".join(v["violations"])
     assert "contact" in joined and "education" in joined and "role count" in joined
     assert "dates" in joined and "company" in joined and "title" in joined
+    assert "location" in joined  # where a role happened is a fact, not a tailoring choice
 
 
 def test_validate_catches_fabricated_skill_but_allows_grounded():
@@ -122,12 +128,51 @@ def test_pdf_is_a4_and_machine_readable_with_irish_order():
     assert len(text) >= 50  # real selectable text, not an image
     for token in ("Jane Doe", "2019–2023", "Trinity College Dublin", tailor.REFERENCES_LINE):
         assert token in text, token
-    # Irish section order: Profile → Key Skills → Experience → Education
-    order = [text.index(s) for s in ("Profile", "Key Skills", "Experience", "Education")]
+    # Irish section order, in Jake's capitalised headers
+    order = [text.index(s) for s in ("PROFESSIONAL SUMMARY", "TECHNICAL SKILLS",
+                                     "EXPERIENCE", "EDUCATION")]
     assert order == sorted(order)
     # no US-style photo/DOB fields are ever emitted
     low = text.lower()
     assert "date of birth" not in low and "marital status" not in low
+
+
+def test_role_location_is_rendered_and_reads_in_order():
+    """The two-column entry row is drawn, not tabled, so extraction must still read
+    title → dates → employer → location — the order a human reads it."""
+    text = tailor.pdf_text(tailor.render_pdf(BASE))
+    assert "Dublin, Ireland" in text  # the location that used to be dropped entirely
+    assert text.index("Software Engineer") < text.index("Acme") < text.index("Dublin, Ireland")
+    # The role with no location still renders its employer, and invents nothing.
+    assert "Beta Ltd" in text
+
+
+def test_render_survives_a_resume_parsed_before_location_existed():
+    """Every stored draft predates the field. None of them may fail or grow a stray blank
+    column because of it."""
+    legacy = {**BASE, "experience": [{k: v for k, v in role.items() if k != "location"}
+                                     for role in BASE["experience"]]}
+    out = tailor.render_both(legacy)
+    assert out["pdf_machine_readable"]
+    text = tailor.pdf_text(out["pdf"])
+    assert "Acme" in text and "None" not in text
+
+
+def test_additional_sections_survive_to_the_page():
+    """Projects/Publications are the sections a CV is judged on and the parser used to drop
+    them on the floor; prove the render prints them under their own header."""
+    cv = {**BASE, "additional_sections": [
+        {"heading": "Projects", "items": ["Multi-agent platform | Python, LangGraph"]}]}
+    text = tailor.pdf_text(tailor.render_pdf(cv))
+    assert "PROJECTS" in text and "Multi-agent platform" in text
+
+
+def test_education_dates_move_to_the_right_column_only_when_unambiguous():
+    assert tailor._split_trailing_dates(
+        "Maynooth University | M.Sc. Robotics — Maynooth, Ireland, Sep. 2024 - Sep. 2025"
+    ) == ("Maynooth University | M.Sc. Robotics — Maynooth, Ireland", "Sep. 2024 - Sep. 2025")
+    assert tailor._split_trailing_dates("BSc Computer Science, Trinity College Dublin, 2017") == (
+        "BSc Computer Science, Trinity College Dublin, 2017", "")  # a lone year is not a range
 
 
 def test_docx_is_a4_and_readable():
@@ -136,6 +181,7 @@ def test_docx_is_a4_and_readable():
     docx_bytes = tailor.render_docx(BASE)
     text = tailor.docx_text(docx_bytes)
     assert "Jane Doe" in text and "Kubernetes" in text and tailor.REFERENCES_LINE in text
+    assert "Dublin, Ireland" in text  # the location column, as a right-aligned tab
 
     import io
     import docx

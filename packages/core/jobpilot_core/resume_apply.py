@@ -123,7 +123,8 @@ def render_resume_text(structured: dict) -> str:
         lines += ["", "EXPERIENCE"]
         for exp in s["experience"]:
             head = " | ".join(
-                str(x) for x in (exp.get("title"), exp.get("company"), exp.get("dates")) if x
+                str(x) for x in (exp.get("title"), exp.get("company"),
+                                 exp.get("location"), exp.get("dates")) if x
             )
             if head:
                 lines.append(head)

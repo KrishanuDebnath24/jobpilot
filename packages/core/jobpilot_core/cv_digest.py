@@ -93,6 +93,7 @@ def cv_sections(content: dict, job: dict | None = None) -> dict:
             "index": i,
             "title": role.get("title"),          # locked
             "company": role.get("company"),      # locked
+            "location": role.get("location"),    # locked
             "dates": role.get("dates"),          # locked
             "bullets": [b for b in (role.get("bullets") or []) if str(b).strip()],
         })
