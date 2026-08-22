@@ -79,6 +79,43 @@ async def parse_resume(
 
 
 @mcp.tool()
+async def reparse_resume() -> dict:
+    """Re-run extraction over the file already in storage and overwrite the parse in place.
+
+    Not an upload. The file, the row and its id are all unchanged, so nothing pointing at
+    this resume version is detached — a tailored CV's ``base_resume_version`` above all.
+    This is how a parser improvement reaches a resume that predates it: the candidate
+    should not have to find the file again, and should not lose work already done against
+    it just to gain a field the old schema had no room for.
+
+    Costs one model call. Returns ``{resume_id, reparsed, structured}`` or ``{error}``."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        resume = await repositories.get_latest_uploaded_resume(session, uid)
+        if resume is None:
+            return {"error": "no uploaded resume on file"}
+        resume_id, ref = resume.id, resume.file_ref
+    # Same scoping rule as get_resume_file: the ref must live under the caller's prefix.
+    if not ref or not ref.startswith(user_prefix(uid)):
+        return {"error": "no original file for this resume"}
+
+    storage = get_storage(settings)
+    data = await asyncio.to_thread(storage.get_bytes, ref)
+    # declared_mime is None on purpose - the stored bytes are sniffed, so a lost or odd
+    # extension on the stored key cannot misroute the extractor.
+    raw_text, structured, _mime = await parse_resume_bytes(data, ref, None, settings)
+
+    async with session_scope() as session:
+        reparsed = await repositories.set_resume_parse(
+            session, uid, resume_id, raw_text, structured.model_dump())
+    return {
+        "resume_id": str(resume_id),
+        "reparsed": reparsed,
+        "structured": structured.model_dump(),
+    }
+
+
+@mcp.tool()
 async def get_structured_resume() -> dict:
     uid = require_user_id()
     async with session_scope() as session:

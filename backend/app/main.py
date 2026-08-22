@@ -432,6 +432,23 @@ async def upload_resume(
     return result
 
 
+@app.post("/resumes/me/reparse", tags=["resumes"], dependencies=[_rl_trigger])
+async def reparse_resume(current_user=Depends(get_current_user)) -> dict:
+    """Re-read the CV already on file with the current parser.
+
+    Use it when the extractor has learned a field the stored parse predates — a role's
+    location, or a section it had nowhere to put — so an existing resume gains it without
+    a re-upload. The row keeps its id, so tailored CVs stay attached to their jobs; they
+    still need re-tailoring to pick the new content up. Costs one model call."""
+    result = await mcp_client.resume_mcp(current_user.id, "reparse_resume", {})
+    if result.get("reparsed"):
+        # The stored text changed, so its embedding is now stale (same as after an upload).
+        from .embed_runner import enqueue_embed
+
+        enqueue_embed(current_user.id, ["resumes"])
+    return result
+
+
 @app.get("/resumes/me", tags=["resumes"])
 async def my_resume(current_user=Depends(get_current_user)) -> dict:
     return await mcp_client.resume_mcp(current_user.id, "get_structured_resume", {})

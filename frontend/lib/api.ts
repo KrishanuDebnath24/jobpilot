@@ -119,6 +119,13 @@ export async function uploadResume(file: File, consent: boolean): Promise<Resume
 }
 
 /** The parsed resume currently on file (or `{ resume: null }` if none). */
+/** Re-read the CV already on file with the current parser — no re-upload, and the resume
+ *  keeps its id so tailored CVs stay attached to their jobs. Costs one model call. */
+export const reparseResume = () =>
+  request<{ resume_id?: string; reparsed?: boolean; structured?: StructuredResume; error?: string }>(
+    "/resumes/me/reparse",
+    { method: "POST" },
+  );
 export const getMyResume = () =>
   request<{ resume: { id: string; structured: StructuredResume } | null }>("/resumes/me");
 /** Id of the WORKING resume = latest uploaded file (what scoring/tailoring use). Assembled

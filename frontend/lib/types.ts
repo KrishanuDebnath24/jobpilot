@@ -243,9 +243,18 @@ export type StructuredResume = {
   };
   summary?: string | null;
   skills?: string[];
-  experience?: { title?: string | null; company?: string | null; dates?: string | null; bullets?: string[] }[];
+  experience?: {
+    title?: string | null;
+    company?: string | null;
+    /** Where the role was based. Absent on any resume parsed before the field existed. */
+    location?: string | null;
+    dates?: string | null;
+    bullets?: string[];
+  }[];
   education?: { text?: string }[];
   certifications?: string[];
+  /** Projects, Publications, Languages — every headed section the typed fields don't cover. */
+  additional_sections?: { heading?: string; items?: string[] }[];
 };
 export type ResumeUploadResult = {
   resume_id: string | null;

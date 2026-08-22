@@ -2,7 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { StructuredResume } from "@/lib/types";
-import { ApiError, RESUME_ACCEPT, RESUME_MAX_BYTES, getMyResume, uploadResume } from "@/lib/api";
+import {
+  ApiError,
+  RESUME_ACCEPT,
+  RESUME_MAX_BYTES,
+  getMyResume,
+  reparseResume,
+  uploadResume,
+} from "@/lib/api";
 
 /** Attach a CV/résumé (PDF or DOCX). Deterministic parse on the backend seeds the
  *  qualifier config and embeds the resume. Storage requires explicit consent, so the
@@ -23,6 +30,7 @@ export default function ResumeUpload({
   const [error, setError] = useState<string | null>(null);
   const [current, setCurrent] = useState<StructuredResume | null>(null);
   const [justUploaded, setJustUploaded] = useState(false);
+  const [reparsed, setReparsed] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const loadCurrent = useCallback(async () => {
@@ -66,6 +74,35 @@ export default function ResumeUpload({
       setBusy(false);
     }
   }, [file, consent, busy, onUploaded]);
+
+  /* Re-read the file already on file, rather than making the user find it again.
+     The parser gains fields over time - a role's location, sections it had nowhere to put -
+     and a stored resume can't grow them on its own. Replacing the CV would work but mints a
+     new version, which detaches every tailored CV built on the old one; this keeps the id,
+     so nothing is lost and only a re-tailor is needed to pick the new content up. */
+  const reparse = useCallback(async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setReparsed(null);
+    setJustUploaded(false);
+    try {
+      const res = await reparseResume();
+      if (res.error) throw new Error(res.error);
+      setCurrent(res.structured ?? null);
+      const roles = res.structured?.experience ?? [];
+      const located = roles.filter((r) => r.location).length;
+      setReparsed(
+        `Re-read ${roles.length} role(s)` +
+          (located ? `, ${located} with a location` : " — no locations found in the file"),
+      );
+      onUploaded?.();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, onUploaded]);
 
   const skills = current?.skills ?? [];
   const name = current?.contact?.name;
@@ -127,6 +164,26 @@ export default function ResumeUpload({
           <span className="text-xs font-medium text-emerald-600">Uploaded ✓</span>
         )}
       </div>
+
+      {current && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-slate-200 pt-3">
+          <button
+            onClick={reparse}
+            disabled={busy}
+            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 active:scale-[0.98] disabled:opacity-40"
+            title="Read the CV already on file again with the current parser. No re-upload, and your tailored CVs stay attached to their jobs."
+          >
+            {busy ? "Re-reading…" : "Re-read CV with the current parser"}
+          </button>
+          <span className="text-[11px] leading-snug text-slate-500">
+            Picks up fields your stored parse predates (role locations, extra sections).
+            Costs one model call; re-tailor afterwards to get them onto a CV.
+          </span>
+          {reparsed && !error && (
+            <span className="w-full text-xs font-medium text-emerald-600">{reparsed}</span>
+          )}
+        </div>
+      )}
 
       {error && (
         <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">

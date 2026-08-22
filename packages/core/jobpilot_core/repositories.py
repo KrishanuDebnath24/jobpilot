@@ -10,7 +10,7 @@ import json
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, func, or_, select, text
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import models
@@ -298,6 +298,29 @@ async def get_latest_uploaded_resume(
             .limit(1)
         )
     ).scalar_one_or_none()
+
+
+async def set_resume_parse(
+    session: AsyncSession, user_id: uuid.UUID, resume_id: uuid.UUID,
+    raw_text: str, parsed_json: dict,
+) -> bool:
+    """Overwrite an uploaded resume's extracted text and parse IN PLACE.
+
+    Re-reading the same document is not a new version of it, so the row keeps its id.
+    That is the point: a tailored draft's ``base_resume_version`` still resolves, so
+    improving the parser cannot silently detach every CV built before it — which is
+    exactly what re-uploading the identical file does. Scoped to ``user_id``, and to
+    ``source='upload'`` because an assembled version has no original file to re-read."""
+    res = await session.execute(
+        update(models.Resume)
+        .where(
+            models.Resume.user_id == user_id,
+            models.Resume.id == resume_id,
+            models.Resume.source == "upload",
+        )
+        .values(raw_text=raw_text, parsed_json=parsed_json)
+    )
+    return bool(res.rowcount)
 
 
 async def list_resume_file_refs(session: AsyncSession, user_id: uuid.UUID) -> list[str]:
