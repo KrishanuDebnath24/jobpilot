@@ -40,6 +40,8 @@ from __future__ import annotations
 import io
 import re
 
+from . import doc_meta
+
 REFERENCES_LINE = "References available on request."
 
 # Section order. Anything the candidate had beyond these renders after Certifications, in
@@ -47,6 +49,7 @@ REFERENCES_LINE = "References available on request."
 PROFILE_HEADING = "Professional Summary"
 SKILLS_HEADING = "Technical Skills"
 EXPERIENCE_HEADING = "Experience"
+PROJECTS_HEADING = "Projects"
 EDUCATION_HEADING = "Education"
 CERTIFICATIONS_HEADING = "Certifications"
 
@@ -78,6 +81,82 @@ def _text(value) -> str:
     return str(value).strip() if value is not None else ""
 
 
+#: Hard cap on bullets under any one role or project. A CV that lists eight bullets per
+#: role is not read more thoroughly — it is read less, and it costs the page space the
+#: later entries need. The cap is applied at render time rather than asked for in a prompt
+#: so it holds whatever the model returns, and it keeps the *first* N because the rewriter
+#: already orders bullets most-relevant-first for the target job.
+MAX_BULLETS = 5
+
+
+def _project_from_section(sec: dict) -> list[dict]:
+    """Read projects out of a legacy flat ``additional_sections`` entry.
+
+    Drafts and résumés parsed before projects had a typed shape stored them as a list of
+    strings, with the project's header line sitting in the list as though it were a
+    bullet. Rather than render those as the flat bullet soup they became, recover the
+    structure the same way a reader does: a line carrying a trailing date range starts a
+    new project, and the lines after it are its bullets.
+
+    Best-effort by nature — this is a migration path for rows already in the database, not
+    the parser. Anything it cannot split stays a bullet under the previous project.
+    """
+    projects: list[dict] = []
+    for raw in sec.get("items") or []:
+        line = _text(raw)
+        if not line:
+            continue
+        head, dates = _split_trailing_dates(line)
+        # A header line has dates and has not yet been claimed as a bullet; a bullet
+        # normally does not end in a date range.
+        if dates and head:
+            name, _, tech = head.partition("|")
+            projects.append({
+                "name": _text(name),
+                "tech": _text(tech),
+                "dates": dates,
+                "bullets": [],
+            })
+        elif projects:
+            projects[-1]["bullets"].append(line)
+        else:
+            # Text before any recognisable header — keep it as a nameless entry rather
+            # than dropping content off the page.
+            projects.append({"name": line, "tech": "", "dates": "", "bullets": []})
+    return projects
+
+
+def _projects(cv: dict) -> list[dict]:
+    """The typed projects to print, newest-first order preserved, bullets capped.
+
+    Falls back to the legacy ``additional_sections`` shape so a draft written before the
+    typed field existed still renders properly instead of regressing to bullet soup.
+    """
+    raw = [p for p in (cv.get("projects") or []) if isinstance(p, dict)]
+    if not raw:
+        for sec in cv.get("additional_sections") or []:
+            if isinstance(sec, dict) and _norm_heading(sec.get("heading")) == "projects":
+                raw = _project_from_section(sec)
+                break
+
+    out: list[dict] = []
+    for project in raw:
+        name = _text(project.get("name"))
+        if not name:
+            continue
+        out.append({
+            "name": name,
+            "tech": _text(project.get("tech")),
+            "dates": _text(project.get("dates")),
+            "bullets": [_text(b) for b in (project.get("bullets") or []) if _text(b)][:MAX_BULLETS],
+        })
+    return out
+
+
+def _norm_heading(value) -> str:
+    return _text(value).lower().rstrip(":").strip()
+
+
 def _sections(cv: dict) -> dict:
     """Normalise the loop's output into exactly what gets printed."""
     contact = cv.get("contact") or {}
@@ -85,19 +164,34 @@ def _sections(cv: dict) -> dict:
         _text(e.get("text")) if isinstance(e, dict) else _text(e)
         for e in (cv.get("education") or [])
     ]
+    projects = _projects(cv)
     extra: list[dict] = []
     for sec in cv.get("additional_sections") or []:
         if not isinstance(sec, dict):
             continue
         heading = _text(sec.get("heading"))
+        # Projects now have their own typed section and their own place on the page. A
+        # legacy flat copy must not also print here, or the CV carries it twice.
+        if _norm_heading(heading) == "projects" and projects:
+            continue
         items = [_text(i) for i in (sec.get("items") or []) if _text(i)]
         if heading and items:
             extra.append({"heading": heading, "items": items})
+
+    experience: list[dict] = []
+    for role in cv.get("experience") or []:
+        if not isinstance(role, dict):
+            continue
+        capped = dict(role)
+        capped["bullets"] = _bullets(role)[:MAX_BULLETS]
+        experience.append(capped)
+
     return {
         "contact": contact,
         "summary": _text(cv.get("summary")),
         "skills": [_text(s) for s in (cv.get("skills") or []) if _text(s)],
-        "experience": [e for e in (cv.get("experience") or []) if isinstance(e, dict)],
+        "experience": experience,
+        "projects": projects,
         "education": [e for e in education if e],
         "certifications": [_text(c) for c in (cv.get("certifications") or []) if _text(c)],
         "additional_sections": extra,
@@ -162,7 +256,7 @@ def _split_trailing_dates(line: str) -> tuple[str, str]:
 _FLOWABLES: dict = {}
 
 
-def _flowables() -> dict:
+def _flowables(scale: float = 1.0) -> dict:
     """Build this module's two custom flowables, once.
 
     Every reportlab import in this module is function-local, so importing ``tailor`` costs
@@ -195,7 +289,7 @@ def _flowables() -> dict:
             self.left_font, self.right_font = left_font, right_font
             self.size, self.leading = size, leading
             self.left_colour, self.right_colour = left_colour, right_colour
-            self.spaceBefore = space_before
+            self.spaceBefore = space_before * scale
             self._stacked = False
 
         def wrap(self, availWidth, availHeight):
@@ -229,17 +323,21 @@ def _flowables() -> dict:
         def __init__(self, title: str, space_before: float = 9.0):
             Flowable.__init__(self)
             self.title = title.upper()
-            self.spaceBefore = space_before
-            self.spaceAfter = 3.0
+            # Whitespace shrinks with the type. Leaving the gaps fixed while the text
+            # shrank was why scaling bought so little: on a dense CV the inter-section
+            # spacing is a large share of the page, so a 20% type reduction reclaimed far
+            # less than 20% of the height.
+            self.spaceBefore = space_before * scale
+            self.spaceAfter = 3.0 * scale
 
         def wrap(self, availWidth, availHeight):
             self.width = availWidth
-            self.height = HEADING_SIZE + 4.5
+            self.height = (HEADING_SIZE + 4.5) * scale
             return self.width, self.height
 
         def draw(self):
             canvas = self.canv
-            canvas.setFont(FONT_BOLD, HEADING_SIZE)
+            canvas.setFont(FONT_BOLD, HEADING_SIZE * scale)
             canvas.setFillColor(INK)
             canvas.drawString(0, self.height - HEADING_SIZE, self.title)
             canvas.setStrokeColor(INK)
@@ -250,7 +348,36 @@ def _flowables() -> dict:
     return _FLOWABLES
 
 
-def render_pdf(cv: dict) -> bytes:
+#: Typographic scales tried, in order, to land the CV on one page. The first is the
+#: template's own scale, so a CV that already fits is rendered exactly as before and pays
+#: one pass. The floor is deliberate: below ~80% Times stops being comfortably readable at
+#: print size, and a CV that still overflows there has too much content to shrink its way
+#: out — two honest pages beat one unreadable one.
+_FIT_SCALES: tuple[float, ...] = (1.0, 0.96, 0.92, 0.88, 0.84, 0.80)
+
+
+def render_pdf(cv: dict, meta: dict | None = None) -> bytes:
+    """The CV as a PDF, shrunk to fit one page when it can be.
+
+    Rendered repeatedly at descending type scales until it fits, rather than by estimating
+    height up front: reportlab's own pagination is the only thing that actually knows where
+    the text lands once wrapping, widows and section rules are taken into account, so the
+    honest way to ask "does this fit?" is to lay it out and look at the page count.
+
+    Costs one render for a CV that already fits, and at most six for one that never does.
+    """
+    name = _text((cv.get("contact") or {}).get("name"))
+    rendered = b""
+    for scale in _FIT_SCALES:
+        rendered, pages = _render_pdf_at(cv, scale)
+        if pages <= 1:
+            return doc_meta.stamp_pdf(rendered, meta, name=name)
+    # Nothing fit: return the tightest attempt rather than an unshrunk overflow, and let
+    # it run to a second page rather than dropping any of the candidate's content.
+    return doc_meta.stamp_pdf(rendered, meta, name=name)
+
+
+def _render_pdf_at(cv: dict, scale: float) -> tuple[bytes, int]:
     from reportlab.lib.enums import TA_CENTER, TA_LEFT
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle
@@ -258,7 +385,7 @@ def render_pdf(cv: dict) -> bytes:
     from reportlab.pdfbase.pdfmetrics import stringWidth
     from reportlab.platypus import ListFlowable, ListItem, Paragraph, SimpleDocTemplate
 
-    built = _flowables()
+    built = _flowables(scale)
     TwoCol, SectionHeading = built["TwoCol"], built["SectionHeading"]
 
     def esc(value) -> str:
@@ -268,18 +395,21 @@ def render_pdf(cv: dict) -> bytes:
         return esc(value).replace('"', "&quot;")
 
     s = _sections(cv)
-    content_w = A4[0] - 2 * MARGIN_MM * mm
+    # Margins tighten with the type, but only half as fast: a CV whose text has shrunk
+    # 15% still needs breathing room at the edges or it reads as cramped rather than dense.
+    margin_mm = MARGIN_MM * (1.0 - (1.0 - scale) * 0.5)
+    content_w = A4[0] - 2 * margin_mm * mm
     name = _text(s["contact"].get("name"))
 
-    name_st = ParagraphStyle("name", fontName=FONT_BOLD, fontSize=NAME_SIZE,
-                             leading=NAME_SIZE + 3, alignment=TA_CENTER, spaceAfter=3)
-    contact_st = ParagraphStyle("contact", fontName=FONT, fontSize=CONTACT_SIZE,
-                                leading=CONTACT_SIZE + 2.5, alignment=TA_CENTER,
+    name_st = ParagraphStyle("name", fontName=FONT_BOLD, fontSize=NAME_SIZE * scale,
+                             leading=NAME_SIZE * scale + 3, alignment=TA_CENTER, spaceAfter=3 * scale)
+    contact_st = ParagraphStyle("contact", fontName=FONT, fontSize=CONTACT_SIZE * scale,
+                                leading=CONTACT_SIZE * scale + 2.5, alignment=TA_CENTER,
                                 textColor=MUTED)
-    body_st = ParagraphStyle("body", fontName=FONT, fontSize=BODY_SIZE,
-                             leading=BODY_SIZE + 2.6, alignment=TA_LEFT)
+    body_st = ParagraphStyle("body", fontName=FONT, fontSize=BODY_SIZE * scale,
+                             leading=BODY_SIZE * scale + 2.6, alignment=TA_LEFT)
     refs_st = ParagraphStyle("refs", fontName=FONT_ITALIC, fontSize=9, leading=12,
-                             textColor=MUTED, spaceBefore=9)
+                             textColor=MUTED, spaceBefore=9 * scale)
 
     story: list = [Paragraph(esc(name or "Curriculum Vitae"), name_st)]
     bits = _contact_bits(s["contact"])
@@ -294,11 +424,11 @@ def render_pdf(cv: dict) -> bytes:
 
     def bullet_list(items: list[str]) -> None:
         listing = ListFlowable(
-            [ListItem(Paragraph(esc(i), body_st), leftIndent=11) for i in items],
-            bulletType="bullet", start="•", leftIndent=13,
-            bulletFontName=FONT, bulletFontSize=BODY_SIZE,
+            [ListItem(Paragraph(esc(i), body_st), leftIndent=11 * scale) for i in items],
+            bulletType="bullet", start="•", leftIndent=13 * scale,
+            bulletFontName=FONT, bulletFontSize=BODY_SIZE * scale,
         )
-        listing.spaceBefore = 1.5
+        listing.spaceBefore = 1.5 * scale
         story.append(listing)
 
     if s["summary"]:
@@ -314,23 +444,39 @@ def render_pdf(cv: dict) -> bytes:
             company, location = _text(role.get("company")), _text(role.get("location"))
             if title or dates:
                 story.append(TwoCol(title, dates, left_font=FONT_BOLD, right_font=FONT_ITALIC,
-                                    size=ENTRY_SIZE, leading=ENTRY_SIZE + 3,
+                                    size=ENTRY_SIZE * scale, leading=ENTRY_SIZE * scale + 3,
                                     right_colour=MUTED, space_before=0 if i == 0 else 6))
             if company or location:
                 story.append(TwoCol(company, location, left_font=FONT_ITALIC,
-                                    right_font=FONT_ITALIC, size=BODY_SIZE,
-                                    leading=BODY_SIZE + 2.5, right_colour=MUTED))
+                                    right_font=FONT_ITALIC, size=BODY_SIZE * scale,
+                                    leading=BODY_SIZE * scale + 2.5, right_colour=MUTED))
             bullets = _bullets(role)
             if bullets:
                 bullet_list(bullets)
+    if s["projects"]:
+        # Between Experience and Education, matching where a candidate's own CV puts it:
+        # a project is work, and it belongs with the work rather than after the footnotes.
+        section(PROJECTS_HEADING)
+        for project in s["projects"]:
+            story.append(TwoCol(project["name"], project["dates"],
+                                left_font=FONT_BOLD, right_font=FONT_ITALIC,
+                                size=ENTRY_SIZE * scale, leading=ENTRY_SIZE * scale + 3,
+                                right_colour=MUTED, space_before=5))
+            if project["tech"]:
+                story.append(TwoCol(project["tech"], "", left_font=FONT_ITALIC,
+                                    right_font=FONT_ITALIC, size=BODY_SIZE * scale,
+                                    leading=BODY_SIZE * scale + 2.5, right_colour=MUTED))
+            if project["bullets"]:
+                bullet_list(project["bullets"])
+
     if s["education"]:
         section(EDUCATION_HEADING)
         for entry in s["education"]:
             left, right = _split_trailing_dates(entry)
-            right_w = stringWidth(right, FONT_ITALIC, BODY_SIZE) if right else 0
-            if stringWidth(left, FONT, BODY_SIZE) + right_w + 12 <= content_w:
+            right_w = stringWidth(right, FONT_ITALIC, BODY_SIZE * scale) if right else 0
+            if stringWidth(left, FONT, BODY_SIZE * scale) + right_w + 12 <= content_w:
                 story.append(TwoCol(left, right, left_font=FONT, right_font=FONT_ITALIC,
-                                    size=BODY_SIZE, leading=BODY_SIZE + 3,
+                                    size=BODY_SIZE * scale, leading=BODY_SIZE * scale + 3,
                                     right_colour=MUTED, space_before=2))
             else:
                 # Too long to sit on one line — wrap the whole entry rather than let the
@@ -346,12 +492,13 @@ def render_pdf(cv: dict) -> bytes:
     story.append(Paragraph(esc(REFERENCES_LINE), refs_st))
 
     buf = io.BytesIO()
-    SimpleDocTemplate(
-        buf, pagesize=A4, topMargin=MARGIN_MM * mm, bottomMargin=MARGIN_MM * mm,
-        leftMargin=MARGIN_MM * mm, rightMargin=MARGIN_MM * mm,
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4, topMargin=margin_mm * mm, bottomMargin=margin_mm * mm,
+        leftMargin=margin_mm * mm, rightMargin=margin_mm * mm,
         title=name or "CV", author=name or "",
-    ).build(story)
-    return buf.getvalue()
+    )
+    doc.build(story)
+    return buf.getvalue(), doc.page
 
 
 # --------------------------------------------------------------------------- #
@@ -373,7 +520,7 @@ def _rule_below(paragraph) -> None:
     paragraph._p.get_or_add_pPr().append(borders)
 
 
-def render_docx(cv: dict) -> bytes:
+def render_docx(cv: dict, meta: dict | None = None) -> bytes:
     import docx
     from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
     from docx.shared import Mm, Pt
@@ -455,6 +602,14 @@ def render_docx(cv: dict) -> bytes:
             if company or location:
                 row(company, location, italic_left=True)
             bullets(_bullets(role))
+    if s["projects"]:
+        heading(PROJECTS_HEADING)
+        for project in s["projects"]:
+            row(project["name"], project["dates"], bold_left=True, space_before=5)
+            if project["tech"]:
+                row(project["tech"], "", italic_left=True)
+            bullets(project["bullets"])
+
     if s["education"]:
         heading(EDUCATION_HEADING)
         for entry in s["education"]:
@@ -469,8 +624,7 @@ def render_docx(cv: dict) -> bytes:
 
     para(REFERENCES_LINE, size=9, italic=True, space_before=9)
 
-    document.core_properties.title = name
-    document.core_properties.author = name
+    doc_meta.stamp_docx(document, meta, name=name)
 
     buf = io.BytesIO()
     document.save(buf)
@@ -495,9 +649,12 @@ def docx_text(data: bytes) -> str:
     return "\n".join(p.text for p in document.paragraphs).strip()
 
 
-def render_both(cv: dict) -> dict:
-    """Render PDF + DOCX; return bytes + a machine-readability verdict for each."""
-    pdf, docx_bytes = render_pdf(cv), render_docx(cv)
+def render_both(cv: dict, meta: dict | None = None) -> dict:
+    """Render PDF + DOCX; return bytes + a machine-readability verdict for each.
+
+    ``meta`` is the uploaded CV's document properties (see ``doc_meta``); both files
+    carry them so a tailored export matches the original rather than the toolchain."""
+    pdf, docx_bytes = render_pdf(cv, meta), render_docx(cv, meta)
     ptext = pdf_text(pdf)
     return {
         "pdf": pdf,

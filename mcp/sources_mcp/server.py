@@ -136,8 +136,10 @@ async def run_crawl(
     max_pages: int | None = None,
 ) -> dict:
     """Polite single-board crawl (robots + rate limit): collect posting links from the
-    search pages, then open each posting to read its full description from schema.org
-    JSON-LD -> jobs in the common raw shape (crawl). Deterministic; usage is zero."""
+    search pages, then open each posting to read its full description from whatever the
+    board publishes (schema.org JSON-LD, else its markup) -> jobs in the common raw shape
+    (crawl). Deterministic; usage is zero. A board that refuses its search page raises
+    rather than returning an empty, successful-looking result."""
     require_user_id()
     jobs, usage = await crawl.run_crawl(
         settings, roles=roles, keywords=keywords, location=location, max_pages=max_pages

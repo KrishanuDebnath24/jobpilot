@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "name": "JobPilot Auto-apply",
+  "version": "0.1.0",
+  "description": "Fills a job application from your JobPilot profile and answer bank, in your own browser. It never presses Submit.",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": [
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "options_page": "options.html",
+  "action": {
+    "default_title": "JobPilot Auto-apply",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://localhost:3000/*", "http://127.0.0.1:3000/*"],
+      "js": ["content/dashboard.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "*://*.greenhouse.io/*",
+        "*://*.lever.co/*",
+        "*://*.myworkdayjobs.com/*",
+        "*://*.myworkdaysite.com/*",
+        "*://*.ashbyhq.com/*",
+        "*://*.smartrecruiters.com/*",
+        "*://*.workable.com/*",
+        "*://*.teamtailor.com/*",
+        "*://*.personio.de/*",
+        "*://*.personio.com/*",
+        "*://*.recruitee.com/*",
+        "*://*.bamboohr.com/*",
+        "*://*.bamboohr.co.uk/*",
+        "*://*.jobvite.com/*",
+        "*://*.breezy.hr/*",
+        "*://*.pinpointhq.com/*",
+        "*://*.icims.com/*",
+        "*://*.taleo.net/*",
+        "*://*.successfactors.com/*",
+        "*://*.successfactors.eu/*",
+        "*://*.oraclecloud.com/*",
+        "*://*.rezoomo.com/*",
+        "*://*.occupop.com/*"
+      ],
+      "js": ["content/autofill.js"],
+      "css": ["content/autofill.css"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}

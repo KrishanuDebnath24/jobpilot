@@ -205,19 +205,64 @@ _REFINE_SCHEMA = {
 
 
 def _resume_block(resume: dict) -> str:
+    """The résumé as the refine pass sees it — a digest, with its own tighter caps than
+    :func:`analyzer._resume_block` (a *different* function that happens to share this name).
+
+    It must cover the WHOLE document. Projects, certifications and the extra headed
+    sections were once omitted here, and because this pass gates the entire pipeline the
+    damage was invisible by construction: a job whose required skill was evidenced only by
+    a real project or a held credential was scored ``missing``, ``skills`` (the heaviest
+    dimension) fell, the weighted score dropped below threshold, and the job left the pool
+    before the Analyzer or any downstream agent ever saw it. Nothing surfaced — you cannot
+    notice jobs you were never shown — and the emitted reason ("resume does not show X")
+    read as a true finding about the candidate rather than as a rendering bug.
+
+    The extra text is affordable but NOT free: unlike the Analyzer, this path does not
+    prompt-cache. :func:`_refine_user_text` concatenates its stable and variable halves into
+    one string and :func:`refine_batch_params` passes ``cached_prefix=None``, so every job
+    pays for the whole résumé at full input price. That is a deliberate non-optimization,
+    not an oversight — the stable half is ~360 tokens, well under Anthropic's ~1024-token
+    minimum cacheable prefix, so a breakpoint here would buy nothing. What keeps the cost
+    small is the ratio: this block is a few hundred tokens against an untruncated job
+    description that dominates the prompt.
+    """
     lines = []
     if resume.get("skills"):
         lines.append("Skills: " + ", ".join(resume["skills"][:40]))
     if resume.get("summary"):
-        lines.append("Summary: " + resume["summary"][:600])
+        lines.append("Summary: " + str(resume["summary"])[:600])
     for exp in (resume.get("experience") or [])[:8]:
         head = " | ".join(x for x in (exp.get("title"), exp.get("company"), exp.get("dates")) if x)
         lines.append(f"- {head}")
-        for b in (exp.get("bullets") or [])[:4]:
-            lines.append(f"    • {b[:200]}")
+        for b in (exp.get("bullets") or [])[:6]:
+            lines.append(f"    • {str(b)[:200]}")
     for edu in (resume.get("education") or [])[:3]:
         if edu.get("text"):
-            lines.append("Education: " + edu["text"][:200])
+            lines.append("Education: " + str(edu["text"])[:200])
+    # A credential is rarely repeated in the skills list, so omitting these produced the
+    # cleanest false negative of all: a posting requiring a cert the candidate actually
+    # holds, scored as a miss.
+    if resume.get("certifications"):
+        lines.append("Certifications: " + ", ".join(
+            str(c)[:120] for c in resume["certifications"][:30]))
+    # A side project is frequently the only evidence a candidate has for a skill their day
+    # job never touched — exactly the skill a job asks for and this pass would call missing.
+    for project in (resume.get("projects") or [])[:6]:
+        if not isinstance(project, dict) or not project.get("name"):
+            continue
+        head = " | ".join(
+            str(x) for x in (project.get("name"), project.get("tech"), project.get("dates")) if x
+        )
+        lines.append(f"Project: {head}")
+        for bullet in (project.get("bullets") or [])[:6]:
+            lines.append(f"    • {str(bullet)[:200]}")
+    # Publications / Volunteering / anything else the CV headed itself.
+    for sec in (resume.get("additional_sections") or [])[:6]:
+        if not isinstance(sec, dict) or not sec.get("heading"):
+            continue
+        lines.append(f"{sec['heading']}:")
+        for item in (sec.get("items") or [])[:8]:
+            lines.append(f"    • {str(item)[:200]}")
     return "\n".join(lines) or "(no structured resume content)"
 
 

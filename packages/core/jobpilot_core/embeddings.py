@@ -122,25 +122,44 @@ class SentenceTransformerEmbedder:
 
 
 @lru_cache(maxsize=4)
-def _build_embedder(backend: str, model_name: str, dim: int, batch_size: int) -> Embedder:
+def _build_embedder(
+    backend: str, model_name: str, dim: int, batch_size: int, allow_fallback: bool
+) -> Embedder:
     if backend == "hashing":
         return HashingEmbedder(dim=dim)
     try:
         emb = SentenceTransformerEmbedder(model_name, batch_size=batch_size)
         emb._load()  # surface an import/download failure now, not mid-run
         return emb
-    except Exception as exc:  # noqa: BLE001 - degrade to hashing rather than crash the worker
+    except Exception as exc:  # noqa: BLE001 - re-raised below unless fallback is allowed
+        if not allow_fallback:
+            # Degrading here would be WORSE than failing: the two embedders produce
+            # vectors of the same length in different spaces, so rows indexed by one and
+            # searched by the other match at random. The query succeeds, the answer is
+            # noise, and a log line is the only clue. Fail where it is visible instead.
+            raise RuntimeError(
+                f"embeddings: backend '{backend}' requested but sentence-transformers could "
+                f"not be loaded ({exc}). Falling back to hashing would silently split the "
+                f"vector space against rows already embedded with the model. Install it, or "
+                f"set EMBEDDING_BACKEND=hashing (and re-embed), or EMBEDDING_ALLOW_FALLBACK=true "
+                f"if hashing vectors are genuinely acceptable here."
+            ) from exc
         logger.warning(
-            "embeddings: sentence-transformers unavailable (%s); falling back to hashing", exc)
+            "embeddings: sentence-transformers unavailable (%s); falling back to hashing. "
+            "Vectors written now are NOT comparable to model-embedded rows.", exc)
         return HashingEmbedder(dim=dim)
 
 
 def get_embedder(settings: Settings) -> Embedder:
-    """The configured embedder (cached). Falls back to the hashing backend if the
-    sentence-transformers model can't be loaded."""
+    """The configured embedder (cached).
+
+    Raises if the configured backend cannot be loaded, unless
+    ``embedding_allow_fallback`` is on — see :func:`_build_embedder` for why silence is
+    the more dangerous option."""
     return _build_embedder(
         settings.embedding_backend, settings.embedding_model,
         settings.embedding_dim, settings.embedding_batch_size,
+        settings.embedding_allow_fallback,
     )
 
 

@@ -13,6 +13,8 @@ import asyncio
 import json
 import uuid
 
+import pytest
+
 from jobpilot_core import repositories
 from jobpilot_core.db import session_scope
 from jobpilot_core.scout import (
@@ -116,6 +118,21 @@ def test_hydration_company_legal_suffix_collapses():
     assert h("Medical Supply Co Ltd (MSC)") == h("Medical Supply Company")  # live-data shape
     assert h("The Hershey Company") == h("Hershey")  # leading "The" + suffix
     assert h("Ben & Jerry's") == h("Ben and Jerry's")  # &/and
+
+
+def test_canon_company_is_public_and_returns_a_usable_needle():
+    """``canon_company`` is no longer dedupe-only — the ``company`` search filter reduces
+    the user's phrasing with it before the ILIKE, so the exact string matters, not just
+    that two inputs agree. A search for 'Stripe, Inc.' must produce a needle that a row
+    stored as plain 'Stripe' contains."""
+    from jobpilot_core.scout import canon_company
+
+    assert canon_company("Stripe, Inc.") == "stripe"
+    assert canon_company("Stripe") == "stripe"
+    assert canon_company("The Hershey Company") == "hershey"
+    # Never empty for non-empty input: the filter falls back to it rather than dropping.
+    assert canon_company("Ltd") == "ltd"  # a lone suffix is the name, not a suffix
+    assert canon_company("") == "" and canon_company(None) == ""
 
 
 def test_hydration_title_decorations_collapse():
@@ -439,8 +456,11 @@ async def test_crawler_honors_robots_disallow():
 def test_crawler_extracts_posting_links():
     """Posting URLs are pulled straight from /job/ links, absolutized, de-duped, and
     apply/similar sub-paths are excluded."""
+    import re as _re
+
     from sources_mcp.connectors.crawl import _extract_posting_links
 
+    pattern = _re.compile(r"^/job/[^/]+/[^/]+")
     base = "https://www.irishjobs.ie/jobs/software-developer/in-dublin"
     page = """
       <a href="/job/software-engineer/acme-job101">A</a>
@@ -450,11 +470,141 @@ def test_crawler_extracts_posting_links():
       <a href="/jobs/software-developer/in-cork">search (excluded)</a>
       <a href="/careeradvice/cv-tips">advice (excluded)</a>
     """
-    links = _extract_posting_links(page, base)
+    links = _extract_posting_links(page, base, pattern)
     assert links == [
         "https://www.irishjobs.ie/job/software-engineer/acme-job101",
         "https://www.irishjobs.ie/job/data-eng/globex-job202",
     ]
+
+
+def test_crawler_collects_jobsireland_rows():
+    """Rows come back with their title attached, and the ?id= query must survive — the
+    generic link extractor strips queries, which would collapse every row onto one URL."""
+    from sources_mcp.connectors.crawl import _collect_jobsireland_rows
+
+    base = "https://jobsireland.ie/Jobsireland.API/JobsIreland/BrowseJobs?Keyword=analyst"
+    page = """
+      <li><h3 class="title-box">Financial Analyst</h3>
+        <a aria-label="View details of Financial Analyst" href="/en-US/job-Details?id=2470933">go</a></li>
+      <li><h3 class="title-box">Supply Chain Analyst</h3>
+        <a aria-label="View details of Supply Chain Analyst" href="/en-US/job-Details?id=2470199">go</a></li>
+      <li><a href="/en-US/job-Details?id=2470933">duplicate row link</a></li>
+      <li><a href="/en-US/browse-jobs">search (excluded)</a></li>
+    """
+    rows = _collect_jobsireland_rows(page, base)
+    assert [r["url"] for r in rows] == [
+        "https://jobsireland.ie/en-US/job-Details?id=2470933",
+        "https://jobsireland.ie/en-US/job-Details?id=2470199",
+    ]
+    assert rows[0]["title"] == "Financial Analyst"
+
+
+def test_crawler_parses_jobsireland_markup():
+    """No JSON-LD on this board: the employer is what sits between the title and the
+    reference, the address is what sits between the reference and the position count, and
+    the body is span.margin-reset plus the structured requirements block."""
+    from sources_mcp.connectors.crawl import _parse_jobsireland
+
+    page = """
+    <html><body>
+      <h2>Job Details</h2>
+      <h3>Business Analyst</h3>
+      <span>ACME COMMERCIAL LIMITED</span>
+      <span>Ref: #JOB-2461055</span>
+      <span>Castlebar Rtl Pk, Castlebar, Co. Mayo, F23 N996</span>
+      <span>No of positions: 6</span>
+      <h3>Job Description</h3>
+      <span class="margin-reset">Reporting to the Operations Manager, you will own KPI reporting.</span>
+      <div class="experiences">Career Level Experienced Minimum Experience Required (Years): 3</div>
+      <script>var t = 1;</script>
+    </body></html>
+    """
+    data = _parse_jobsireland(page)
+    assert data["title"] == "Business Analyst"
+    assert data["company"] == "ACME COMMERCIAL LIMITED"
+    assert data["location"] == "Castlebar Rtl Pk, Castlebar, Co. Mayo, F23 N996"
+    assert data["reference"] == "2461055"
+    assert "KPI reporting" in data["description"]
+    assert "Minimum Experience Required" in data["description"]  # requirements appended
+    assert "var t" not in data["description"]  # script stripped, not read as text
+
+
+def test_crawler_parses_jobsireland_withheld_employer():
+    """"Company Details Confidential" is the site's label for a withheld employer, not a
+    company called "Company Details"."""
+    from sources_mcp.connectors.crawl import _parse_jobsireland
+
+    page = """
+      <h3>Systems Support Analyst</h3> Company Details Confidential
+      <span>Ref: #JOB-2463136</span> Athlone, Co. Westmeath <span>No of positions: 1</span>
+      <span class="margin-reset">Support the systems team.</span>
+    """
+    assert _parse_jobsireland(page)["company"] == "Confidential"
+
+
+def test_crawler_searches_the_whole_role_then_its_words():
+    """jobsireland matches the keyword as an ordered phrase inside the title, so the whole
+    role is asked first (it is exactly right when the role is a real title, and survives the
+    page cap that a broad single word can hit), then its words, longest first."""
+    from sources_mcp.connectors.crawl import _search_terms
+
+    assert _search_terms(["Finance Data Analyst"], []) == [
+        "Finance Data Analyst", "finance", "analyst", "data",
+    ]
+    # A role whose only real word is the noun is not worth asking for as a phrase: the
+    # grade word can only narrow it, and "Junior Analyst" measured 0 against "analyst"'s 25.
+    assert _search_terms(["Junior Analyst"], []) == ["analyst"]
+    # A single-word role is already its own phrase; don't ask for it twice.
+    assert _search_terms([], ["Python"]) == ["python"]
+    # At most four requests per run.
+    assert len(_search_terms(["Senior Data Platform Reliability Engineer"], [])) == 4
+
+
+def test_crawler_slug_text_reads_a_title_from_the_url():
+    """The pre-filter matches on the posting slug, so ids and separators must fall away."""
+    from sources_mcp.connectors.crawl import _slug_text
+
+    assert _slug_text("https://x.ie/company/cpl/job/learner-coordinator-33390") == (
+        "company cpl job learner coordinator"
+    )
+
+
+async def test_crawler_reports_a_refused_board_as_an_error(monkeypatch):
+    """A board that 403s its search page must raise, not return an empty success.
+
+    This is the irishjobs.ie failure exactly: returning [] made a dead source look like a
+    quiet one, and the block went unnoticed while scout reported '0 jobs, no errors'.
+    """
+    from jobpilot_core.settings import get_settings
+    from sources_mcp.connectors import crawl as crawl_mod
+
+    class _Refused:
+        status_code = 403
+
+    async def _ok_robots(*args, **kwargs):
+        return True
+
+    async def _refuse(*args, **kwargs):
+        return _Refused()
+
+    monkeypatch.setattr(crawl_mod, "_robots_ok", _ok_robots)
+    monkeypatch.setattr(crawl_mod, "_get_with_retry", _refuse)
+    async def _no_wait(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(crawl_mod, "_rate_limit", _no_wait)
+
+    with pytest.raises(crawl_mod.CrawlUnavailable) as exc:
+        await crawl_mod.run_crawl(get_settings(), board="irishjobs", roles=["data analyst"])
+    assert "403" in str(exc.value)
+
+
+async def test_crawler_rejects_an_unknown_board():
+    from jobpilot_core.settings import get_settings
+    from sources_mcp.connectors import crawl as crawl_mod
+
+    with pytest.raises(crawl_mod.CrawlUnavailable):
+        await crawl_mod.run_crawl(get_settings(), board="not-a-board")
 
 
 def test_crawler_parses_jobposting_jsonld():

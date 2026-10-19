@@ -378,12 +378,65 @@ class AnswerBankEntry(Base):
     created_at: Mapped[datetime] = _created()
 
 
+class Application(Base):
+    """One application the user actually sent, and the CV that went with it.
+
+    Everything else in the schema records what JobPilot *proposed*; this records what the
+    user *did*. It is written when the extension sees a real submit on a form it filled,
+    which is the only moment both facts are known at once — that a form was sent, and
+    which file was on it.
+
+    Two columns are deliberately denormalised. ``company`` and ``job_title`` are snapshots
+    because ``job_id`` is ``ON DELETE SET NULL``: deleting a job (the Concierge can delete
+    every disqualified one in a batch) must not erase the fact that you applied to it.
+    ``cv_label`` does the same job for ``cv_draft_id`` — a deleted draft leaves "Tailored
+    CV" behind rather than an unanswerable NULL.
+
+    Unique on ``(user_id, job_id)`` because a multi-step form records once per step: the
+    second step updates the row rather than claiming a second application. Rows are only
+    ever written with a known ``job_id`` — a form the user navigated to alone has no
+    employer to attribute it to, and a log of anonymous applications is worse than none.
+    """
+
+    __tablename__ = "applications"
+
+    id: Mapped[uuid.UUID] = _pk()
+    user_id: Mapped[uuid.UUID] = _user_fk()
+    # SET NULL, not CASCADE: see the docstring - the application outlives the job row.
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    #: When the first submit was seen. Distinct from ``created_at`` so a manually logged
+    #: application can be backdated to when it was really sent.
+    applied_at: Mapped[datetime] = _created()
+    #: Bumped by each later step of the same form, so a stalled multi-step application is
+    #: distinguishable from one that went through in a single shot.
+    last_recorded_at: Mapped[datetime] = _created()
+    company: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
+    job_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    employer_slug: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: tailored | original | none - which CV was on the form. ``none`` means the form had
+    #: no CV field, or the user had already attached their own file before we got there.
+    cv_source: Mapped[str] = mapped_column(String(16), nullable=False, default="none")
+    cv_draft_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("cv_drafts.id", ondelete="SET NULL"), nullable=True
+    )
+    cv_label: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: How many answers were read back off the form. A high count is evidence the form was
+    #: really filled, which is what separates a submit from a stray "Apply" click.
+    answers_recorded: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: extension | manual - where the record came from. Only the extension writes today.
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="extension")
+    created_at: Mapped[datetime] = _created()
+
+
 # Ordered child->parent for reference; erasure relies on ON DELETE CASCADE from users.
 USER_OWNED_TABLES = [
     "messages",
     "chat_sessions",
     "agent_events",
     "pipeline_runs",
+    "applications",
     "answer_bank",
     "application_profiles",
     "cv_drafts",

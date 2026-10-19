@@ -25,9 +25,9 @@ Prompt shape is ``[stable: resume + rules + locked snapshot][variable: job + fee
 
 from __future__ import annotations
 
-from .analyzer import _resume_block
 from .llm import LLMResult, extract_json
 from .settings import Settings
+from .writing import BULLET_STANDARD
 
 REWRITER_TOOL = "record_rewritten_cv"
 
@@ -70,7 +70,10 @@ CV_SCHEMA = {
                         "type": "array", "items": {"type": "string"},
                         "description": "re-worded to surface the real work this job cares "
                                        "about, in the job's language. Facts, scope, scale, "
-                                       "seniority and dates unchanged.",
+                                       "seniority and dates unchanged. AT MOST 5 bullets, "
+                                       "ordered most-relevant-first: the renderer keeps the "
+                                       "first 5, so anything beyond that is discarded, not "
+                                       "shrunk.",
                     },
                 },
                 "additionalProperties": False,
@@ -88,6 +91,31 @@ CV_SCHEMA = {
             "description": "the candidate's real certifications, carried through (reorder "
                            "for relevance; never invent one)",
         },
+        "projects": {
+            "type": "array",
+            "description": "the candidate's real projects, SAME projects, same order, same "
+                           "count. Name, tech and dates are LOCKED — copy verbatim. Only "
+                           "the bullets are yours to reword, and you should: a project is "
+                           "often the strongest evidence on the page for a skill the day "
+                           "job never used, so surface what THIS job cares about in its "
+                           "language. Facts, scope and scale unchanged. Never invent a "
+                           "project and never drop one. At most 5 bullets each, ordered "
+                           "most-relevant-first for this job.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "LOCKED — copy verbatim"},
+                    "tech": {"type": ["string", "null"], "description": "LOCKED — copy verbatim"},
+                    "dates": {"type": ["string", "null"], "description": "LOCKED — copy verbatim"},
+                    "bullets": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "reworded for this job, max 5, most relevant first",
+                    },
+                },
+                "required": ["name", "tech", "dates", "bullets"],
+                "additionalProperties": False,
+            },
+        },
         "additional_sections": {
             "type": "array",
             "items": {
@@ -100,8 +128,11 @@ CV_SCHEMA = {
                 "additionalProperties": False,
             },
             "description": "every OTHER header the real CV has (Projects, Languages, "
-                           "Publications, Volunteering...). Keep them all — re-word for "
-                           "relevance, never drop a section.",
+                           "Publications, Volunteering...). Return ALL of them, same "
+                           "headings, same item count — re-word each item to surface what "
+                           "THIS job cares about, exactly as you do for experience bullets. "
+                           "Facts unchanged. Never drop a section or an item. Emit [] only "
+                           "if the real CV genuinely has no such section.",
         },
         "skill_evidence": {
             "type": "array",
@@ -141,8 +172,12 @@ CV_SCHEMA = {
             },
         },
     },
+    # ``additional_sections`` is required so the rewriter has to *address* Projects and
+    # friends rather than omit the key. While it was optional the model routinely left it
+    # out, ``carry_passthrough_sections`` restored the base copy verbatim, and the section
+    # arrived on the exported CV looking untouched — which it was.
     "required": ["contact", "summary", "skills", "experience", "education",
-                 "skill_evidence", "change_notes"],
+                 "projects", "additional_sections", "skill_evidence", "change_notes"],
     "additionalProperties": False,
 }
 
@@ -168,8 +203,13 @@ INTEGRITY = (
     "an unsupported claim only costs you the skill.\n"
     "• Never invent or inflate an employer, title, date, degree, certification, metric, team "
     "size, or accomplishment. Do not promote the candidate's seniority.\n"
-    "• Keep EVERY header the real CV has. Re-word sections; never drop one.\n"
-    "• Use British/Irish spelling and plain, concrete language."
+    "• Keep EVERY header the real CV has, with the same number of items under each. "
+    "Re-word those items for this job exactly as you re-word experience bullets — a "
+    "Projects entry is evidence of real work, not decoration, and it is often the "
+    "strongest thing on the page for a skill the day job never used. Never drop a "
+    "section or an item.\n"
+    "• Use British/Irish spelling and plain, concrete language.\n\n"
+    + BULLET_STANDARD
 )
 
 _SYSTEM = (
@@ -196,6 +236,73 @@ def _locked_block(snapshot: dict) -> str:
     return "\n".join(lines)
 
 
+def _full_resume_block(base_resume: dict) -> str:
+    """The WHOLE base CV, uncapped — what the rewriter and the critic reason over.
+
+    Deliberately not :func:`analyzer._resume_block`, which is a *digest*: it caps at ten
+    roles and four bullets each and omits the extra headed sections entirely. That is the
+    right shape for the Analyzer, which only needs the gist of a candidate to extract a
+    job's requirements — and exactly the wrong shape here, because an agent asked to
+    reword a CV can only reword the parts it was shown. With the digest, a role's fifth
+    bullet and the entire Projects section were invisible, so the rewriter dropped the one
+    and left the other untouched, and no validation noticed because the passthrough
+    restored the missing section verbatim.
+
+    Uncapped is affordable precisely here: this block is the cached prefix, identical
+    across every round and every job in a selection, and shared byte-for-byte with the
+    Critic. It is paid for once.
+    """
+    lines: list[str] = []
+    if base_resume.get("contact"):
+        contact = base_resume["contact"]
+        named = ", ".join(
+            f"{k}={v}" for k, v in contact.items() if v and k != "links"
+        )
+        if named:
+            lines.append(f"Contact: {named}")
+    if base_resume.get("summary"):
+        lines.append(f"Summary: {base_resume['summary']}")
+    if base_resume.get("skills"):
+        lines.append("Skills: " + ", ".join(str(s) for s in base_resume["skills"]))
+
+    for i, exp in enumerate(base_resume.get("experience") or []):
+        head = " | ".join(
+            str(x) for x in (exp.get("title"), exp.get("company"), exp.get("location"),
+                             exp.get("dates")) if x
+        )
+        lines.append(f"experience[{i}]: {head}")
+        for b in exp.get("bullets") or []:
+            lines.append(f"    • {b}")
+
+    for edu in base_resume.get("education") or []:
+        if isinstance(edu, dict) and edu.get("text"):
+            lines.append(f"Education: {edu['text']}")
+
+    if base_resume.get("certifications"):
+        lines.append("Certifications:")
+        for c in base_resume["certifications"]:
+            lines.append(f"    • {c}")
+
+    for i, project in enumerate(base_resume.get("projects") or []):
+        if not isinstance(project, dict):
+            continue
+        head = " | ".join(
+            str(x) for x in (project.get("name"), project.get("tech"), project.get("dates")) if x
+        )
+        lines.append(f"projects[{i}]: {head}")
+        for bullet in project.get("bullets") or []:
+            lines.append(f"    • {bullet}")
+
+    for sec in base_resume.get("additional_sections") or []:
+        if not isinstance(sec, dict) or not sec.get("heading"):
+            continue
+        lines.append(f"{sec['heading']}:")
+        for item in sec.get("items") or []:
+            lines.append(f"    • {item}")
+
+    return "\n".join(lines) or "(no structured resume content)"
+
+
 def _headers_block(base_resume: dict) -> str:
     """Name every section the real CV carries, so none is dropped in a rewrite."""
     present = ["contact", "summary", "skills", "experience", "education"]
@@ -211,7 +318,7 @@ def stable_prefix(base_resume: dict, snapshot: dict) -> str:
     """The cached half of the prompt — identical across every round and every job in a
     selection. Shared verbatim with the Critic so both agents hit the same cache entry."""
     return (
-        f"BASE RESUME (trusted, the source of truth):\n{_resume_block(base_resume)}\n\n"
+        f"BASE RESUME (trusted, the source of truth):\n{_full_resume_block(base_resume)}\n\n"
         f"{_headers_block(base_resume)}\n\n"
         f"{_locked_block(snapshot)}\n\n"
         f"{INTEGRITY}\n\n"
@@ -252,7 +359,8 @@ def attested_block(attested: dict | None) -> str:
     skills = [it for it in (att.get("claimed_skills") or []) if isinstance(it, dict)]
     rewrites = [it for it in (att.get("bullet_rewrites") or []) if isinstance(it, dict)]
     new_bullets = [it for it in (att.get("new_bullets") or []) if isinstance(it, dict)]
-    if not (skills or rewrites or new_bullets):
+    project_rewrites = [it for it in (att.get("project_rewrites") or []) if isinstance(it, dict)]
+    if not (skills or rewrites or new_bullets or project_rewrites):
         return ""
 
     lines = [
@@ -277,6 +385,11 @@ def attested_block(attested: dict | None) -> str:
         lines.append("New bullets the candidate confirms — add each under the named employer:")
         for it in new_bullets:
             lines.append(f"  • [{it.get('role_ref')}] {it.get('text')!r}")
+    if project_rewrites:
+        lines.append("Project bullet rewrites the candidate approved — use this wording under "
+                     "the named project:")
+        for it in project_rewrites:
+            lines.append(f"  • [{it.get('project_ref')}] {it.get('after')!r}")
     lines.append(
         "Everything NOT listed above still follows the ordinary rules: reframe only real "
         "experience, and cite the résumé for any other skill you add."

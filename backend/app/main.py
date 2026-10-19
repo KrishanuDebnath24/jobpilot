@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 
 from anthropic import APIError, APIStatusError, AuthenticationError, RateLimitError
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
@@ -234,6 +235,76 @@ class ResolveApplyRequest(BaseModel):
 
     limit: int = 200
     force: bool = False
+
+
+class FormField(BaseModel):
+    """One field scraped off a live application form by the browser extension.
+
+    ``ref`` is the extension's own handle for the element and is echoed back untouched —
+    the server never sees a selector and has no way to address the page, which keeps the
+    autofill strictly a request the page makes rather than something done to it.
+    """
+
+    ref: str
+    label: str | None = None
+    aria_label: str | None = None
+    placeholder: str | None = None
+    name: str | None = None
+    type: str = "text"
+    autocomplete: str | None = None
+    required: bool = False
+    options: list[dict] | None = None
+
+
+class ApplyPlanRequest(BaseModel):
+    """Ask for the answers that belong on this form.
+
+    ``job_id`` is optional: the extension can autofill a form the user navigated to on
+    their own, and without a job the plan simply has no employer scope and no CV to
+    attach. Everything else works the same.
+    """
+
+    fields: list[FormField]
+    job_id: str | None = None
+    url: str | None = None
+
+
+class SubmittedAnswer(BaseModel):
+    """One field as it stood when the user pressed the form's own Submit button.
+
+    ``edited`` is the whole point of the shape: a value that arrived from the bank and
+    went in unchanged is a reuse, while one the user retyped is a correction that should
+    overwrite what was stored.
+    """
+
+    question: str
+    value: str | None = None
+    kind: str = "text"
+    tier: str | None = None
+    source_id: str | None = None
+    edited: bool = False
+
+
+class SubmittedCv(BaseModel):
+    """Which CV the extension actually put on the form.
+
+    Reported by the content script rather than re-derived server-side because only the
+    frame that did it knows whether the file landed: the input may already have carried
+    the user's own upload, the form may have had no CV field at all, or the fetch may
+    have failed. ``attached=False`` is a real answer, not a missing one.
+    """
+
+    attached: bool = False
+    source: str | None = None      # tailored | original
+    draft_id: str | None = None    # set when source == tailored
+
+
+class ApplyRecordRequest(BaseModel):
+    """What was submitted — for the bank to learn from, and for the application log."""
+
+    answers: list[SubmittedAnswer]
+    job_id: str | None = None
+    cv: SubmittedCv | None = None
 
 
 class DeriveConfigRequest(BaseModel):
@@ -624,6 +695,186 @@ async def resolve_apply_targets(
     return {"queued": True, "task_id": task.id, "limit": body.limit, "force": body.force}
 
 
+async def _apply_context(user_id, job_id: str | None) -> dict:
+    """Employer identity and the CV to attach, for one job.
+
+    Split out because both autofill routes need the same employer scope, and they must
+    agree on it: a plan resolved against ``employer:stripe`` whose answers were banked
+    against ``employer:stripe-payments`` would learn nothing reusable.
+
+    A job that cannot be read (deleted, or another user's) degrades to no scope rather
+    than erroring — the extension can still fill a form from the global bank, which is
+    strictly better than refusing to work.
+    """
+    if not job_id:
+        return {"job": None, "employer_slug": None, "company": None, "cv": None}
+    try:
+        job = (await mcp_client.db_mcp(user_id, "get_job", {"job_id": job_id})).get("job")
+    except Exception:  # noqa: BLE001 - see docstring: no job is a degraded mode, not a failure
+        job = None
+    if not job:
+        return {"job": None, "employer_slug": None, "company": None, "cv": None}
+
+    # The tailored CV for this job when one has been exported, else the uploaded original.
+    # Only an exported draft counts: an un-exported draft has no rendered file behind it.
+    cv = {"path": "/resumes/me/file", "tailored": False, "draft_id": None}
+    try:
+        drafts = (await mcp_client.db_mcp(user_id, "get_cv_drafts", {})).get("drafts") or []
+        match = next(
+            (d for d in drafts if d.get("job_id") == job_id and d.get("pdf_ref")), None
+        )
+        if match:
+            # ``draft_id`` rides along so /apply/record can say WHICH tailored CV was sent
+            # without re-resolving. There is at most one draft per job
+            # (uq_cv_draft_per_user_job), so this is the only candidate the job ever has.
+            cv = {
+                "path": f"/cv/drafts/{match['id']}/download/pdf",
+                "tailored": True,
+                "draft_id": match["id"],
+            }
+    except Exception:  # noqa: BLE001 - a missing tailored CV falls back to the base one
+        pass
+
+    return {
+        "job": job,
+        "employer_slug": job.get("apply_board_slug"),
+        "company": job.get("company"),
+        "cv": cv,
+    }
+
+
+@app.post("/apply/plan", tags=["apply"])
+async def plan_application(
+    body: ApplyPlanRequest, current_user=Depends(get_current_user)
+) -> dict:
+    """Answer a scraped application form from the profile and the answer bank.
+
+    Read-only, and idempotent by construction: it resolves fields and returns values with
+    their provenance. Nothing is filled by this call and nothing is submitted anywhere —
+    the extension does the typing, in the user's own browser, with the form on screen.
+    """
+    ctx = await _apply_context(current_user.id, body.job_id)
+    plan = await mcp_client.config_mcp(
+        current_user.id,
+        "plan_application",
+        {
+            "fields": [f.model_dump() for f in body.fields],
+            "employer_slug": ctx["employer_slug"],
+            "company": ctx["company"],
+        },
+    )
+    if ctx["cv"] and plan.get("summary", {}).get("attachments"):
+        name = (plan.get("applicant_name") or "").strip()
+        stem = re.sub(r"[^\w-]+", "-", name).strip("-") or "CV"
+        plan["cv"] = {**ctx["cv"], "filename": f"{stem}-CV.pdf" if name else "CV.pdf"}
+    plan["job"] = (
+        {
+            "id": ctx["job"]["id"],
+            "title": ctx["job"].get("title"),
+            "company": ctx["job"].get("company"),
+            "apply_ats": ctx["job"].get("apply_ats"),
+        }
+        if ctx["job"]
+        else None
+    )
+    return plan
+
+
+def _recorded_cv(ctx: dict, reported: SubmittedCv | None) -> dict:
+    """Which CV to log against this application.
+
+    The extension's report is authoritative on *whether* a file was attached — it is the
+    only party that watched it happen. The draft id is then reconciled against the job,
+    which is unambiguous because a job has at most one draft
+    (``uq_cv_draft_per_user_job``): if the job still has one, that is necessarily the one
+    that was sent. A draft deleted between filling and submitting leaves ``cv_source``
+    honest at ``tailored`` with a null id, rather than silently demoting the record to
+    "original" and misreporting what the employer received.
+    """
+    if reported is None or not reported.attached:
+        return {"cv_source": "none", "cv_draft_id": None, "cv_label": None}
+    if reported.source == "tailored":
+        draft_id = (ctx.get("cv") or {}).get("draft_id")
+        return {
+            "cv_source": "tailored",
+            "cv_draft_id": draft_id,
+            "cv_label": "Tailored CV" if draft_id else "Tailored CV (draft since deleted)",
+        }
+    return {"cv_source": "original", "cv_draft_id": None, "cv_label": "Original resume"}
+
+
+@app.post("/apply/record", tags=["apply"])
+async def record_application(
+    body: ApplyRecordRequest, current_user=Depends(get_current_user)
+) -> dict:
+    """Learn from a form the user just submitted, and log that they submitted it.
+
+    Every answer stored here was on screen, in a form the user chose to submit — which is
+    the standard the never-infer rule asks for. Values that came from the profile or the
+    bank unchanged are counted as reuse instead of rewritten, so the bank records what was
+    actually re-authored.
+
+    The application log holds itself to the same standard. A row is written only when the
+    extension harvested real answers off a form it had filled *and* the form belongs to a
+    known job — the click heuristic that catches JS-driven submits also fires on the
+    "Apply" button of a listing page, and a log that records applications you did not make
+    is worse than no log at all. The write is idempotent per job, so the four steps of a
+    Workday form produce one application rather than four.
+    """
+    ctx = await _apply_context(current_user.id, body.job_id)
+    banked = await mcp_client.config_mcp(
+        current_user.id,
+        "record_application_answers",
+        {
+            "answers": [a.model_dump() for a in body.answers],
+            "employer_slug": ctx["employer_slug"],
+            "company": ctx["company"],
+        },
+    )
+
+    application = None
+    if ctx["job"] and body.answers:
+        try:
+            res = await mcp_client.db_mcp(
+                current_user.id,
+                "record_application",
+                {
+                    "job_id": str(ctx["job"]["id"]),
+                    "company": ctx["company"],
+                    "job_title": ctx["job"].get("title"),
+                    "employer_slug": ctx["employer_slug"],
+                    "answers_recorded": len(body.answers),
+                    "source": "extension",
+                    **_recorded_cv(ctx, body.cv),
+                },
+            )
+            application = res.get("application")
+        except Exception:  # noqa: BLE001 - the bank already succeeded; a lost log entry
+            # must not turn a submitted application into an error the user sees.
+            logger.exception("failed to log application for job %s", body.job_id)
+
+    return {**banked, "application": application}
+
+
+@app.get("/applications", tags=["apply"])
+async def list_applications(
+    limit: int = 500, current_user=Depends(get_current_user)
+) -> dict:
+    """Every application logged for the caller, most recent first."""
+    return await mcp_client.db_mcp(current_user.id, "get_applications", {"limit": limit})
+
+
+@app.get("/applications/by-company", tags=["apply"])
+async def applications_by_company(current_user=Depends(get_current_user)) -> dict:
+    """Applications grouped by employer, with the count of distinct CVs sent to each.
+
+    ``repeats`` is the answer to "am I applying to one company several times, with
+    different tailored CVs?" — employers grouped by ATS board slug where available, so
+    "Stripe" and "Stripe, Inc." do not read as two companies.
+    """
+    return await mcp_client.db_mcp(current_user.id, "application_company_summary", {})
+
+
 @app.get("/answer-bank", tags=["apply"])
 async def get_answer_bank(current_user=Depends(get_current_user)) -> dict:
     return await mcp_client.config_mcp(current_user.id, "get_answer_bank", {})
@@ -910,7 +1161,7 @@ async def download_resume_version_file(
     the latest *uploaded* file. To have it scored/tailored, download it and upload it back.
     """
     from fastapi.responses import Response
-    from jobpilot_core import tailor
+    from jobpilot_core import doc_meta, tailor
 
     if fmt not in ("pdf", "docx"):
         raise HTTPException(status_code=400, detail="fmt must be pdf|docx")
@@ -923,11 +1174,17 @@ async def download_resume_version_file(
     if not structured:
         raise HTTPException(status_code=422, detail="version has no structured content to render")
 
+    # Carry the uploaded CV's document properties, exactly as the tailored exports do, so
+    # a downloaded version does not stand out from them in a properties dialog.
+    meta = doc_meta.from_jsonable(
+        (await mcp_client.resume_mcp(
+            current_user.id, "get_resume_doc_metadata", {})).get("metadata"))
+
     if fmt == "pdf":
-        data = tailor.render_pdf(structured)
+        data = tailor.render_pdf(structured, meta)
         media = "application/pdf"
     else:
-        data = tailor.render_docx(structured)
+        data = tailor.render_docx(structured, meta)
         media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     return Response(
         content=data, media_type=media,
@@ -976,8 +1233,27 @@ async def cv_gap_close(body: CvTailorRequest, current_user=Depends(get_current_u
     item is recorded as the candidate's own assertion (``user_confirmed``)."""
     from .tasks import cv_gap_close as task
 
-    t = task.delay(str(current_user.id), body.job_ids)
+    t = task.delay(str(current_user.id), body.job_ids, False)
     return {"task_id": t.id, "status": "queued", "job_count": len(body.job_ids)}
+
+
+@app.post("/cv/gap-close/refine", tags=["cv"], status_code=status.HTTP_202_ACCEPTED,
+          dependencies=[_rl_trigger])
+async def cv_gap_close_refine(
+    body: CvTailorRequest, current_user=Depends(get_current_user)
+) -> dict:
+    """Propose, critique, then re-propose — the reviewed variant of ``/cv/gap-close``.
+
+    A second agent grades the proposal set on defensibility (would the interview_prep
+    survive a follow-up question?) and on writing quality, and the proposer answers its
+    findings. Still proposals only, and still nothing reaches a CV without the user
+    accepting each item. Its own endpoint rather than a flag on the first because it costs
+    up to two extra model calls per job, and spending that is the user's decision."""
+    from .tasks import cv_gap_close as task
+
+    t = task.delay(str(current_user.id), body.job_ids, True)
+    return {"task_id": t.id, "status": "queued", "job_count": len(body.job_ids),
+            "refine": True}
 
 
 @app.post("/suggestions/{suggestion_id}/gap-close/review", tags=["cv"])
@@ -1195,6 +1471,70 @@ async def query_ask(body: QueryRequest, current_user=Depends(get_current_user)) 
     except RuntimeError as exc:  # e.g. missing Anthropic key
         raise HTTPException(status_code=503, detail=str(exc))
     return {**turn, "session_id": session_id}
+
+
+@app.post("/query/ask/stream", tags=["query"], dependencies=[_rl_chat])
+async def query_ask_stream(
+    body: QueryRequest, request: Request, current_user=Depends(get_current_user)
+) -> StreamingResponse:
+    """Same read-only turn as ``/query/ask``, delivered as Server-Sent Events: tool calls
+    surface as they complete and the answer streams token by token, instead of the whole
+    turn landing at once after several model round trips.
+
+    The session id is emitted FIRST, before any model work, so a client that started
+    without one can attach the reply to the right thread even if the turn then fails.
+    Once streaming has begun the status line is already sent, so a mid-turn failure can
+    only be reported as an ``error`` event — never an HTTP error code."""
+    import uuid as _uuid
+
+    from .query_runner import stream_query_turn
+
+    session_id = body.session_id
+    if not session_id:
+        session_id = (await mcp_client.db_mcp(
+            current_user.id, "create_chat_session", {"title": "query"}))["id"]
+
+    async def gen():
+        yield f"data: {json.dumps({'kind': 'session', 'session_id': session_id})}\n\n"
+        try:
+            async for event in stream_query_turn(
+                current_user.id, _uuid.UUID(session_id), body.question
+            ):
+                if await request.is_disconnected():
+                    break
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:  # noqa: BLE001 - a live stream reports, it cannot 503
+            logging.getLogger("jobpilot.query").warning("query.stream failed: %s", exc)
+            yield f"data: {json.dumps({'kind': 'error', 'error': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                 "Connection": "keep-alive"},
+    )
+
+
+@app.get("/query/traces", tags=["query"])
+async def query_traces(
+    limit: int = 100, since_days: int | None = None, current_user=Depends(get_current_user)
+) -> dict:
+    """The caller's recent Query turns, traced: spans, tokens, cost, and what each tool
+    returned — plus the rollup the dashboard renders.
+
+    Scoped by the request context like every other read, so a trace log is only ever
+    visible to the user whose questions it records.
+    """
+    from .query_traces import summarize_traces
+
+    res = await mcp_client.db_mcp(current_user.id, "list_agent_events", {
+        "type": "query_turn", "limit": max(1, min(limit, 500)), "since_days": since_days})
+    events = res.get("events", []) if isinstance(res, dict) else []
+    traces = [
+        {**(e.get("payload") or {}), "id": e.get("id"), "created_at": e.get("created_at")}
+        for e in events
+    ]
+    return {"traces": traces, "summary": summarize_traces(traces)}
 
 
 # --------------------------------------------------------------------------- #

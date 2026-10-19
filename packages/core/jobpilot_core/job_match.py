@@ -45,6 +45,20 @@ GRADE_WORDS: frozenset[str] = frozenset({
 _MIN_TOKEN_LEN = 3
 
 
+#: Administrative filler in location labels. Dropped from both sides of a comparison so
+#: "Co. Dublin", "County Dublin" and "Dublin" are the same place — they are how three
+#: different sources spell one county, and none of them narrows anything.
+_LOCATION_NOISE: frozenset[str] = frozenset({"co", "county", "city", "area", "region"})
+
+
+def _loc_words(text: str | None) -> set[str]:
+    """Significant words of a location label, case-folded."""
+    return {
+        w for w in re.split(r"[^a-z0-9]+", (text or "").lower())
+        if len(w) > 1 and w not in _LOCATION_NOISE
+    }
+
+
 def match_tokens(*groups: list[str] | None) -> set[str]:
     """The set of words from roles/keywords that a title may be matched on.
 
@@ -76,14 +90,30 @@ def title_matches(title: str | None, tokens: set[str]) -> bool:
 
 
 def location_matches(location: str | None, locations: list[str] | None) -> bool:
-    """True when ``location`` contains any configured location (substring, case-folded).
+    """True when the job's location satisfies any configured location.
 
-    Substring is right here in a way it is not for titles: locations are hierarchical, so
-    "Dublin" should match "Dublin, County Dublin, Ireland". An empty list matches
-    everything — note that this is why it cannot be the Republic-of-Ireland gate; see
-    :mod:`jobpilot_core.roi_location`.
+    Matching is **per word**, not substring: a configured location matches when every
+    significant word in it appears as a whole word in the job's location. Locations are
+    hierarchical and inconsistently punctuated, so the substring test this replaced broke
+    on ordinary data — ``"dublin, ireland" in "Dublin, County Dublin, Ireland"`` is False
+    because of the intervening county, and a configured "Maynooth, Ireland" missed
+    "Maynooth, Co. Kildare, Ireland" for the same reason. Word-set containment keeps the
+    hierarchy working ("Dublin" still matches "Dublin, County Dublin, Ireland") without
+    depending on how the source happened to order or punctuate the parts.
+
+    Requiring *every* word is what keeps it a filter: "Maynooth Ireland" must not match a
+    Dublin job just because both end in "Ireland".
+
+    An empty list matches everything — note that this is why it cannot be the
+    Republic-of-Ireland gate; see :mod:`jobpilot_core.roi_location`.
     """
     if not locations:
         return True
-    text = (location or "").lower()
-    return any((loc or "").lower() in text for loc in locations)
+    have = _loc_words(location)
+    if not have:
+        return False
+    for loc in locations:
+        want = _loc_words(loc)
+        if want and want <= have:
+            return True
+    return False

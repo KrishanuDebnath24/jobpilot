@@ -121,6 +121,21 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
     roi_location = (locations or ["Dublin, Ireland"])[0]
     primary_role = roles[:1] or keywords[:1]
 
+    # Board filters use the EXPLICITLY configured locations only, never the résumé-derived
+    # fallback above. The deriver reads the CV's home address ("Maynooth Ireland"), which
+    # says where the user lives, not which jobs they will take — and on a board connector a
+    # location is a hard gate, so it silently discarded every Dublin job in the pool: 311
+    # Irish postings across 26 Greenhouse boards, filtered to zero. `roi_location` keeps the
+    # derived value because a free-text engine needs *some* place to query; `is_roi` remains
+    # the Republic-of-Ireland gate either way.
+    configured_locations = config.get("locations") or []
+    # The location a free-text engine is *queried* with. Configured only, with a plain RoI
+    # default — never the CV's home address, for the same reason the board filters no longer
+    # take it: The Muse also filters its own results on the city it was asked for, so the
+    # derived "Maynooth Ireland" both queried and then rejected every Dublin job (55 fetched,
+    # 0 kept). The Muse's facet wants "City, Country"; a country-only value queries poorly.
+    search_location = (configured_locations or ["Dublin, Ireland"])[0]
+
     # JSearch is metered and only runs when explicitly listed in `sources`.
     if "jsearch" in sources:
         await _run_connector(
@@ -131,10 +146,15 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
 
     # Workable's Ireland feed: free, full-text, and needs no employer list at all, so it
     # is the broadest RoI source available. Filtered to the Republic inside the connector.
+    # Roles only, no skills. The connector matches tokens against the *title*, and Irish
+    # postings rarely put tools in a title: of the 21 extra tokens the skill list
+    # contributes, only "analysis"/"financial" ever matched, pulling in a Chief Financial
+    # Officer post for a junior analyst. Skills still reach the qualifier, which reads the
+    # body and is the right place to weigh them.
     if "workable" in sources:
         await _run_connector(
             user_id, "workable", "search_workable",
-            {"roles": roles, "keywords": keywords, "location": settings.workable_location},
+            {"roles": roles, "keywords": [], "location": settings.workable_location},
             raw_jobs, by_connector, errors, usage,
         )
 
@@ -143,16 +163,20 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
     if "apify" in sources:
         await _run_connector(
             user_id, "apify", "search_apify_linkedin",
-            {"roles": primary_role, "keywords": keywords, "location": settings.apify_country},
+            # Roles only: the connector ORs every term into one LinkedIn query, so a bare
+            # skill like "Python" (or the single letter "R") matches anything mentioning it
+            # and drowns the role that was the point of the search.
+            {"roles": primary_role, "keywords": [], "location": settings.apify_country},
             raw_jobs, by_connector, errors, usage,
         )
 
-    # The Muse (free, full-text) filters its results client-side rather than by a
-    # free-text query, so it gets the full role+keyword set (not just the primary role).
+    # The Muse maps tokens to its own category facets; roles alone already resolve to the
+    # same categories the skill list does (measured: both yield ["Data and Analytics"]), so
+    # the skills add nothing here and the location comes from the search config, not the CV.
     if "muse" in sources:
         await _run_connector(
             user_id, "muse", "search_muse",
-            {"roles": roles, "keywords": keywords, "location": roi_location},
+            {"roles": roles, "keywords": [], "location": search_location},
             raw_jobs, by_connector, errors, usage,
         )
 
@@ -177,7 +201,8 @@ async def run_scout(user_id: uuid.UUID, config: dict | None = None) -> dict:
         for company in greenhouse_boards:
             await _run_connector(
                 user_id, f"greenhouse:{company}", "fetch_greenhouse",
-                {"company": company, "roles": roles, "locations": locations, "keywords": keywords},
+                {"company": company, "roles": roles,
+                 "locations": configured_locations, "keywords": keywords},
                 raw_jobs, by_connector, errors, usage,
             )
 

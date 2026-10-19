@@ -31,6 +31,10 @@ def _executor(selected=None):
             return {"deleted": len(args.get("job_ids") or [])}
         if tool == "delete_disqualified_jobs":
             return {"deleted": 3}
+        if tool == "delete_unscored_jobs":
+            return {"deleted": 5}
+        if tool == "delete_all_jobs":
+            return {"deleted": 9}
         return {}
 
     return ConciergeExecutor(uuid.uuid4(), call=fake_call, selected_job_ids=selected), calls
@@ -107,7 +111,8 @@ async def test_delete_disqualified_confirms_then_runs():
 # --------------------------------------------------------------------------- #
 # Policy: the new tools are all consequential (paid or destructive)
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("tool", ["prepare_cvs", "delete_jobs", "delete_disqualified_jobs"])
+@pytest.mark.parametrize("tool", ["prepare_cvs", "delete_jobs", "delete_disqualified_jobs",
+                                 "delete_unscored_jobs", "delete_all_jobs"])
 def test_new_tools_are_confirmation_gated(tool):
     assert tool in concierge.CONSEQUENTIAL
     assert concierge.authorize(tool, confirmed=False) == "confirm"
@@ -115,5 +120,54 @@ def test_new_tools_are_confirmation_gated(tool):
 
 
 def test_new_tools_are_registered():
-    for tool in ("prepare_cvs", "delete_jobs", "delete_disqualified_jobs"):
+    for tool in ("prepare_cvs", "delete_jobs", "delete_disqualified_jobs",
+                 "delete_unscored_jobs", "delete_all_jobs"):
         assert tool in concierge.TOOL_NAMES
+
+
+# --------------------------------------------------------------------------- #
+# Bulk deletes: the unscored bucket, and emptying the pool
+# --------------------------------------------------------------------------- #
+async def test_delete_unscored_confirms_then_runs():
+    ex, calls = _executor()
+    held, _ = await ex.execute("delete_unscored_jobs", {}, confirmed=False)
+    assert held["status"] == "confirmation_required" and not calls
+    done, _ = await ex.execute("delete_unscored_jobs", {}, confirmed=True)
+    assert done["deleted"] == 5
+    assert ("db", "delete_unscored_jobs") in [(s, t) for s, t, _ in calls]
+
+
+async def test_delete_all_jobs_confirms_then_runs():
+    ex, calls = _executor()
+    held, _ = await ex.execute("delete_all_jobs", {}, confirmed=False)
+    assert held["status"] == "confirmation_required" and not calls
+    done, _ = await ex.execute("delete_all_jobs", {}, confirmed=True)
+    assert done["deleted"] == 9
+    assert ("db", "delete_all_jobs") in [(s, t) for s, t, _ in calls]
+
+
+def test_emptying_the_pool_needs_an_erasure_word_not_a_bare_yes():
+    """Emptying the pool throws away every paid scout/qualify/analyze run, so it sits in
+    DESTRUCTIVE with full erasure: a stray "sure" — the kind a user fires at whatever the
+    Concierge last offered — must not clear it. The narrower deletes stay on a plain yes,
+    or routine tidying becomes a chore."""
+    assert concierge.is_destructive("delete_all_jobs")
+    assert not concierge.confirms_action("delete_all_jobs", "yes")
+    assert not concierge.confirms_action("delete_all_jobs", "sure, go ahead")
+    assert concierge.confirms_action("delete_all_jobs", "yes, delete them")
+    # ...and negation still wins over the erasure word.
+    assert not concierge.confirms_action("delete_all_jobs", "no, don't delete them")
+    for narrower in ("delete_jobs", "delete_disqualified_jobs", "delete_unscored_jobs"):
+        assert not concierge.is_destructive(narrower)
+        assert concierge.confirms_action(narrower, "yes")
+
+
+def test_bulk_delete_prompts_say_what_survives():
+    """The two buckets are complements, and the prompt is the only place the user sees
+    which one they are about to lose — so each has to name what it keeps."""
+    unscored = concierge.confirmation_prompt("delete_unscored_jobs", {})
+    assert "UNSCORED" in unscored and "kept" in unscored.lower()
+    all_jobs = concierge.confirmation_prompt("delete_all_jobs", {})
+    assert "ALL" in all_jobs and "cannot be undone" in all_jobs
+    # It empties the pool, not the account — the prompt must not read like GDPR erasure.
+    assert "resume" in all_jobs.lower()

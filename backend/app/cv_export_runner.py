@@ -13,7 +13,7 @@ import base64
 import logging
 import uuid
 
-from jobpilot_core import tailor
+from jobpilot_core import doc_meta, tailor
 
 from . import mcp_client
 
@@ -27,12 +27,23 @@ async def run_export(user_id: uuid.UUID, draft_ids: list[str] | None = None) -> 
         wanted = set(draft_ids)
         drafts = [d for d in drafts if d["id"] in wanted]
 
+    # The uploaded CV's own document properties, fetched once for the batch: every draft
+    # in it derives from the same original, and re-reading that file per draft would be a
+    # storage round trip to learn the same answer. Never fatal — an empty dict means the
+    # renders fall back to neutral properties (see jobpilot_core.doc_meta).
+    meta: dict = {}
+    try:
+        meta = doc_meta.from_jsonable(
+            (await mcp_client.resume_mcp(user_id, "get_resume_doc_metadata", {})).get("metadata"))
+    except Exception as exc:  # noqa: BLE001 - properties are a nicety; the CV is the point
+        logger.info("cv_export.doc_metadata unavailable (%s)", type(exc).__name__)
+
     exported, errors = [], {}
     for d in drafts:
         did = d["id"]
         try:
             cv = d.get("tailored_content_json") or {}
-            rendered = tailor.render_both(cv)
+            rendered = tailor.render_both(cv, meta)
             if not rendered["pdf_machine_readable"]:
                 errors[did] = "rendered PDF is not machine-readable"
                 continue

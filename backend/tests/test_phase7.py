@@ -18,6 +18,8 @@ The live agent (real Haiku routing + grounding + the adversarial injection case)
 
 from __future__ import annotations
 
+import asyncio
+import time
 import uuid
 
 import pytest
@@ -130,13 +132,23 @@ def _executor_with_capture():
         if tool == "count_jobs":
             return {"count": 7}
         if tool == "get_qualified_jobs":
+            # Shaped like the real dashboard row: the whole posting plus the columns the
+            # UI needs, so the projection test has something real to strip.
             return {"jobs": [
                 {"id": "a", "title": "Backend", "company": "Acme", "url": "ua",
-                 "qualification": {"decision": "qualified"}},
+                 "apply_url": "aa", "location": "Dublin", "description": "D" * 4000,
+                 "dedupe_hash": "h1", "connector": "greenhouse:acme", "status": "scouted",
+                 "qualification": {"score": 0.81, "decision": "qualified",
+                                   "matched_skills": ["python"], "missing_skills": [],
+                                   "reasons_json": {"why": "…"}}},
                 {"id": "b", "title": "Frontend", "company": "Beta", "url": "ub",
-                 "qualification": {"decision": "disqualified"}},
+                 "apply_url": None, "location": "Cork", "description": "D" * 4000,
+                 "dedupe_hash": "h2", "connector": "workable", "status": "scouted",
+                 "qualification": {"score": 0.3, "decision": "disqualified"}},
                 {"id": "c", "title": "Platform", "company": "Gamma", "url": "uc",
-                 "qualification": {"decision": "disqualified"}}]}
+                 "apply_url": None, "location": "Galway", "description": "D" * 4000,
+                 "dedupe_hash": "h3", "connector": "workable", "status": "scouted",
+                 "qualification": {"score": 0.2, "decision": "disqualified"}}]}
         if tool == "get_cv_drafts":
             return {"drafts": [
                 {"id": "d1", "job_id": "a", "status": "approved", "before_score": 0.50, "after_score": 0.75},
@@ -169,6 +181,99 @@ async def test_executor_embeds_semantic_query_before_search():
     assert is_data  # retrieved job content is wrapped as <data>
 
 
+async def test_semantic_search_forwards_declared_filters_with_the_vector():
+    """Metadata filters ride along with the embedding so the DB narrows BEFORE ranking —
+    the point of filtering in pgvector rather than making the model sift a broad list."""
+    ex, calls = _executor_with_capture()
+    await ex.execute("semantic_search_jobs", {
+        "query": "data platforms", "limit": 5, "company": "Stripe",
+        "decision": "qualified", "since_days": 7, "seniority": "senior"})
+    service, tool, args = calls[-1]
+    assert (service, tool) == ("db", "semantic_search_jobs")
+    assert args["company"] == "Stripe" and args["decision"] == "qualified"
+    assert args["since_days"] == 7 and args["seniority"] == "senior"
+    assert args["limit"] == 5
+    assert "query" not in args and len(args["embedding"]) == HS.embedding_dim
+    assert "employment_type" not in args  # not supplied -> not forwarded
+
+
+async def test_semantic_search_drops_blank_and_undeclared_filters():
+    """A blank company would reach SQL as ILIKE '%  %' and match almost nothing, which
+    reads to the user as 'you have none' rather than as a bad argument. And a filter
+    belonging to another tool must not ride along on this one."""
+    ex, calls = _executor_with_capture()
+    await ex.execute("semantic_search_analyses", {
+        "query": "kubernetes", "company": "   ", "seniority": "mid",
+        "employment_type": "full_time"})
+    service, tool, args = calls[-1]
+    assert (service, tool) == ("db", "semantic_search_analyses")
+    assert args["seniority"] == "mid"
+    assert "company" not in args          # whitespace-only -> dropped
+    assert "employment_type" not in args  # analyses declares no such filter
+
+
+def _executor_with(fake_call):
+    from app.query_runner import QueryExecutor
+
+    calls: list[tuple] = []
+
+    async def wrapped(user_id, service, tool, args):
+        calls.append((service, tool, dict(args)))
+        return await fake_call(tool, args)
+
+    return QueryExecutor(uuid.uuid4(), call=wrapped), calls
+
+
+async def test_company_miss_returns_the_real_employer_list():
+    """Zero rows is otherwise indistinguishable from 'you genuinely have none', so a
+    mis-guessed employer gets reported as fact. A miss must hand back the employers that
+    actually exist — AND the filters applied, so that when the company IS in the list the
+    model can see another filter emptied the result rather than blaming the name."""
+    async def fake(tool, args):
+        if tool == "semantic_search_jobs":
+            return {"jobs": []}
+        if tool == "job_stats":
+            return {"by_company": [{"label": "Alphabet", "count": 3},
+                                   {"label": "Stripe", "count": 2}]}
+        return {}
+
+    ex, calls = _executor_with(fake)
+    result, is_data = await ex.execute(
+        "semantic_search_jobs", {"query": "search", "company": "Google", "seniority": "senior"})
+
+    assert result["jobs"] == []
+    assert result["companies_in_pool"] == ["Alphabet", "Stripe"]
+    assert result["filters_applied"] == {"company": "Google", "seniority": "senior"}
+    assert [t for _, t, _ in calls] == ["semantic_search_jobs", "job_stats"]
+    assert is_data  # employer names are scraped text — the <data> wrapper still applies
+
+
+async def test_company_hit_does_not_pay_for_the_recovery():
+    """Recovery costs an extra MCP round trip, so it fires ONLY on a miss — the happy
+    path, which is the common one, must be untouched."""
+    async def fake(tool, args):
+        if tool == "semantic_search_jobs":
+            return {"jobs": [{"id": "a", "title": "Backend", "company": "Stripe"}]}
+        return {}
+
+    ex, calls = _executor_with(fake)
+    result, _ = await ex.execute("semantic_search_jobs", {"query": "x", "company": "Stripe"})
+    assert "companies_in_pool" not in result
+    assert [t for _, t, _ in calls] == ["semantic_search_jobs"]  # no job_stats call
+
+
+async def test_recovery_skipped_when_no_company_was_filtered():
+    """An empty result with no company filter is a genuine 'nothing similar', not a
+    possible name miss. Attaching an employer list there would be misleading noise."""
+    async def fake(tool, args):
+        return {"jobs": []}
+
+    ex, calls = _executor_with(fake)
+    result, _ = await ex.execute("semantic_search_jobs", {"query": "quantum computing"})
+    assert "companies_in_pool" not in result
+    assert [t for _, t, _ in calls] == ["semantic_search_jobs"]
+
+
 async def test_executor_work_status_grounds_in_status_tools():
     ex, calls = _executor_with_capture()
     result, is_data = await ex.execute("get_work_status", {})
@@ -182,6 +287,34 @@ async def test_executor_list_qualified_filters_by_decision():
     ex, _ = _executor_with_capture()
     result, is_data = await ex.execute("list_qualified_jobs", {"decision": "qualified"})
     assert [j["id"] for j in result["jobs"]] == ["a"] and is_data
+
+
+async def test_list_qualified_projects_away_the_dashboard_row():
+    """The shared ``get_qualified_jobs`` row is the DASHBOARD's shape — every column plus
+    the entire posting, ~1k tokens each, re-sent uncached on every later round of the turn.
+    The agent's list must carry only what an answer or a citation can use."""
+    from app.query_runner import _citations_from
+
+    ex, _ = _executor_with_capture()
+    result, is_data = await ex.execute("list_qualified_jobs", {})
+
+    row = result["jobs"][0]
+    assert set(row) == {"id", "title", "company", "location", "url", "apply_url",
+                        "score", "decision"}
+    assert "description" not in row and "dedupe_hash" not in row  # the expensive dead weight
+    assert row["title"] == "Backend" and row["company"] == "Acme"
+    assert row["url"] == "ua" and row["apply_url"] == "aa"  # url is often a redirect
+    assert row["score"] == 0.81 and row["decision"] == "qualified"  # lifted off qualification
+    assert is_data  # still scraped third-party text — the <data> wrapper stays
+
+    # A row with no application resolution keeps the key, as null rather than absent.
+    assert result["jobs"][1]["apply_url"] is None
+
+    # The projection must not break citation links (it would, silently, if url were cut).
+    sink: dict = {}
+    _citations_from("list_qualified_jobs", result, sink)
+    assert sink[("job", "a")] == {"type": "job", "id": "a", "title": "Backend",
+                                  "company": "Acme", "url": "ua", "similarity": None}
 
 
 # --------------------------------------------------------------------------- #
@@ -232,16 +365,207 @@ def test_citations_from_cv_drafts_link_the_target_job():
 
 
 # --------------------------------------------------------------------------- #
+# Turn loop — the tools of ONE round are independent reads, so they fan out
+# concurrently (N tools = one round trip) and fold back in REQUEST order. Driven
+# through a fake Anthropic client + fake MCP call: no network, no key, no DB.
+# --------------------------------------------------------------------------- #
+class _Blk:
+    """Stand-in for an Anthropic content block (tool_use or text)."""
+
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+class _Resp:
+    def __init__(self, stop_reason, content):
+        self.stop_reason = stop_reason
+        self.content = content
+
+
+class _FakeStream:
+    """Stand-in for the SDK's streaming context manager: replays one prepared response,
+    handing its text blocks out as deltas the way ``text_stream`` does."""
+
+    def __init__(self, resp):
+        self._resp = resp
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    @property
+    def text_stream(self):
+        async def gen():
+            for block in self._resp.content:
+                if getattr(block, "type", None) == "text":
+                    yield block.text
+
+        return gen()
+
+    async def get_final_message(self):
+        return self._resp
+
+
+def _patch_turn(monkeypatch, rounds, call):
+    """Point the turn at prepared model responses + a fake MCP dispatch."""
+    from app import query_runner as qr
+
+    class _Messages:
+        def stream(self, **kw):  # not async: the SDK returns a ctx manager synchronously
+            return _FakeStream(rounds.pop(0))
+
+    class _Client:
+        messages = _Messages()
+
+        async def close(self):
+            pass
+
+    async def fake_db_mcp(user_id, tool, arguments=None):
+        return {"messages": []} if tool == "get_messages" else {}
+
+    monkeypatch.setattr(qr, "get_client", lambda settings: _Client())
+    monkeypatch.setattr(qr, "_default_call", call)
+    monkeypatch.setattr(qr.mcp_client, "db_mcp", fake_db_mcp)
+    return qr
+
+
+async def test_round_tools_run_concurrently(monkeypatch):
+    """Three independent reads asked for in one round cost ONE tool round trip, not
+    three — the round's wall time is the slowest tool, not their sum."""
+    rounds = [
+        _Resp("tool_use", [
+            _Blk(type="tool_use", id="t1", name="count_jobs", input={}),
+            _Blk(type="tool_use", id="t2", name="count_qualifications", input={}),
+            _Blk(type="tool_use", id="t3", name="job_stats", input={}),
+        ]),
+        _Resp("end_turn", [_Blk(type="text", text="7 jobs, 3 qualified.")]),
+    ]
+
+    async def slow(user_id, service, tool, args):
+        await asyncio.sleep(0.05)
+        return {"count": 7}
+
+    qr = _patch_turn(monkeypatch, rounds, slow)
+    t0 = time.monotonic()
+    out = await qr.run_query_turn(uuid.uuid4(), uuid.uuid4(), "how many jobs?")
+    elapsed = time.monotonic() - t0
+
+    assert out["answer"] == "7 jobs, 3 qualified."
+    assert [e["tool"] for e in out["events"]] == [
+        "count_jobs", "count_qualifications", "job_stats"]
+    assert elapsed < 0.12, f"tools serialised ({elapsed:.3f}s) — 3x50ms should overlap to ~0.05s"
+
+
+async def test_round_tool_results_fold_back_in_request_order(monkeypatch):
+    """The SLOWEST tool is requested first, so completion order is the reverse of
+    request order. Results, events and citations must still follow the request — folding
+    by completion would make the UI's tool list nondeterministic run to run."""
+    rounds = [
+        _Resp("tool_use", [
+            _Blk(type="tool_use", id="t1", name="count_jobs", input={}),           # slow
+            _Blk(type="tool_use", id="t2", name="count_qualifications", input={}),  # instant
+        ]),
+        _Resp("end_turn", [_Blk(type="text", text="done")]),
+    ]
+    finished: list[str] = []
+
+    async def uneven(user_id, service, tool, args):
+        if tool == "count_jobs":
+            await asyncio.sleep(0.05)
+        finished.append(tool)
+        return {"count": 1}
+
+    qr = _patch_turn(monkeypatch, rounds, uneven)
+    out = await qr.run_query_turn(uuid.uuid4(), uuid.uuid4(), "how many jobs?")
+
+    assert finished == ["count_qualifications", "count_jobs"]  # completion order
+    assert [e["tool"] for e in out["events"]] == ["count_jobs", "count_qualifications"]
+
+
+async def test_stream_emits_tool_before_tokens_and_exactly_one_done(monkeypatch):
+    """The SSE contract: the tool event lands while the model is still thinking about the
+    answer, tokens follow, and ``done`` terminates the stream exactly once."""
+    rounds = [
+        _Resp("tool_use", [_Blk(type="tool_use", id="t1", name="count_jobs", input={})]),
+        _Resp("end_turn", [_Blk(type="text", text="You have 7 jobs.")]),
+    ]
+
+    async def call(user_id, service, tool, args):
+        return {"count": 7}
+
+    qr = _patch_turn(monkeypatch, rounds, call)
+    seen = [ev async for ev in
+            qr.stream_query_turn(uuid.uuid4(), uuid.uuid4(), "how many jobs?")]
+
+    kinds = [e["kind"] for e in seen]
+    assert kinds.count("done") == 1 and kinds[-1] == "done"
+    assert kinds.index("tool") < kinds.index("token")  # progress before prose
+    assert seen[kinds.index("tool")]["tool"] == "count_jobs"
+    assert "".join(e["text"] for e in seen if e["kind"] == "token") == "You have 7 jobs."
+    assert seen[-1]["answer"] == "You have 7 jobs."
+
+
+async def test_answer_accumulates_text_across_rounds(monkeypatch):
+    """A preamble written before a tool call has already streamed onto the user's screen,
+    so it belongs in the persisted answer — the transcript must match what was shown."""
+    rounds = [
+        _Resp("tool_use", [
+            _Blk(type="text", text="Let me check. "),
+            _Blk(type="tool_use", id="t1", name="count_jobs", input={}),
+        ]),
+        _Resp("end_turn", [_Blk(type="text", text="You have 7.")]),
+    ]
+
+    async def call(user_id, service, tool, args):
+        return {"count": 7}
+
+    qr = _patch_turn(monkeypatch, rounds, call)
+    out = await qr.run_query_turn(uuid.uuid4(), uuid.uuid4(), "how many jobs?")
+    assert out["answer"] == "Let me check. You have 7."
+
+
+# --------------------------------------------------------------------------- #
 # DB-gated: embeddings I/O, exact SQL counts, pgvector search, erasure
 # --------------------------------------------------------------------------- #
 requires_db = pytest.mark.skipif(not _db_reachable(), reason="Postgres not reachable")
 
 
+# Every user a DB-gated test creates. The per-test `finally` blocks still do the prompt
+# cleanup; this is the net beneath them, because the seeding happens BEFORE the try and an
+# interrupted or erroring run would otherwise strand a user in a shared dev database — with
+# hashing-embedded rows that are not comparable to model-embedded ones. Three such rows were
+# found in the dev DB from an aborted run.
+_CREATED_USERS: list = []
+
+
 async def _mk_user(session):
     from jobpilot_core.security import hash_password
 
-    return (await repositories.create_user(
+    uid = (await repositories.create_user(
         session, f"p7_{uuid.uuid4().hex}@ex.com", hash_password("x"))).id
+    _CREATED_USERS.append(uid)
+    return uid
+
+
+@pytest.fixture(autouse=True)
+async def _reap_created_users():
+    """Delete whatever ``_mk_user`` made, however the test body ended. Runs before
+    conftest's engine reset (module autouse tears down first), so the loop is still live.
+    Deleting an already-cleaned user is a harmless no-op."""
+    yield
+    if not _CREATED_USERS:
+        return
+    stale, _CREATED_USERS[:] = list(_CREATED_USERS), []
+    from jobpilot_core.db import session_scope
+
+    try:
+        async with session_scope() as s:
+            for uid in stale:
+                await repositories.delete_user_cascade(s, uid)
+    except Exception as exc:  # noqa: BLE001 - a reaper failure must not fail a passing test
+        print(f"warning: could not reap {len(stale)} test user(s): {exc}")
 
 
 async def _seed_two_jobs(session, uid):
@@ -311,6 +635,41 @@ async def test_semantic_search_returns_nearest_job():
 
 
 @requires_db
+async def test_semantic_search_filters_narrow_before_ranking():
+    """A metadata filter changes the candidate set, not just the order: the query text
+    deliberately favours the marketing job, so filtering to Acme must EXCLUDE the nearer
+    row rather than rank it second. Also pins the ilike/_since edges."""
+    from jobpilot_core.db import session_scope
+
+    async with session_scope() as s:
+        uid = await _mk_user(s)
+        await _seed_two_jobs(s, uid)
+        items = await repositories.list_unembedded_texts(s, uid, "jobs", limit=50)
+        vecs = embeddings.embed_texts(HS, [it["text"] for it in items])
+        await repositories.set_embeddings(
+            s, uid, "jobs", [{"id": it["id"], "embedding": v} for it, v in zip(items, vecs)])
+    try:
+        qv = embeddings.embed_texts(HS, ["brand campaigns social media copywriting"])[0]
+        async with session_scope() as s:
+            unfiltered = await repositories.semantic_search_jobs(s, uid, qv, limit=5)
+            by_company = await repositories.semantic_search_jobs(s, uid, qv, limit=5, company="acme")
+            partial = await repositories.semantic_search_jobs(s, uid, qv, limit=5, company="cme")
+            recent = await repositories.semantic_search_jobs(s, uid, qv, limit=5, since_days=1)
+            zero_days = await repositories.semantic_search_jobs(s, uid, qv, limit=5, since_days=0)
+            scored = await repositories.semantic_search_jobs(
+                s, uid, qv, limit=5, decision="qualified")
+        assert unfiltered[0]["company"] == "BrandCo"           # nearest overall
+        assert [h["company"] for h in by_company] == ["Acme"]  # filter beats distance
+        assert [h["company"] for h in partial] == ["Acme"]     # case-insensitive + partial
+        assert len(recent) == 2                                # both seeded moments ago
+        assert len(zero_days) == 2                             # since_days=0 is falsy -> no filter
+        assert scored == []  # neither job is qualified yet: the decision filter drops unscored
+    finally:
+        async with session_scope() as s:
+            await repositories.delete_user_cascade(s, uid)
+
+
+@requires_db
 async def test_exact_counts_and_stats_are_computed_in_sql():
     from jobpilot_core.db import session_scope
 
@@ -329,6 +688,37 @@ async def test_exact_counts_and_stats_are_computed_in_sql():
         assert stats["total_jobs"] == 2 and stats["qualified"] == 1 and stats["disqualified"] == 1
         labels = {r["label"] for r in stats["by_completeness"]}
         assert labels == {"full", "snippet"}
+        # by_company is both the exact answer to "how many roles at X?" and the list of
+        # employers that actually exist — the grounding for a company filter.
+        assert {r["label"]: r["count"] for r in stats["by_company"]} == {"Acme": 1, "BrandCo": 1}
+    finally:
+        async with session_scope() as s:
+            await repositories.delete_user_cascade(s, uid)
+
+
+@requires_db
+async def test_company_filter_matches_across_legal_suffix_spellings():
+    """The stored name and the user's phrasing rarely agree. Canonicalising the query with
+    the same function dedupe uses means every spelling of one employer finds the row —
+    and a genuinely absent employer still returns nothing rather than a false match."""
+    from jobpilot_core.db import session_scope
+
+    async with session_scope() as s:
+        uid = await _mk_user(s)
+        await _seed_two_jobs(s, uid)  # companies: Acme, BrandCo
+        items = await repositories.list_unembedded_texts(s, uid, "jobs", limit=50)
+        vecs = embeddings.embed_texts(HS, [it["text"] for it in items])
+        await repositories.set_embeddings(
+            s, uid, "jobs", [{"id": it["id"], "embedding": v} for it, v in zip(items, vecs)])
+    try:
+        qv = embeddings.embed_texts(HS, ["kubernetes go microservices"])[0]
+        async with session_scope() as s:
+            async def hits(company):
+                return await repositories.semantic_search_jobs(s, uid, qv, limit=5, company=company)
+
+            for spelling in ("Acme", "acme", "ACME, Inc.", "The Acme Company", "  Acme  "):
+                assert [h["company"] for h in await hits(spelling)] == ["Acme"], spelling
+            assert await hits("Google") == []  # absent employer still returns nothing
     finally:
         async with session_scope() as s:
             await repositories.delete_user_cascade(s, uid)

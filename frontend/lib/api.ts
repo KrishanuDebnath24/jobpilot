@@ -16,6 +16,8 @@ import type {
   PipelineExecution,
   PipelineRun,
   QualifierConfig,
+  QueryStreamEvent,
+  QueryTraceReport,
   QueryTurn,
   ResumeUploadResult,
   ResumeVersion,
@@ -300,6 +302,16 @@ export const gapCloseCvs = (job_ids: string[]) =>
     method: "POST",
     body: JSON.stringify({ job_ids }),
   });
+
+/** The reviewed variant: propose → critique → propose. A second agent grades the set on
+ *  whether each item's interview prep would survive a follow-up question, and on writing
+ *  quality, then the proposer answers its findings. Costs up to two extra model calls per
+ *  job, which is why it is a separate action. */
+export const gapCloseRefineCvs = (job_ids: string[]) =>
+  request<{ task_id: string; job_count: number; refine: boolean }>("/cv/gap-close/refine", {
+    method: "POST",
+    body: JSON.stringify({ job_ids }),
+  });
 /** Live progress of the current/last gap-close run. The run has no pipeline_runs row and can
  *  outlive the page, so the backend keeps a durable record and we poll it. */
 export const getGapCloseStatus = () =>
@@ -413,11 +425,61 @@ export const createQuerySession = () =>
   request<{ id: string }>("/query/session", { method: "POST" });
 export const getQueryMessages = (id: string) =>
   request<{ messages: ChatMessage[] }>(`/query/session/${id}/messages`).then((r) => r.messages);
+export const getQueryTraces = (sinceDays: number | null, limit = 100) =>
+  request<QueryTraceReport>(
+    `/query/traces?limit=${limit}${sinceDays == null ? "" : `&since_days=${sinceDays}`}`,
+  );
 export const askQuery = (question: string, session_id?: string | null) =>
   request<QueryTurn>("/query/ask", {
     method: "POST",
     body: JSON.stringify({ question, session_id: session_id ?? null }),
   });
+
+/** Ask the Query agent over SSE: tool calls surface as they complete and the answer
+ *  arrives token by token. Resolves when the stream ends; pass `signal` to abandon it.
+ *
+ *  Single-shot, so unlike streamPipeline it must NOT reconnect — a retry would re-run
+ *  the turn (and re-persist the question) rather than rejoin the one in flight. */
+export async function streamQuery(
+  question: string,
+  session_id: string | null,
+  onEvent: (ev: QueryStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`${API_URL}/query/ask/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${getToken() ?? ""}`,
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify({ question, session_id: session_id ?? null }),
+    signal,
+    cache: "no-store",
+  });
+  if (!res.ok || !res.body) throw new ApiError(res.status, `stream HTTP ${res.status}`);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    // Network chunks don't align to frame boundaries: keep the trailing partial.
+    const frames = buf.split("\n\n");
+    buf = frames.pop() ?? "";
+    for (const frame of frames) {
+      const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
+      if (!dataLine) continue; // comment/heartbeat
+      try {
+        onEvent(JSON.parse(dataLine.slice(5).trim()) as QueryStreamEvent);
+      } catch {
+        /* ignore malformed frame */
+      }
+    }
+  }
+}
 
 /** Subscribe to the live pipeline event stream (SSE over fetch, so we can send the
  *  auth header). Auto-reconnects until the returned stop() is called. */

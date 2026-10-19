@@ -3,8 +3,8 @@
 For each job: deterministic score → must-have gate → (gate-passers only) Haiku
 refine → combine → persist via **db-mcp** ``upsert_qualification``. Reads resume via
 resume-mcp, configs via config-mcp, jobs via db-mcp. No direct DB. ``user_id`` comes
-from the trusted context, never from job text. Per-job error isolation; incremental
-by default (skip jobs already qualified for the current resume+config).
+from the trusted context, never from job text. Per-job error isolation; scores only the
+UNSCORED by default (``requalify_all=True`` re-scores the whole pool).
 """
 
 from __future__ import annotations
@@ -38,17 +38,6 @@ async def _emit(user_id: uuid.UUID, event: dict) -> None:
     # Liveness, not delivery: the event bus is pub/sub and drops what nobody is listening
     # to, whereas the reaper has to be able to tell "still working" from "worker died".
     await events.beat(get_settings().redis_url, user_id, event.get("stage", "qualify"))
-
-
-def _version_of(job: dict) -> tuple | None:
-    q = job.get("qualification")
-    if not q or not q.get("reasons_json"):
-        return None
-    rj = q["reasons_json"]
-    # CV-aware: the effective-CV identity (a tailored draft id, or the parent resume id)
-    # is the re-score key. Fall back to resume_version for qualifications written before
-    # cv_version existed.
-    return (rj.get("cv_version") or rj.get("resume_version"), rj.get("config_version"))
 
 
 async def run_qualify(
@@ -88,16 +77,24 @@ async def run_qualify(
 
     # Resolve the work set BEFORE reporting a total.
     #
-    # A job already scored against this same effective CV and config is skipped - which is
-    # what makes an interrupted run cheap to resume: re-running qualify scores the jobs that
-    # still need it, not the whole pool. That was always true, but `total` counted every job
-    # in the pool, so a resumed run announced "0 of 1189" and looked like it was starting
-    # over. Deciding the set up front makes the number the work actually left to do.
+    # A job that has ALREADY been scored is skipped: qualify does the jobs nothing has ever
+    # looked at, and nothing else. That makes an interrupted run cheap to resume, and it
+    # makes the routine loop — scout brings in new roles, qualify scores them — cost what
+    # the new roles cost instead of re-billing the whole pool.
+    #
+    # This deliberately does NOT chase staleness. The scoring key (effective CV + config) is
+    # still recorded on every qualification, but it is no longer consulted here, because
+    # re-uploading a CV mints a new resume id and thereby invalidated every score in the
+    # pool — one upload turned the next qualify into a full re-run of work already paid for.
+    # When a re-score IS wanted (a tightened config, a genuinely better CV) it is asked for
+    # explicitly via requalify_all, which is what the qualifier-settings screen already
+    # sends after a config change.
+    #
+    # `total` counts the work actually left to do rather than the pool, so a resumed run
+    # does not announce "0 of 1189" and look like it is starting over.
     todo: list[dict] = []
     for job in jobs:
-        _, _, cv_version = select_effective_resume(
-            resume, resume_version, draft_by_job.get(job["id"]))
-        if not requalify_all and _version_of(job) == (cv_version, config_version):
+        if not requalify_all and job.get("qualification"):
             counts["skipped"] += 1
             continue
         todo.append(job)

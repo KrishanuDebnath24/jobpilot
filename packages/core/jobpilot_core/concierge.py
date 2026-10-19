@@ -72,12 +72,27 @@ SYSTEM = (
     "several jobs it returns candidates to disambiguate by role+company.\n"
     "• job_ids — only when you already hold ids from a prior tool result; never fabricate them.\n"
     "\n"
+    "DELETING JOBS — four tools, and the wrong one is unrecoverable, so match the user's "
+    "words and never widen the scope they asked for:\n"
+    "• delete_jobs — specific jobs (their selection, or a role+company they name).\n"
+    "• delete_disqualified_jobs — 'the ones that failed / didn't make the cut'. Only jobs "
+    "with an explicit disqualified verdict; unscored jobs survive.\n"
+    "• delete_unscored_jobs — 'the ones that were never scored / never qualified'. Only "
+    "jobs with no qualification at all; qualified AND disqualified jobs survive.\n"
+    "• delete_all_jobs — ONLY for 'delete all jobs', 'clear the pool', 'start over'. It "
+    "empties the pool including qualified jobs and their tailored CVs. Never reach for it to "
+    "satisfy a narrower ask, and never as a follow-up the user did not ask for. It does NOT "
+    "erase their account — that is delete_user_data.\n"
+    "If which set they mean is genuinely unclear, ask before calling; job_stats gives the exact "
+    "counts ('X unscored, Y disqualified') to show what each one would remove.\n"
+    "\n"
     "SCOPE — you handle status, simple lookups, configuration, triggering stages, gate "
-    "approvals, applying suggestions, DELETING jobs (selected jobs, or all disqualified "
-    "ones), and tailored CVs (tailoring/preparing selected jobs, reviewing/approving "
-    "drafts, exporting, re-qualifying with an improvement report; plus explaining a job in "
-    "plain terms, showing an attached CV's editable parts, and editing/rewording it). You "
-    "are not a deep-research agent over the whole dataset. Be concise and concrete.\n"
+    "approvals, applying suggestions, DELETING jobs (selected jobs, all disqualified ones, "
+    "all unscored ones, or the whole pool), and tailored CVs (tailoring/preparing selected "
+    "jobs, reviewing/approving drafts, exporting, re-qualifying with an improvement report; "
+    "plus explaining a job in plain terms, showing an attached CV's editable parts, and "
+    "editing/rewording it). You are not a deep-research agent over the whole dataset. Be "
+    "concise and concrete.\n"
     "\n"
     "JOB REFERENCES — refer to jobs by ROLE and COMPANY, NEVER by id, and never ask the user "
     "for an id. To target a job for explain_job / show_cv / edit_cv / reword_cv, pass job_ref "
@@ -109,11 +124,14 @@ SYSTEM = (
     "scouting or re-qualify. Exactly one suggestion, never a menu, and never auto-run it.\n"
     "\n"
     "QUALIFY vs RE-QUALIFY — don't offer both as a menu; pick by intent:\n"
-    "• 'qualify' (trigger_stage stage=qualify) re-scores the JOB POOL and updates the "
-    "dashboard scores. It is CV-aware: a job with an exported tailored CV built from the "
-    "user's current résumé is scored against THAT CV; every other job against the uploaded "
-    "résumé. Use this when the user wants their job scores refreshed. It is incremental — "
-    "only jobs whose CV or config changed are re-scored.\n"
+    "• 'qualify' (trigger_stage stage=qualify) scores the UNSCORED jobs in the pool and "
+    "updates the dashboard. It is CV-aware: a job with an exported tailored CV built from "
+    "the user's current CV is scored against THAT CV; every other job against the uploaded "
+    "one. It scores jobs that have NEVER been scored and skips the rest, so it costs only "
+    "what the new roles cost. If the user wants existing scores redone (they changed the "
+    "qualifier config, or uploaded a better CV), tell them qualify skips already-scored jobs "
+    "and that a full re-score is the option on the qualifier settings screen — do NOT "
+    "quietly re-score the pool.\n"
     "• 're-qualify' (requalify_cvs) re-scores the tailored CV DRAFTS against their jobs and "
     "records the before→after lift for the improvement report. Use this when the user wants "
     "to see how much a tailored CV helped. A tailored CV is scored against the pool only "
@@ -241,6 +259,17 @@ TOOLS: list[dict] = [
     _tool("delete_disqualified_jobs",
           "Permanently delete every job currently marked disqualified (unscored jobs are kept). "
           "CONSEQUENTIAL — confirm first.", {}),
+    _tool("delete_unscored_jobs",
+          "Permanently delete every job that has never been scored (no qualification yet). "
+          "Scored jobs — qualified AND disqualified — are kept. Use this to clear out jobs "
+          "scouting brought in that qualifying never got to. CONSEQUENTIAL — confirm first.", {}),
+    _tool("delete_all_jobs",
+          "Empty the job pool: permanently delete EVERY job the user has, scored or not, "
+          "qualified or not, with their analyses, suggestions and tailored drafts. Their "
+          "resume, configs and application log are NOT touched. Use ONLY when the user asks "
+          "to clear the whole pool / start over — for narrower asks use delete_disqualified_jobs, "
+          "delete_unscored_jobs, or delete_jobs. DESTRUCTIVE — requires an explicit, "
+          "unambiguous yes.", {}),
     _tool("explain_job",
           "Plain-language summary of ONE job — the skills it needs, experience level, the role, "
           "and qualifications, plus how it compares to the user's CV. Reads the stored analysis "
@@ -321,10 +350,14 @@ TOOL_NAMES = frozenset(t["name"] for t in TOOLS)
 CONSEQUENTIAL: frozenset[str] = frozenset(
     {"run_pipeline", "trigger_stage", "update_qualifier_config", "apply_resume",
      "tailor_cvs", "prepare_cvs", "requalify_cvs", "delete_jobs",
-     "delete_disqualified_jobs", "delete_user_data"}
+     "delete_disqualified_jobs", "delete_unscored_jobs", "delete_all_jobs",
+     "delete_user_data"}
 )
-# Destructive actions require confirmation regardless of any gate/config setting.
-DESTRUCTIVE: frozenset[str] = frozenset({"delete_user_data"})
+# Destructive actions require confirmation regardless of any gate/config setting, and an
+# unambiguous erasure word rather than a bare "yes". Emptying the whole job pool belongs
+# here with full erasure: it throws away every scouting/qualifying/analysis run the user
+# has paid for, and unlike the narrower deletes no filter limits what it takes.
+DESTRUCTIVE: frozenset[str] = frozenset({"delete_user_data", "delete_all_jobs"})
 
 
 def requires_confirmation(tool_name: str) -> bool:
@@ -443,6 +476,13 @@ def confirmation_prompt(tool_name: str, args: dict) -> str:
                 f"drafts? This cannot be undone.")
     if tool_name == "delete_disqualified_jobs":
         return "Permanently delete ALL disqualified jobs and their scores/drafts? This cannot be undone."
+    if tool_name == "delete_unscored_jobs":
+        return ("Permanently delete every UNSCORED job (no qualification yet)? Scored jobs, "
+                "qualified or not, are kept. This cannot be undone.")
+    if tool_name == "delete_all_jobs":
+        return ("Permanently delete ALL of your jobs — the entire pool, scored and unscored, "
+                "with their analyses and tailored drafts? Your resume, configs and application "
+                "log are kept. This cannot be undone — reply 'yes, delete them' to confirm.")
     if tool_name == "delete_user_data":
         return "Permanently erase ALL of your data? This cannot be undone."
     return f"Proceed with {tool_name}?"

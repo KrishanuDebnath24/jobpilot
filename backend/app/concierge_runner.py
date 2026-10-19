@@ -70,6 +70,8 @@ _ROUTES: dict[str, tuple[str, str, object, bool]] = {
     "list_cv_drafts": ("db", "get_cv_drafts", None, True),  # Phase 6.5: the user's own drafts (data)
     "delete_jobs": ("db", "delete_jobs", lambda a: {"job_ids": a.get("job_ids") or []}, False),
     "delete_disqualified_jobs": ("db", "delete_disqualified_jobs", lambda a: {}, False),
+    "delete_unscored_jobs": ("db", "delete_unscored_jobs", lambda a: {}, False),
+    "delete_all_jobs": ("db", "delete_all_jobs", lambda a: {}, False),
     "delete_user_data": ("db", "delete_user_data", lambda a: {}, False),
 }
 _LOCAL = {"prepare_resume_apply", "apply_resume"}
@@ -423,10 +425,11 @@ def _confirm_reply(tool: str, result: dict) -> str:
     if tool == "trigger_stage":
         stage = result.get("stage")
         if stage == "qualify":
-            return (f"Done — re-qualified the pool: {result.get('qualified', 0)} qualified, "
-                    f"{result.get('disqualified', 0)} not (scored {result.get('scored', 0)}, "
-                    f"skipped {result.get('skipped', 0)}). Jobs with an exported tailored CV are "
-                    f"scored against that CV, otherwise your uploaded résumé.{err_tail}")
+            return (f"Done — scored {result.get('scored', 0)} new job(s): "
+                    f"{result.get('qualified', 0)} qualified, {result.get('disqualified', 0)} not. "
+                    f"Skipped {result.get('skipped', 0)} already-scored job(s) — qualify only "
+                    f"looks at jobs it has never scored. Jobs with an exported tailored CV are "
+                    f"scored against that CV, otherwise your uploaded CV.{err_tail}")
         if stage == "analyze":
             return f"Done — analyzed {result.get('analyzed', 0)} job(s).{err_tail} Want tailored CVs or suggestions next?"
         if stage == "enhance":
@@ -466,6 +469,17 @@ def _confirm_reply(tool: str, result: dict) -> str:
         extra = f" ({files} attached CV file(s) removed)" if files else ""
         return (f"Done — removed {result.get('deleted', 0)} disqualified job(s){extra}. Want me "
                 f"to re-qualify what's left, or analyze the qualified set?")
+    if tool == "delete_unscored_jobs":
+        files = result.get("files_deleted") or 0
+        extra = f" ({files} attached CV file(s) removed)" if files else ""
+        return (f"Done — removed {result.get('deleted', 0)} unscored job(s){extra}; your scored "
+                f"jobs are untouched. Want me to re-run scouting to bring in fresh ones?")
+    if tool == "delete_all_jobs":
+        files = result.get("files_deleted") or 0
+        extra = f" and {files} attached CV file(s)" if files else ""
+        return (f"Done — the pool is empty: deleted {result.get('deleted', 0)} job(s){extra} and "
+                f"everything under them. Your resume, settings and application log are still here. "
+                f"Want me to run scouting to fill it again?")
     if tool == "delete_user_data":
         return "Done — all of your data has been erased."
     return f"Done — {tool}."

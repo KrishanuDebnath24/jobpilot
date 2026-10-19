@@ -100,12 +100,16 @@ def cv_prepare(user_id: str, job_ids: list[str]) -> dict:
 
 
 @celery.task(name="cv.gap_close")
-def cv_gap_close(user_id: str, job_ids: list[str]) -> dict:
+def cv_gap_close(user_id: str, job_ids: list[str], refine: bool = False) -> dict:
     """Phase 6.6: propose gap-closing CV content per selected job (unconstrained by résumé
-    evidence). Proposals only — nothing reaches a CV until the user accepts each item."""
+    evidence). Proposals only — nothing reaches a CV until the user accepts each item.
+
+    ``refine`` runs propose -> critique -> propose: a second agent reviews the set for
+    defensibility and writing quality, and the proposer answers the findings. Costs up to
+    two extra calls per job, so it is a separate user action rather than the default."""
     from .gap_close_runner import run_gap_close
 
-    return run_async(run_gap_close(uuid.UUID(user_id), job_ids))
+    return run_async(run_gap_close(uuid.UUID(user_id), job_ids, refine=refine))
 
 
 @celery.task(name="cv.requalify")

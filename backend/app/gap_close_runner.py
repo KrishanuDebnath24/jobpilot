@@ -19,7 +19,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from jobpilot_core import gap_closer
+from jobpilot_core import gap_closer, gap_critic
 from jobpilot_core.llm import LLMUsage
 from jobpilot_core.settings import get_settings
 
@@ -72,7 +72,51 @@ async def _ensure_analyses(
     return await _analyses_by_job(user_id)
 
 
-async def run_gap_close(user_id: uuid.UUID, job_ids: list[str]) -> dict:
+async def _refine(
+    shaped: dict,
+    analysis: dict,
+    resume: dict,
+    settings,
+    usage: LLMUsage,
+    jid: str,
+    errors: dict,
+) -> dict:
+    """Critique the proposals, then re-propose against that critique.
+
+    Returns the improved set, or the original unchanged whenever the extra work would not
+    pay for itself: a critic that finds nothing, or a second pass that comes back empty.
+    Failures here are deliberately non-fatal — a refine that breaks should cost the user
+    the improvement, not the proposals they already have.
+    """
+    try:
+        verdict = await gap_critic.critique_proposals(shaped, analysis, settings)
+        if not verdict.data:
+            return shaped
+        usage.add(verdict.usage.input_tokens, verdict.usage.output_tokens,
+                  cache_read=verdict.usage.cache_read_input_tokens,
+                  cache_creation=verdict.usage.cache_creation_input_tokens)
+        if not gap_critic.needs_revision(verdict.data):
+            # The critic passed it. A second propose call would spend tokens to churn
+            # content the reviewer already judged good.
+            return shaped
+
+        second = await gap_closer.propose_gap_close(
+            analysis, resume, settings,
+            critique=gap_critic.critique_block(verdict.data),
+        )
+        if not second.data:
+            return shaped
+        usage.add(second.usage.input_tokens, second.usage.output_tokens,
+                  cache_read=second.usage.cache_read_input_tokens,
+                  cache_creation=second.usage.cache_creation_input_tokens)
+        return gap_closer.with_item_ids(second.data)
+    except Exception as exc:  # noqa: BLE001 - keep the first-pass proposals
+        logger.warning("gap_close.refine id=%s failed, keeping first pass: %s", jid, exc)
+        errors[f"{jid}:refine"] = f"{type(exc).__name__}: {exc}"
+        return shaped
+
+
+async def run_gap_close(user_id: uuid.UUID, job_ids: list[str], refine: bool = False) -> dict:
     """Propose gap-closing CV content for each selected job. Returns per-job counts plus
     the proposal sets, so the UI can render them for review without a second round-trip.
 
@@ -89,6 +133,7 @@ async def run_gap_close(user_id: uuid.UUID, job_ids: list[str]) -> dict:
 
     state: dict = {
         "phase": "starting",
+        "refine": refine,
         "requested": requested,
         "total": len(job_ids),
         # > 0 means the spend guard (gap_close_max_jobs) dropped the tail of the selection.
@@ -134,7 +179,7 @@ async def run_gap_close(user_id: uuid.UUID, job_ids: list[str]) -> dict:
         errors["_analyze"] = f"{type(exc).__name__}: {exc}"
         analyses = await _analyses_by_job(user_id)
 
-    await report(phase="proposing", errors=errors)
+    await report(phase="refining" if refine else "proposing", errors=errors)
 
     for jid in job_ids:
         analysis = analyses.get(jid)
@@ -152,13 +197,19 @@ async def run_gap_close(user_id: uuid.UUID, job_ids: list[str]) -> dict:
                       cache_read=res.usage.cache_read_input_tokens,
                       cache_creation=res.usage.cache_creation_input_tokens)
             shaped = gap_closer.with_item_ids(res.data)
+
+            if refine:
+                shaped = await _refine(
+                    shaped, analysis, resume, settings, usage, jid, errors
+                )
             await mcp_client.db_mcp(user_id, "upsert_gap_close",
                                     {"job_id": jid, "gap_close": shaped})
             jobs_out[jid] = shaped
         except Exception as exc:  # noqa: BLE001 - one bad job must not sink the batch
             errors[jid] = f"{type(exc).__name__}: {exc}"
             logger.warning("gap_close.job id=%s FAILED: %s", jid, exc)
-        await report(phase="proposing", done=len(jobs_out), errors=errors)
+        await report(phase="refining" if refine else "proposing",
+                     done=len(jobs_out), errors=errors)
 
     summary = {
         "proposed": len(jobs_out),

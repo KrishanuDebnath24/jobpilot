@@ -93,13 +93,16 @@ def _attested_trail(attested: dict | None) -> dict:
                    for it in (att.get("new_bullets") or []) if isinstance(it, dict)]
     rewrites = [{"role_ref": it.get("role_ref"), "after": it.get("after")}
                 for it in (att.get("bullet_rewrites") or []) if isinstance(it, dict)]
-    if not (skills or new_bullets or rewrites):
+    project_rewrites = [{"project_ref": it.get("project_ref"), "after": it.get("after")}
+                        for it in (att.get("project_rewrites") or []) if isinstance(it, dict)]
+    if not (skills or new_bullets or rewrites or project_rewrites):
         return {}
     return {
         "user_attested": {
             "skills": skills,
             "new_bullets": new_bullets,
             "bullet_rewrites": rewrites,
+            "project_rewrites": project_rewrites,
             "note": "The candidate confirmed these items themselves; they are not backed by "
                     "résumé citations. Interview prep is on the candidate.",
         }

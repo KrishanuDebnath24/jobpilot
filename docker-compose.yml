@@ -128,6 +128,13 @@ services:
         required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-jobpilot}:${POSTGRES_PASSWORD:-jobpilot_dev_pw}@db:5432/${POSTGRES_DB:-jobpilot}
+      # config-mcp embeds answer-bank questions for near-match, but the MCP image carries
+      # no torch — so it has ALWAYS used the hashing backend, by accident of a missing
+      # dependency. Declared here instead: the answer bank's stored and query vectors both
+      # come from this service, so hashing is self-consistent and near-match works. Stating
+      # it also immunises the bank against someone adding sentence-transformers to the MCP
+      # image later, which would silently split its vector space against existing rows.
+      EMBEDDING_BACKEND: hashing
     ports:
       - "8003:8003"
     depends_on:

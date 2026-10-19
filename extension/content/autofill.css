@@ -1,0 +1,122 @@
+/*
+ * Provenance, made visible.
+ *
+ * The point of the highlighting is not decoration — it is that the user can tell at a
+ * glance which answers came from somewhere they authored and which ones are still theirs
+ * to write. A green field means "this traces to your profile or an answer you gave"; an
+ * amber one means "nobody has answered this yet".
+ *
+ * Everything is namespaced and scoped tightly because this stylesheet lands on other
+ * people's pages, where a loose selector would break their layout.
+ */
+
+.jp-filled,
+.jp-ask,
+.jp-blocked {
+  outline-offset: 1px !important;
+  border-radius: 4px;
+}
+.jp-filled { outline: 2px solid #059669 !important; background-color: rgba(5, 150, 105, 0.06) !important; }
+.jp-ask { outline: 2px solid #d97706 !important; background-color: rgba(217, 119, 6, 0.07) !important; }
+.jp-blocked { outline: 2px solid #dc2626 !important; background-color: rgba(220, 38, 38, 0.06) !important; }
+
+.jp-badge {
+  display: block;
+  margin: 3px 0 6px;
+  font: 500 11px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  letter-spacing: 0.01em;
+}
+.jp-badge-filled { color: #047857; }
+.jp-badge-ask { color: #b45309; }
+.jp-badge-blocked { color: #b91c1c; }
+
+.jp-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483647; /* ATS modals go high; this has to go higher to stay readable */
+  width: 320px;
+  max-height: 70vh;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 14px 16px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #0f172a;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.16);
+  font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.jp-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #475569;
+}
+.jp-panel-head strong { font-weight: 700; color: #0f172a; }
+.jp-dot { width: 8px; height: 8px; border-radius: 50%; background: #059669; }
+.jp-dot-warn { background: #d97706; }
+
+.jp-close {
+  margin-left: auto;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  color: #94a3b8;
+  padding: 0 2px;
+}
+.jp-close:hover { color: #0f172a; }
+
+.jp-lede { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+.jp-stats { margin: 0 0 10px; padding-left: 16px; color: #475569; }
+.jp-stats li { margin: 2px 0; }
+.jp-stats b { color: #0f172a; }
+
+.jp-gaps-title {
+  margin: 10px 0 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #b45309;
+}
+.jp-gaps { margin: 0; padding-left: 18px; }
+.jp-gaps li { margin: 5px 0; cursor: pointer; }
+.jp-gaps li:hover span { text-decoration: underline; }
+.jp-gaps span { font-weight: 600; }
+.jp-gaps em { display: block; font-style: normal; font-size: 11.5px; color: #64748b; }
+
+.jp-note {
+  margin: 10px 0 0;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 11.5px;
+}
+
+.jp-foot {
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid #f1f5f9;
+  font-size: 11.5px;
+  color: #64748b;
+}
+
+@media (prefers-color-scheme: dark) {
+  .jp-panel { background: #0f172a; color: #e2e8f0; border-color: #1e293b; }
+  .jp-panel-head { color: #94a3b8; }
+  .jp-panel-head strong { color: #f1f5f9; }
+  .jp-stats { color: #94a3b8; }
+  .jp-stats b { color: #f1f5f9; }
+  .jp-gaps em, .jp-foot { color: #94a3b8; }
+  .jp-foot { border-top-color: #1e293b; }
+  .jp-note { background: #422006; color: #fcd34d; }
+}

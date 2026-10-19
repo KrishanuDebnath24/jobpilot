@@ -454,20 +454,43 @@ async def embedding_coverage() -> dict:
 
 
 @mcp.tool()
-async def semantic_search_jobs(embedding: list[float], limit: int = 8) -> dict:
+async def semantic_search_jobs(
+    embedding: list[float],
+    limit: int = 8,
+    company: str | None = None,
+    decision: str | None = None,
+    since_days: int | None = None,
+    employment_type: str | None = None,
+    seniority: str | None = None,
+) -> dict:
     """Nearest jobs to a query ``embedding`` by cosine similarity (semantic — for FUZZY
-    questions only; counts/aggregates use the exact tools). Each carries ``similarity``."""
+    questions only; counts/aggregates use the exact tools). Each carries ``similarity``.
+
+    The optional filters narrow the candidates BEFORE ranking, so a scoped fuzzy question
+    ("senior roles at Stripe about payments, this month") is one query rather than a broad
+    search the caller filters afterwards."""
     uid = require_user_id()
     async with session_scope() as session:
-        return {"jobs": await repositories.semantic_search_jobs(session, uid, embedding, limit=limit)}
+        return {"jobs": await repositories.semantic_search_jobs(
+            session, uid, embedding, limit=limit, company=company, decision=decision,
+            since_days=since_days, employment_type=employment_type, seniority=seniority)}
 
 
 @mcp.tool()
-async def semantic_search_analyses(embedding: list[float], limit: int = 8) -> dict:
-    """Nearest job analyses to a query ``embedding`` by cosine similarity."""
+async def semantic_search_analyses(
+    embedding: list[float],
+    limit: int = 8,
+    company: str | None = None,
+    since_days: int | None = None,
+    seniority: str | None = None,
+) -> dict:
+    """Nearest job analyses to a query ``embedding`` by cosine similarity. ``company``
+    filters through the analysed job; ``seniority`` is the Analyzer's own inference."""
     uid = require_user_id()
     async with session_scope() as session:
-        return {"analyses": await repositories.semantic_search_analyses(session, uid, embedding, limit=limit)}
+        return {"analyses": await repositories.semantic_search_analyses(
+            session, uid, embedding, limit=limit, company=company,
+            since_days=since_days, seniority=seniority)}
 
 
 # --------------------------------------------------------------------------- #
@@ -553,6 +576,29 @@ async def delete_disqualified_jobs() -> dict:
 
 
 @mcp.tool()
+async def delete_unscored_jobs() -> dict:
+    """Delete every job the caller has never had qualified (no qualification row at all);
+    scored jobs — qualified or disqualified — are kept. Children cascade and their rendered
+    CV files are removed. Returns ``{deleted, files_deleted}``."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        ids = await repositories.unscored_job_ids(session, uid)
+    return await _delete_jobs_and_files(uid, ids)
+
+
+@mcp.tool()
+async def delete_all_jobs() -> dict:
+    """Empty the caller's job pool: delete EVERY job they own, scored or not, with children
+    cascading and rendered CV files removed. Scope comes from the trusted context, so this
+    can only ever clear the caller's own pool — their resume, configs, chat history and
+    application log are untouched. Returns ``{deleted, files_deleted}``."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        ids = await repositories.all_job_ids(session, uid)
+    return await _delete_jobs_and_files(uid, ids)
+
+
+@mcp.tool()
 async def delete_user_data(user_id: str | None = None) -> dict:
     """GDPR erasure: hard-delete every row keyed to the caller (cascade) AND their
     stored resume files. ``user_id`` argument is IGNORED; scope comes from context.
@@ -603,6 +649,103 @@ async def get_apply_coverage() -> dict:
     uid = require_user_id()
     async with session_scope() as session:
         return {"coverage": await repositories.get_apply_coverage(session, uid)}
+
+
+# --------------------------------------------------------------------------- #
+# Applications (apply agent, stage 4) — what was actually sent
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+async def record_application(
+    job_id: str,
+    company: str | None = None,
+    job_title: str | None = None,
+    employer_slug: str | None = None,
+    cv_source: str = "none",
+    cv_draft_id: str | None = None,
+    cv_label: str | None = None,
+    answers_recorded: int = 0,
+    source: str = "extension",
+) -> dict:
+    """Log a submitted application (idempotent per job — a multi-step form folds in).
+
+    ``job_id`` is required: an application nobody can attribute to an employer is not
+    worth a row. Returns the stored record plus ``created``, so the caller can tell a
+    first submit from a later step of the same form.
+    """
+    uid = require_user_id()
+    if not job_id:
+        return {"error": "job_id is required to record an application"}
+    if cv_source not in ("tailored", "original", "none"):
+        return {"error": f"cv_source must be tailored|original|none, got {cv_source!r}"}
+    async with session_scope() as session:
+        return {
+            "application": await repositories.record_application(
+                session,
+                uid,
+                job_id=uuid.UUID(job_id),
+                company=company,
+                job_title=job_title,
+                employer_slug=employer_slug,
+                cv_source=cv_source,
+                cv_draft_id=uuid.UUID(cv_draft_id) if cv_draft_id else None,
+                cv_label=cv_label,
+                answers_recorded=answers_recorded,
+                source=source,
+            )
+        }
+
+
+@mcp.tool()
+async def get_applications(limit: int = 500) -> dict:
+    """Every application the caller has logged, most recent first."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        return {"applications": await repositories.get_applications(session, uid, limit=limit)}
+
+
+@mcp.tool()
+async def application_company_summary() -> dict:
+    """Applications grouped by employer, with the count of DISTINCT CVs sent to each.
+
+    ``repeats`` holds the employers applied to more than once — the exact answer to "am I
+    sending one company several different tailored CVs?".
+    """
+    uid = require_user_id()
+    async with session_scope() as session:
+        return {"summary": await repositories.application_company_summary(session, uid)}
+
+
+# --------------------------------------------------------------------------- #
+# Agent events — the Query agent's trace store. Not reachable from any agent's
+# toolset: the runner writes traces and the dashboard reads them. Keeping them off
+# the Query agent's tool list is deliberate — an agent that can read its own trace
+# log can be asked to summarise questions from other sessions it never answered.
+# --------------------------------------------------------------------------- #
+@mcp.tool()
+async def record_agent_event(type: str, payload_json: dict | None = None,
+                             keep: int | None = None) -> dict:
+    """Append one agent event (a Query turn trace) for the caller.
+
+    ``keep`` prunes the caller's own older events of the same type in the same
+    transaction, so the log self-bounds without a sweeper.
+    """
+    uid = require_user_id()
+    async with session_scope() as session:
+        ev = await repositories.record_agent_event(session, uid, type, payload_json or {})
+        pruned = (await repositories.prune_agent_events(session, uid, type, keep)
+                  if keep is not None else 0)
+        return {"event": repositories.agent_event_to_dict(ev), "pruned": pruned}
+
+
+@mcp.tool()
+async def list_agent_events(type: str | None = None, limit: int = 100,
+                            since_days: int | None = None) -> dict:
+    """The caller's agent events, newest first."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        events = await repositories.list_agent_events(
+            session, uid, event_type=type, limit=min(max(limit, 1), 500), since_days=since_days)
+        return {"events": [repositories.agent_event_to_dict(e) for e in events]}
 
 
 # ASGI app: validate the signed context on every request, bind user_id for the call.

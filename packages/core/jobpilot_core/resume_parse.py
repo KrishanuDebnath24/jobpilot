@@ -53,14 +53,133 @@ def extract_text(data: bytes, mime: str) -> str:
     raise UnsupportedResumeType(mime)
 
 
-def _extract_pdf(data: bytes) -> str:
+# --------------------------------------------------------------------------- #
+# PDF text extraction
+#
+# pdfplumber decides where one word ends and the next begins by measuring the horizontal
+# gap between glyphs, and its default ``x_tolerance`` of 3 points is wider than the
+# inter-word gap in plenty of real CV templates — tight tracking, condensed faces, and
+# most of the "one page, dense" designs people actually use. When the gap is narrower than
+# the tolerance, every word on the page is welded to its neighbour:
+#
+#     BuiltaLangGraphcontrolplanewithPostgrescheckpointing...
+#
+# which is catastrophic downstream and completely silent. The LLM parser recovers enough
+# structure from word-soup to produce a plausible-looking résumé, so nothing errors; but
+# ``cv_fields._evidence_supported`` matches skill citations on *content words*, and a
+# bullet with no word boundaries matches nothing. The evidence gate then deletes true
+# skills for want of a space. Measured on one real CV: 95 "words" at the default, 827 at
+# ``x_tolerance=1.5``.
+#
+# Lowering the tolerance unconditionally is not the fix — too low and the opposite failure
+# appears, with words shattered into fragments. So the tolerance is *chosen per document*
+# against a quality score, and only when the default output looks broken.
+# --------------------------------------------------------------------------- #
+
+#: Candidate tolerances, tried when the default output looks welded. Descending so that a
+#: tie is settled by the most conservative (closest to the library default) value.
+_X_TOLERANCES: tuple[float, ...] = (2.0, 1.5, 1.0, 0.5)
+
+#: A token longer than this is not a word. Real prose tops out well below it; the longest
+#: things in a healthy CV are URLs, of which there are a handful.
+_MAX_WORD_LEN = 25
+
+#: Share of *characters* sitting inside over-long tokens, above which the text is judged
+#: welded. Measured in characters rather than tokens on purpose: welding works by merging
+#: tokens, so the worse it is the fewer tokens there are, and any token-count-based
+#: threshold switches itself off exactly when the damage is greatest. A fully welded page
+#: can be three tokens long. Characters are conserved either way.
+_WELDED_CHAR_RATIO = 0.25
+
+#: Below this much text there is nothing to judge — an image-only scan extracts to almost
+#: nothing, and that is a different problem with a different answer.
+_MIN_CHARS_TO_JUDGE = 200
+
+
+def _word_score(text: str) -> int:
+    """How many tokens look like real words — the objective the tolerance sweep maximises.
+
+    Counts tokens of 2 to 20 characters, which is the band ordinary prose lives in. It is
+    two-sided on purpose, and that is the whole reason it works as a selection rule:
+    welding words together pushes tokens *above* the band, shattering them pushes tokens
+    *below* it, and both therefore score worse than the correct extraction. On a real CV
+    the score peaked at exactly the tolerances that produced clean text and fell away on
+    either side.
+    """
+    return sum(1 for t in text.split() if 2 <= len(t) <= 20)
+
+
+def _looks_welded(text: str) -> bool:
+    """Whether adjacent words appear to have been run together.
+
+    Weighted by character count so that severity and detectability move in the same
+    direction: a page welded into three enormous tokens scores ~1.0, while a healthy CV
+    carrying two long profile URLs among 800 words scores a few percent.
+    """
+    tokens = text.split()
+    body = sum(len(t) for t in tokens)
+    if body < _MIN_CHARS_TO_JUDGE:
+        return False
+    welded = sum(len(t) for t in tokens if len(t) > _MAX_WORD_LEN)
+    return welded / body > _WELDED_CHAR_RATIO
+
+
+def _plumber_text(data: bytes, x_tolerance: float | None = None) -> str:
     import pdfplumber
 
+    kwargs = {} if x_tolerance is None else {"x_tolerance": x_tolerance}
     parts: list[str] = []
     with pdfplumber.open(io.BytesIO(data)) as pdf:
         for page in pdf.pages:
-            parts.append(page.extract_text() or "")
+            parts.append(page.extract_text(**kwargs) or "")
     return "\n".join(parts).strip()
+
+
+def _pypdf_text(data: bytes) -> str:
+    """Second opinion from a different engine, for the rare PDF pdfplumber cannot space.
+
+    pypdf is already a dependency (``tailor.pdf_text`` reads exported CVs with it), so
+    this costs nothing to keep in reserve. It is a fallback rather than the primary
+    because pdfplumber handles multi-column and table-based CV layouts more faithfully,
+    and those are common.
+    """
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(data))
+    return "\n".join((page.extract_text() or "") for page in reader.pages).strip()
+
+
+def _extract_pdf(data: bytes) -> str:
+    """Text from a PDF, with word spacing verified rather than assumed.
+
+    The default extraction is returned untouched whenever it looks healthy, so the
+    overwhelmingly common case pays one pass and behaves exactly as before. Only a
+    document showing the welded signature is re-extracted across candidate tolerances.
+    """
+    best = _plumber_text(data)
+    if not _looks_welded(best):
+        return best
+
+    best_score = _word_score(best)
+    for tolerance in _X_TOLERANCES:
+        try:
+            candidate = _plumber_text(data, tolerance)
+        except Exception:  # noqa: BLE001 - a tolerance that upsets the parser is just skipped
+            continue
+        score = _word_score(candidate)
+        if score > best_score:
+            best, best_score = candidate, score
+
+    # Still welded after the sweep: this document's glyph spacing does not carry word
+    # breaks at all, so try the other engine before giving up on it.
+    if _looks_welded(best):
+        try:
+            fallback = _pypdf_text(data)
+        except Exception:  # noqa: BLE001 - fallback is best-effort; keep what we have
+            return best
+        if _word_score(fallback) > best_score:
+            return fallback
+    return best
 
 
 def _extract_docx(data: bytes) -> str:
@@ -148,12 +267,38 @@ _RESUME_SCHEMA = {
             },
         },
         "certifications": {"type": "array", "items": {"type": "string"}},
+        "projects": {
+            "type": "array",
+            "description": "The CV's Projects section, one entry per project. A project is "
+                           "structurally a role: it has a name, the stack it used, a date "
+                           "range and bullets. Split them into those fields rather than "
+                           "returning the raw lines, and never fold projects into experience.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string",
+                             "description": "the project's name only — NOT the tech stack "
+                                            "or dates that share its header line"},
+                    "tech": {"type": ["string", "null"],
+                             "description": "the technologies listed on the header line, "
+                                            "usually after a '|'. null if none are given"},
+                    "dates": {"type": ["string", "null"],
+                              "description": "the project's date range, e.g. "
+                                             "'Feb. 2026 - Present'. null if absent"},
+                    "bullets": {"type": "array", "items": {"type": "string"},
+                                "description": "each bullet under the project, in order"},
+                },
+                "required": ["name", "tech", "dates", "bullets"],
+                "additionalProperties": False,
+            },
+        },
         "additional_sections": {
             "type": "array",
             "description": "EVERY other headed section the CV carries that none of the fields "
-                           "above covers — Projects, Publications, Languages, Volunteering, "
-                           "Awards, Interests. One entry per heading, in the order the CV has "
-                           "them. Never fold these into experience, and never drop one.",
+                           "above covers — Publications, Languages, Volunteering, Awards, "
+                           "Interests. One entry per heading, in the order the CV has them. "
+                           "Do NOT put Projects here — they have their own field above. "
+                           "Never fold these into experience, and never drop one.",
             "items": {
                 "type": "object",
                 "properties": {
@@ -172,7 +317,7 @@ _RESUME_SCHEMA = {
         },
     },
     "required": ["contact", "summary", "total_years_experience", "skills", "experience",
-                 "education", "certifications", "additional_sections"],
+                 "education", "certifications", "projects", "additional_sections"],
     "additionalProperties": False,
 }
 
@@ -187,9 +332,13 @@ def _user_text(resume_text: str) -> str:
         f"<resume>\n{safe}\n</resume>\n\n"
         "Extract every section. Split experience into separate roles (title, company, "
         "location, dates, bullets), merging wrapped lines — a role's location and dates are "
-        "often at opposite ends of the same two lines as its title and employer. Put every "
-        "OTHER headed section (Projects, Publications, Languages, ...) in additional_sections "
-        "so none is lost. Extract skills as individual items, not category headings. "
+        "often at opposite ends of the same two lines as its title and employer. "
+        "Projects go in the dedicated projects field, split into name / tech / dates / "
+        "bullets — a project header line like 'Platform Name | Python, Docker  Feb. 2026 - "
+        "Present' carries all three, so separate them rather than returning the raw line. "
+        "Put every OTHER headed section (Publications, Languages, ...) in "
+        "additional_sections so none is lost. Extract skills as individual items, not "
+        "category headings. "
         "For total_years_experience, sum the durations of the WORK roles only "
         "(exclude education); treat 'Present'/'Current' as today's date above; count "
         "overlapping periods once; round to one decimal. Leave a field null (or an empty "

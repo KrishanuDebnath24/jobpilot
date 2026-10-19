@@ -1077,3 +1077,840 @@ Stripe, Datadog, Cloudflare) are overwhelmingly non-Irish.
   mid-document (Tines 9,872; Amach 8,387; Nearform 7,686). Requirements sit late in a
   posting, so the cap was removing exactly what qualifying and tailoring need. Now
   `ats_max_text_chars`, default 20,000.
+
+---
+
+## Apply agent, stage 3 — autofill in the user's own browser
+
+Stage 3 of the design plan (form schema → resolution ladder → review) shipped as an
+**Auto-apply button per job plus a browser extension**, rather than as the headless
+scrape-and-review flow the plan sketched. Same ladder, different execution surface.
+
+### Why an extension and not `apply-mcp` + Playwright
+
+The plan reserved `apply-mcp` on :8006 for the stage where a browser appears. It is not
+needed for this one, and choosing it would have been worse on four counts:
+
+- **Sessions.** A container's Chromium carries none of the user's logins. Workday,
+  SmartRecruiters and iCIMS all gate their forms behind an account, so a server-side
+  browser starts every one of those at a login wall the user is already past in their own
+  browser.
+- **Bot protection.** Filling from the user's real browser, at human speed, under their
+  own session, *is* an ordinary human filling in a form. A datacentre browser is the thing
+  every ATS's protection is looking for — and stage 2 already set the rule that we do not
+  work around hosts that refuse us.
+- **Cost.** No Playwright image, no sixth service, no screencast transport. The extension
+  is ~700 lines of vanilla JS with no build step.
+- **The gate is free.** "The user reviews before submitting" needs no `before_submit`
+  gate, no plan-then-execute split and no second browser session, because the form is
+  already on their screen and the Submit button is already theirs. The design plan's
+  two-phase execution existed to avoid holding a browser open while the user deliberates;
+  when the browser is the user's own, that problem does not arise. **No `before_submit`
+  gate was added** — the extension has no code path that can submit.
+
+The trade is that the extension is a one-time "Load unpacked" install, and it only reaches
+the ~20 ATS hosts in its match list without an explicit per-tab click.
+
+### The server never touches the page
+
+The extension posts field *descriptors* (label, type, options, required) and gets back
+values with provenance. `ref` is the extension's own handle, echoed untouched — the server
+never sees a selector and has no way to address the DOM. Autofill is therefore something
+the page asks for, not something done to it.
+
+The bearer token lives only in the service worker; content scripts run on employers' pages
+and ask for answers, never for credentials. Service-worker fetches backed by
+`host_permissions` are exempt from CORS, so `FRONTEND_ORIGIN` stays a single origin instead
+of having to admit every ATS domain a form might live on.
+
+### `jobs.apply_url` carries the job id in a fragment
+
+`#jobpilot=<id>`, stripped by the content script on read. A fragment is never sent to a
+server, so the id stays out of the employer's access log; a query parameter would not.
+Cross-origin iframes cannot see the top frame's fragment, so the service worker holds the
+tab→job association in `chrome.storage.session` and hands it to whichever frame asks.
+
+### Locked categories are checked *before* the alias map
+
+`apply_fill.plan_field` runs `locked_category()` first. `apply_profile.match_field` ends in
+a generous longest-alias containment pass, and "What country are you legally authorised to
+work in?" contains "country" — resolving it at Tier A would answer a legal question with a
+residence fact. The firewall is only a firewall if it runs before the fuzzy step.
+
+### A resolved value that no option carries escalates
+
+Filling "4 weeks" into a select offering only "Immediately / 1 month / 3 months" either
+selects nothing or selects the wrong thing, both silently. `match_option` is deliberately
+conservative: exact, then yes/no equivalence, then single-candidate containment — and two
+yes-flavoured options ("Yes, immediately" / "Yes, with notice") escalate rather than pick.
+
+### Only empty fields are filled
+
+A field already carrying a value was pre-filled by the ATS from an account or typed by the
+user. Both beat a stored answer, and overwriting is how an autofill quietly changes an
+answer someone meant.
+
+### Learning distinguishes reuse from re-authoring
+
+`edited` is computed in the content script, which is the only place that knows what was in
+the box when we let go of it. Unchanged bank hits get a `times_used` bump; corrected ones
+overwrite. `mark_answers_used` deliberately leaves `confirmed_at` alone, so the staleness
+clock on "what is your notice period?" keeps running even while the answer is reused —
+otherwise a drifting answer looks freshest exactly when it is being reused most.
+
+Employer-specific questions ("why do you want to work here?") bank under
+`employer:<slug>`, matched against the *plain* normalised label as well as the bank key,
+because `normalise_question` strips "do you" and would defeat a pattern written the way a
+human writes it.
+
+### Two stage-1 bugs found by using stage 1 for real
+
+- `LOCKED_CATEGORIES["security_clearance"]` listed "security clearance", "clearance level",
+  "sc cleared" — and matched none of them against "Do you hold a current SC clearance?",
+  the design plan's own worked example. Now keyed on bare `"clearance"`.
+- `normalise_label` strips anything outside `[a-z0-9 ]`, so "résumé" became "r sum " and an
+  ordinary CV upload label matched nothing. Folded to ASCII in `apply_fill._folded` rather
+  than in `normalise_label`, because that function derives `question_norm` — the bank's
+  stored key — and changing how a stored key is computed orphans every existing row.
+
+Verified against the live database: a Greenhouse-shaped 12-field form resolved 6 from the
+profile plus the CV, escalated 4, skipped the password, and answered *both* Irish
+eligibility questions correctly in opposite directions (authorised Yes / sponsorship No).
+Banking two of the escalations took it to 8 filled and 0 required gaps — the compounding
+coverage the plan predicted, measured.
+
+---
+
+## The tailor was ignoring Projects — and deleting the skills they evidenced
+
+Reported as "it ignores the projects section completely". It was worse than that: the
+honesty machinery was running backwards on those sections, suppressing true claims.
+
+Extra headed sections (Projects, Publications, Volunteering) live in
+`additional_sections`. Three independent places behaved as though they did not exist, and
+the combination was invisible from the outside because each one masked the next.
+
+### 1. The models were never shown them
+
+`analyzer._resume_block` emits skills, summary, experience, education and certifications —
+never `additional_sections`. That function is the résumé view for the Analyzer, Enhancer,
+Gap-closer **and** the Rewriter. So the rewriter was told via `_headers_block` that a
+header called "Projects" existed and must survive, was offered an `additional_sections`
+field to return, and was never shown a word of what it contained. It could not reword what
+it had not seen, and inventing content is exactly what the integrity rules forbid.
+
+It also capped experience at ten roles and **four bullets each**, while being asked to
+return every bullet — so a role's fifth bullet was invisible to the rewriter and silently
+lost from the draft.
+
+Fixed by giving the tailoring path its own `cv_rewriter._full_resume_block`: uncapped,
+every role, every bullet, certifications and every extra section. Affordable precisely
+here because it is the cached prefix, identical across rounds and jobs and shared
+byte-for-byte with the Critic. `analyzer._resume_block` stays a digest for the Analyzer
+(whose per-job cost scales with the pool) but now names the extra sections, capped — the
+Analyzer needs them so `gaps_vs_resume` stops reporting gaps the CV already closed, which
+was sending the Gap-closer off proposing projects the user had already built.
+
+### 2. A project was not admissible evidence
+
+`cv_fields._base_text` — the haystack `validate_no_fabricated_skills` and
+`validate_skill_evidence` search — omitted `additional_sections` **and** `certifications`.
+So a skill whose only evidence was a real project was found nowhere and deleted from the
+draft as a fabrication. Measured on a synthetic CV: "Kubernetes" and "Terraform", each
+named in a genuine project, were both stripped, and citations quoting those projects were
+rejected as "does not appear in the real resume". A skill evidenced by an AWS certification
+went the same way.
+
+The gate exists to stop invented claims reaching an exported document. Removing true ones
+is the opposite failure, and the more damaging of the two, because the user cannot see it
+happen. Anything printed on the CV is something the candidate can stand behind, so
+anything printed on the CV belongs in the haystack. `test_a_genuinely_invented_skill_is_still_caught`
+pins that the widening did not become a hole.
+
+### 3. Optional meant omitted, and the passthrough hid it
+
+`additional_sections` was not in `CV_SCHEMA["required"]`, so the model routinely left the
+key out; `carry_passthrough_sections` then restored the base copy verbatim. The section
+arrived on the exported CV present and untouched — indistinguishable from a tailoring pass
+that had considered it and changed nothing. Now required, with the schema and INTEGRITY
+text saying explicitly that a Projects entry is reworded like an experience bullet.
+
+### The passthrough had to get stronger, not weaker
+
+Once the rewriter actually authors this field, a new failure becomes possible that could
+not happen before: returning Projects but forgetting Publications, or returning a heading
+with its items emptied. `carry_passthrough_sections` now merges per heading (normalised, so
+a re-cased "PROJECTS" is the same section rather than a duplicate): a tailored section is
+kept as tailored, a missing or hollow one falls back to the real copy, and a heading the
+rewriter *invented* is dropped — sections come from the real CV, and a new header is a new
+claim about the candidate.
+
+Covered by `backend/tests/test_cv_projects.py` (14 tests), which pins each layer
+separately, since any one of them regressing alone reproduces the whole symptom.
+
+---
+
+## PDF résumés were extracting as one welded word per line
+
+Found while answering "do I need to re-upload?". `_extract_pdf` called pdfplumber's
+`page.extract_text()` bare, and pdfplumber infers word boundaries from the horizontal gap
+between glyphs using a default `x_tolerance` of **3 points**. Plenty of real CV templates
+set inter-word gaps narrower than that — tight tracking, condensed faces, the dense
+one-page designs people actually use — and when they do, every word on the page is welded
+to its neighbour:
+
+```
+BuiltaLangGraphcontrolplanewithPostgrescheckpointingsequencingeightcooperatingClaudeagents
+```
+
+Measured on a real CV in the database: **95 "words" at the default, 827 at
+`x_tolerance=1.5`**. The same CV as `.docx` extracted to 914 words, which is what made the
+PDF path's failure visible at all.
+
+### What it actually broke — narrower than it looks, and worth stating exactly
+
+Grounding checks test whether a normalised skill appears in the résumé text **as a
+substring**. So welding leaves *single-word* skills perfectly findable — `"langgraph"` is
+still inside `"builtalanggraphcontrolplane"` — and they survive by luck. Multi-word skills
+do not: the haystack has no spaces left to match against, so `validate_no_fabricated_skills`
+judges them fabricated and `drop_fabricated_skills` deletes them. Certifications and
+framework names are overwhelmingly multi-word, which is precisely the wrong population to
+lose. Evidence *citations* survive too, because `_evidence_supported` falls back to
+per-content-word substring matching — a first reading of this bug wrongly blamed the
+evidence gate, and the tests now pin the real boundary so the wrong thing does not get
+"fixed" later.
+
+Nothing errors, which is why it stayed hidden: the LLM parser reconstructs enough structure
+from word-soup to emit a plausible-looking résumé.
+
+### Chosen per document, not globally
+
+Lowering `x_tolerance` unconditionally trades one failure for its mirror image — too low
+and words shatter into fragments. So the tolerance is selected per document against a
+quality score, and only when the default output looks broken:
+
+* `_word_score` counts tokens of 2–20 characters. It is **two-sided on purpose**, and that
+  is the whole reason it can pick a winner: welding pushes tokens above the band,
+  shattering pushes them below, so both score worse than the correct extraction. Measured
+  across tolerances on the real CV, the score peaked at exactly 1.5–2.0 and fell away on
+  both sides.
+* `_looks_welded` measures the share of **characters** inside over-long tokens, not the
+  share of tokens. The first version gated on a minimum token count and was exactly
+  backwards: welding works by merging tokens, so the worse the damage the fewer tokens
+  there are, and a token-count floor switches detection off precisely when it matters. A
+  fully welded page can be three tokens long. Caught by a synthetic fixture that welded
+  harder than the real CV did.
+* A healthy document returns from the first pass untouched — verified byte-identical to
+  the old behaviour — so the common case pays 57ms and one extraction. The sweep costs
+  ~550ms and only runs on a document that needs it.
+* pypdf (already a dependency, `tailor.pdf_text` uses it) is held in reserve for a PDF that
+  is still welded after the sweep. It is the fallback rather than the primary because
+  pdfplumber handles multi-column and table-based CV layouts more faithfully.
+
+Fixtures in `backend/tests/test_pdf_extraction.py` are generated with reportlab at a chosen
+inter-word gap, so the failure reproduces deterministically without committing anyone's real
+CV to the repo. One test pins the *premise* — that pdfplumber's default really does weld at
+2pt — so that if the library ever changes, the file fails loudly instead of passing for the
+wrong reason.
+
+---
+
+## Projects became a typed section, capped at 5 bullets, fitted to one page
+
+Reported as two things at once: the renderer flattened Projects into bullet soup, and the
+project bullets were not being tailored to the job. Both traced to `additional_sections`
+being a flat `list[str]`.
+
+### A project is structurally a role, so it now has a role's shape
+
+`AdditionalSection` could only hold a heading and a list of strings, so a project's header
+line — name, tech stack and date range — arrived as just another string and the renderer
+had exactly one thing it could do with it:
+
+```python
+for extra in s["additional_sections"]:
+    section(extra["heading"])
+    bullet_list(extra["items"])     # every line becomes a bullet
+```
+
+Meanwhile Experience got `TwoCol` entry lines, an italic sub-line and indented bullets. The
+structure was not lost at render time; it was lost at *parse* time and unrecoverable
+afterwards. New `schemas.ProjectItem` (`name` / `tech` / `dates` / `bullets`), a dedicated
+`projects` field on `StructuredResume`, a matching object in the parser's tool schema, and
+renderers that give a project the same two-column treatment as a role.
+
+`tech` is a separate field rather than left inside `"Name | Python, Docker"` so the renderer
+can set it on its own italic line without guessing where the separator was.
+
+### Placed between Experience and Education
+
+Where candidates' own CVs put it, and where the source CV that prompted this has it. A
+project is work and belongs with the work, not after the footnotes. The module docstring's
+"Irish section order" line predates projects having a section at all.
+
+### Identity is locked; only bullets are the rewriter's
+
+`LOCKED_PROJECT_FIELDS = ("name", "tech", "dates")`, re-imposed by `enforce_locked` exactly
+as role facts are. A project's name, the stack it used and when it ran are factual claims,
+not framing. Its bullets are the one part tailoring may reword — and it *should*: a side
+project is frequently the only evidence for a skill the day job never touched, which is
+precisely why the rewriter now receives them (see the earlier entry on `_full_resume_block`)
+and returns them under a required `projects` key.
+
+`enforce_locked` leaves the key untouched when the snapshot has no projects, so a CV that
+never had one is unaffected and a legacy draft keeps whatever it carried.
+
+### Five bullets, enforced at render time
+
+`MAX_BULLETS = 5` for both roles and projects. Applied in `_sections` rather than only
+asked for in the prompt, so the cap holds whatever the model returns. It keeps the *first*
+five because the rewriter orders bullets most-relevant-first for the target job — trimming
+the tail keeps what matters, trimming the head would invert it. The rewriter's schema also
+states the cap, so it chooses which five rather than having five chosen for it.
+
+### Fitting to one page: render and count, do not estimate
+
+`render_pdf` now lays the document out at descending type scales (1.0 → 0.80) and returns
+the first that reports a single page, reading `SimpleDocTemplate.page` after the build.
+Estimating height up front was rejected: reportlab's pagination is the only thing that
+knows where text actually lands once wrapping, widows and `keepWithNext` on section
+headings are resolved, so the honest way to ask "does this fit" is to lay it out and look.
+Costs one render for a CV that already fits, at most six for one that never does.
+
+Spacing scales with the type — `TwoCol.spaceBefore`, `SectionHeading` height and gaps,
+list indents — since leaving whitespace fixed while text shrank would reclaim far less than
+the nominal reduction. Margins scale at half rate: text that shrank 15% still needs edges.
+
+**The 0.80 floor is deliberate and was measured, not guessed.** A six-role CV with 36
+bullets needs ~0.70 to fit, and 0.70 of a 10pt body is 7pt — below comfortable print size.
+Such a CV runs to two honest pages rather than one unreadable one, and nothing is dropped
+to achieve it. A first test fixture asserted the opposite and was wrong; the measurement
+settled it.
+
+### Legacy rows still render properly
+
+Drafts and résumés parsed before the typed field exist in the database with projects still
+flat. `_project_from_section` recovers them the way a reader does — a line carrying a
+trailing date range starts a project, following lines are its bullets — and `_sections`
+suppresses the flat copy so the section cannot print twice. Best-effort by design: this is
+a migration path for stored rows, not a second parser.
+
+Covered by `backend/tests/test_cv_projects_layout.py` (14 tests).
+
+---
+
+## One writing standard, project proposals, and a propose → critique → propose button
+
+Prompted by a review of real generated bullets. The content was accurate and the substance
+strong; the presentation had four defects, and the same four every time:
+
+* **No outcomes.** Every bullet described an activity. Balancing latency against GPU cost
+  was mentioned three times in one role without a single figure, so a reviewer could not
+  tell whether it saved 5% or 50%.
+* **Length.** Five bullets of three to four lines is ~20 lines for a 16-month role — more
+  page than most people give a five-year job.
+* **Overlap.** The OCR/ASR bullet was the implementation detail of the bullet above it; the
+  monitoring bullet repeated the tail of the evaluation bullet. The same information paid
+  for twice in the scarcest space on the page.
+* **Uniform rhythm.** Every bullet closed with an em dash or comma plus a participial
+  clause ("…, tuning batch size", "…, so grounding was measured not assumed"). Once that is
+  a good sentence; five times it reads as machine-drafted, and reviewers discount the
+  document for it.
+
+**None of these is a truth problem**, which is why none of the honesty machinery caught
+them — `enforce_locked`, the evidence gate and the fabrication checks are all indifferent
+to whether a true bullet is well written. They are craft problems, and they got the same
+treatment honesty did: written down once, applied everywhere, checkable.
+
+### `jobpilot_core.writing` — the single copy
+
+`BULLET_STANDARD` goes into the Gap-closer's brief and the Rewriter's INTEGRITY block;
+`CRITIC_CHECKLIST` restates the same ground as things to look for and goes into the CV
+Critic's rubric and the new proposal critic's. Three agents write bullets and each
+previously carried its own loose advice ("be concrete", "name the outcome"), which is how
+the guidance drifted apart and stayed vague.
+
+The rules name the **specific failing phrasings** rather than giving generic advice,
+because generic advice is what produced the generically bad bullets: the ownership rule
+quotes "Worked with infrastructure engineers to…", the contradiction rule quotes
+"on-premises/VPC-isolated", the rhythm rule names the participial clause by construction.
+
+On quantification the standard asks for a figure **or a bracketed placeholder** — `[X]%`,
+`from [X] to [Y]` — for the candidate to fill in, and says explicitly never to invent a
+figure and present it as fact. A bracket is a prompt for a defensible number; a fabricated
+metric is the one thing this rule must not licence, and it is the obvious way for a
+"quantify everything" instruction to go wrong.
+
+`MAX_BULLETS_PER_ENTRY` is asserted equal to `tailor.MAX_BULLETS` in a test: the renderer
+discards past the cap, so a writer told a different number produces output thrown away
+before anyone reads it.
+
+### Projects are now proposable
+
+New `project_rewrites` kind (`pr` prefix) alongside `claimed_skills` / `bullet_rewrites` /
+`new_bullets`, keyed by `project_ref` rather than `role_ref` because a project has no
+employer. Gap-close previously ignored projects entirely, which was backwards: a project is
+frequently the *only* evidence a CV carries for a skill the day job never touched, so it is
+the highest-value place to propose.
+
+Adding the kind meant touching six call sites in the panel that each repeated the literal
+`["claimed_skills", "bullet_rewrites", "new_bullets"]`. They now iterate an exported
+`GAP_CLOSE_KINDS`, so the next kind is added in one place.
+
+A test caught a real bug here: `cv_rewriter.attested_block` returned early on
+`not (skills or rewrites or new_bullets)`, so a user who accepted **only** project rewrites
+got an empty attested block and their accepted items silently never reached the CV.
+
+### The reviewed variant is a second button, not a default
+
+`gap_critic` grades a proposal *set* before the candidate sees it. Deliberately separate
+from `cv_critic`, which grades a finished CV, because the two documents fail differently:
+a CV is judged on whether it matches a job, a proposal on whether the candidate could
+survive being asked about it. Hence `indefensible` (the `interview_prep` would not hold up
+under a follow-up) and `implausible` (the claim does not fit the role's seniority or the
+dates already on the CV) as first-class finding categories, and `drop_item_ids` — dropping
+a claim the candidate would be caught on beats shipping it.
+
+The critic judges and does not rewrite, the same separation `cv_loop` uses, for the same
+reason: an agent grading its own output grades it generously.
+
+Three design points worth keeping:
+
+* **`needs_revision` short-circuits.** A 'ship' verdict with no findings and nothing to
+  drop skips the second propose call, so the reviewed variant does not always cost three
+  calls — only when there is something to fix.
+* **The critique rides in the *variable* half of the prompt.** Both proposer passes share
+  the résumé and the brief; putting the critique in the cached prefix would change it
+  between calls and pay the cache-write cost twice per job. Pinned by a test.
+* **Refine failures are non-fatal.** A broken critique costs the user the improvement, not
+  the proposals they already have — `_refine` returns the first-pass set and records the
+  error against `<job_id>:refine`.
+
+It is its own endpoint (`POST /cv/gap-close/refine`) rather than a flag on the existing one
+because it costs up to two extra model calls per job, and spending that is the user's
+decision to make per run.
+
+Covered by `backend/tests/test_writing_standard.py` (20 tests).
+
+### Postscript: the same omission, a third time
+
+Asked "will it suggest for project bullets as well?", the honest answer at that moment was
+no. `project_rewrites` existed, the schema required it and the brief instructed it — but
+`analyzer._resume_block`, the résumé view the Gap-closer actually reads, had been updated
+to emit `additional_sections` and was never updated for the **typed** `projects` field that
+replaced it. The agent was told to propose on projects and shown none, so the only way to
+comply would have been to invent a project name.
+
+That is the third instance of one pattern: projects live in a new place, and one of the
+several functions that render a résumé for a model still reads the old place. The others
+were `_full_resume_block` (the rewriter could not reword what it had not seen) and
+`cv_fields._base_text` (project-evidenced skills were deleted as fabrications).
+
+`test_every_agent_asked_about_projects_is_actually_shown_them` now checks both résumé views
+in one test, and a sibling checks the fabrication haystack, so the next place projects move
+fails loudly in all three at once rather than degrading silently in whichever was missed.
+The lesson worth keeping: **an instruction to an agent is only as good as the context that
+makes it followable**, and the two are edited in different files.
+
+## Apply agent, stage 4 — the application log ("am I applying twice with different CVs?")
+
+The question that prompted this was simple and the answer was worse than expected: *how do
+I know if I am applying to the same company with different tailored CVs?* Nothing in
+JobPilot could answer it, because nothing recorded an application at all. `jobs.status` is
+written once as `scouted` and never advanced; the auto-apply path is fill-only and told the
+database nothing; `/apply/record` banked *answers* under an `employer:<slug>` scope, which
+is a side effect of learning, not a log. Every table recorded what the system **proposed**.
+None recorded what the user **did**.
+
+`applications` is that table. One row per application, written when the extension sees a
+real submit on a form it filled.
+
+### What it stores, and why the CV was nearly free
+
+`_apply_context` already resolved which CV belongs on a form — the exported tailored draft
+for that job if one exists, otherwise the uploaded original — because the extension needs
+the file to attach it. It just never said which one it had picked. Threading `draft_id`
+through the plan and back on submit turned the expensive half of "which CV did they send?"
+into two extra fields.
+
+The content script reports the CV rather than the server re-deriving it, because only the
+frame that did it knows whether the file actually landed: the input may already have held
+the user's own upload, the form may have had no CV field, or the fetch may have failed.
+`attached: false` is a real answer, not a missing one.
+
+### Three rules that keep the log honest
+
+* **A row means you applied — not that you looked.** `record()` fires from a `submit`
+  listener *and* from a click heuristic on any control reading as "Apply", because most ATS
+  forms are JS-driven and never fire a real `submit`. That heuristic also fires on the
+  "Apply" button of a listing page. The empty-answers guard is what separates them: a
+  listing page has no filled fields behind it, so it harvests nothing and records nothing.
+  A log that invents applications is worse than no log.
+* **A multi-step form is one application.** The extension records once per *step* (Workday
+  routinely has five), so the write is idempotent per `(user_id, job_id)`. `applied_at` is
+  written once and never moved — a form finished across two sittings was applied to on the
+  first. `answers_recorded` takes the max rather than the sum, so a double-fired submit
+  cannot inflate it.
+* **A later step reporting no CV is silence, not a correction.** The CV field is on step
+  one; by the step carrying the Submit button there is no CV field at all. `cv_source`
+  therefore never downgrades to `none`. Without that rule, last-write-wins would demote a
+  tailored application to an unattributed one halfway through the form.
+
+### The record outlives the job it points at
+
+`job_id` is `ON DELETE SET NULL` — the opposite of every other job-owned table, all of
+which cascade. The Concierge can delete every disqualified job in a single call, and
+someone who applied in March, watched the role fall below a re-tuned threshold and then
+tidied up must not silently lose the fact that they applied. `company` and `job_title` are
+snapshotted so the orphaned row still answers *who did I apply to?*. `cv_draft_id` gets the
+same treatment beside a `cv_label` snapshot, since drafts are deletable from the Tailored
+CVs list. A draft deleted between filling and submitting leaves `cv_source` honest at
+`tailored` with a null id, rather than misreporting to the user what the employer holds.
+
+### Grouping by employer, not by name
+
+The original question is about *companies*, and a company arrives under several names —
+"Stripe", "Stripe, Inc.", "Stripe Payments Europe", depending on the connector. Grouping on
+the display string would report three employers where there is one, and quietly miss
+exactly the duplicate this exists to catch. `application_company_summary` groups on
+`apply_fill.employer_scope` (ATS board slug first, normalised name as fallback), and
+`frontend/lib/applications.ts` mirrors it step for step so the dashboard and
+`/applications/by-company` cannot disagree.
+
+`cv_variants` counts *distinct* CVs sent to one employer, identified by draft id — because
+two roles at one company is ordinary and often deliberate, whereas two roles carrying two
+different tailored CVs means that employer is holding two different accounts of the same
+career. Only the second is worth interrupting for, and the dashboard warns on it in the
+Company cell, built from the **unfiltered** job pool: the duplicate you are most likely to
+create is the one whose sibling role the current filter has hidden.
+
+Covered by `backend/tests/test_applications.py` (9 tests, 4 of them offline).
+
+### What this deliberately does not do
+
+There is no manual "mark as applied" — the `source` column exists so one can be added
+without a migration, but stage 4 records only what the extension witnessed. An application
+sent outside the browser extension is still invisible, and inferring one from a click would
+put the log back on the wrong side of the never-infer rule.
+
+## Query-agent tracing — one row per turn, and what it found on day one
+
+The Query agent answered, and there was no way to ask *why that took four seconds*, *did it
+actually read the data or answer from the conversation*, or *what is a question costing*.
+The live chat surfaced tool names as chips and then threw them away; the persisted
+`tool_calls_json` kept `{tool, status}` and nothing else — no timing, no arguments, no
+tokens.
+
+### The trace store is a table that was already there
+
+`agent_events` has been in the schema since Phase 1 and was never written to: user-scoped,
+JSONB, `ON DELETE CASCADE` from `users`. One row per turn (`type='query_turn'`) holding the
+whole trace meant **no migration**, and — more importantly — erasure for free. A trace
+quotes the user's own question, so it must die with the account; putting it anywhere else
+would have created a second place to remember that.
+
+`record_agent_event` takes a `keep` argument and prunes the caller's older events of the
+same type in the same transaction. Traces are diagnostic exhaust, not records: an unbounded
+log would outgrow the data it describes, and a sweeper is one more thing to run.
+
+Neither trace tool is on the Query agent's toolset, and that is deliberate — an agent that
+can read its own trace log can be asked to summarise questions from sessions this turn
+never touched. The runner writes; the dashboard reads; the agent does neither.
+
+### Spans carry an offset, not just a duration
+
+Each span records `t` (offset from turn start) as well as `ms`, which is what makes the
+screen a waterfall instead of a list. The tools of one round share a `t` because they
+genuinely go out together — the `asyncio.gather` fan-out this codebase already had — and
+drawing them as a staircase would hide the one property worth showing. Per-tool duration is
+measured inside `_safe_execute` rather than around the gather: wall clock around a
+concurrent batch credits every tool with the slowest one's time.
+
+The rollup lives in `backend/app/query_traces.py` as pure functions, so the arithmetic on
+screen is the arithmetic under test, and a client rendering one trace cannot disagree with
+the fleet numbers.
+
+### Two quality signals, and the one that had to be narrowed
+
+`ungrounded_turns` counts turns that called **no** tool — legitimate for a follow-up whose
+answer is already in context, and also exactly what an ungrounded answer looks like, so it
+is surfaced rather than folded into a pass rate.
+
+`uncited_turns` was originally "read data, cited nothing", which flagged every counting
+question — `count_jobs` returns a number, and there is no row to link. It is now gated on a
+tool span having actually returned **rows**. A grounding tile that cries wolf on the
+commonest question the agent answers is worse than no tile.
+
+### What it found immediately: the prompt cache has never worked here
+
+The first real traced turn reported `cache_read_input_tokens: 0` **and**
+`cache_creation_input_tokens: 0` — no cache entry was ever written, despite
+`system_blocks()` carrying a `cache_control` marker and the prompt being deliberately
+byte-stable. The cause is a model minimum, not a bug in the prefix: the cacheable prefix
+(tools ≈1,640 tokens + system ≈855) is ~2.5K, and **Claude Haiku 4.5 requires 4,096
+tokens** before it will cache anything. Under the minimum the marker is silently ignored —
+no error, just zeros. The comment claiming the prompt "caches with the tool defs across
+turns" documented an intention that the API never honoured. Left as found: the dashboard now
+reports 0% cache hit honestly, and the fix (a different tier, or a larger stable prefix) is
+a spend decision, not a bug fix.
+
+### What this deliberately does not do
+
+No sampling and no head-based trace ids: one turn is one row, written after the answer is
+already streamed and persisted, and a failed trace write is logged and swallowed —
+observability is never worth an error the user can see. Nothing here can re-run a turn.
+The Concierge is not traced yet; it writes its own events and would need its own spans.
+
+Covered by `backend/tests/test_query_traces.py` (14 tests, all offline).
+
+## Clearing the pool: two more deletes, and why one of them is DESTRUCTIVE
+
+The Concierge could delete the jobs you picked and the jobs it had disqualified, but not
+the two sets people actually reach for when the pool has gone stale: the ones qualifying
+never got to, and all of them. Both were reachable only by ticking hundreds of rows.
+
+### `unscored` and `disqualified` are complements, not two words for "rejected"
+
+`delete_unscored_jobs` targets jobs with **no qualification row at all** (the `unscored`
+bucket `job_stats` already reports as `total_jobs - scored`); `delete_disqualified_jobs`
+targets an explicit disqualified verdict. Nothing is in both, and together with the
+qualified set they partition the pool. That distinction is the whole safety story here: a
+disqualified job is one a re-tuned threshold can bring back, so letting "delete the ones
+that didn't work out" take it would destroy recoverable work. `qualifications.job_id` is
+`NOT NULL`, so the `NOT IN` behind `unscored_job_ids` cannot be poisoned by a NULL row.
+
+A job that qualify scored but left `decision` NULL counts as **scored** — the filter is the
+presence of the row, not the value in it. It has been looked at; "never scored" isn't true
+of it.
+
+### Emptying the pool sits with GDPR erasure, not with the other deletes
+
+`delete_all_jobs` is the first non-GDPR action in `DESTRUCTIVE`, so it needs an unambiguous
+erasure word ("yes, delete them") rather than the bare "yes" the other deletes accept. The
+reason is the failure mode the confirmation gate exists for: the Concierge closes every
+turn with one suggestion, users reply "sure" to whatever was last on screen, and the pool
+holds every paid scout/qualify/analyze run plus the tailored CVs built on top. The narrower
+deletes stay on a plain yes — routine tidying should not need a password. The confirmation
+prompt names the required wording, so the stricter gate reads as a speed bump rather than a
+tool that ignores you.
+
+Emptying the pool is **not** account erasure: the resume, configs, chat history and the
+application log all survive (`applications.job_id` is `ON DELETE SET NULL`, so the proof
+you applied outlives the job — see above). The tool description, the confirmation prompt
+and the reply all say so, because "delete all jobs" and `delete_user_data` are one careless
+reading apart.
+
+### The prompt now routes four deletes instead of two
+
+With four overlapping-sounding tools the real risk moved into tool *selection*: the model
+picking the wide one for a narrow ask. `SYSTEM` gained a DELETING JOBS block that pairs
+each tool with the phrasing that means it, forbids widening the user's scope, and points at
+`job_stats` for the exact counts when the ask is ambiguous.
+
+Covered by `backend/tests/test_job_deletes.py` (the SQL that resolves each bucket, against
+Postgres) and the bulk-delete cases in `backend/tests/test_concierge_selection.py`.
+
+## Tailored exports carry the uploaded CV's document properties
+
+A tailored CV is rendered from scratch, so it arrived stamped with the toolchain that made
+it: `/Producer: ReportLab PDF Library`, a DOCX `comments` of "generated by python-docx",
+and python-docx's template creation date of **2013-12-23**. All three are visible in any
+properties dialog, and none of them describe the candidate's document. `jobpilot_core.
+doc_meta` now reads the properties off the CV the candidate actually uploaded and replays
+them onto every render.
+
+### What this asserts, and where that is confined
+
+Mirroring `/Producer` means a reportlab-rendered file reports the word processor that made
+the upload — an assertion the bytes do not independently support. That is the requested
+behaviour (the candidate's own CV, carrying its own properties), and it is deliberately
+confined to one small module so it is easy to find and to change. Two limits keep it from
+drifting into fiction about lineage:
+
+* **Only descriptive properties travel** — never an identifier, revision counter, or
+  template path. Those describe a specific *file's* history rather than the document.
+* **`modified` is always now**, even when `created` is mirrored. An old creation date beside
+  a recent modification is what an edited document looks like, and it is true of this one;
+  mirroring both would claim the file had not been touched since the original was written.
+
+### Placeholders and the 2013 date are dropped on read, not on write
+
+reportlab writes `(unspecified)` and python-docx `generated by python-docx` when the caller
+sets nothing. A CV that already went out through this pipeline carries those, so treating
+them as real properties would launder a library default into a claim about the candidate —
+and compound it on every round trip. They are filtered at the reading edge, along with the
+2013 template epoch, so everything downstream sees an absent property and falls back to
+neutral values (the candidate's name, a real timestamp).
+
+### Stamping is a post-pass, because reportlab will not surrender `/Producer`
+
+`SimpleDocTemplate` accepts `title` and `author` but stamps its own `/Producer` at save
+time regardless. Rewriting the info dictionary with pypdf afterwards is the only way to
+control the full set, and it leaves page content untouched — which matters, because the
+machine-readability check is what stands between the candidate and an ATS that cannot read
+their CV. A failed stamp returns the unstamped render rather than raising: properties are a
+nicety, the document is the deliverable.
+
+### Fetched once per export, over MCP
+
+`resume-mcp` gained `get_resume_doc_metadata`, which returns the property set alone rather
+than the file — the export path has no business pulling CV bytes across to read eight
+strings. `run_export` fetches it once per batch (every draft derives from the same
+original) and the version-download endpoint uses it too, so a downloaded assembled version
+does not stand out from the tailored ones. A missing resume, an assembled version with no
+original file, a scan, or a lost object all return `{}` and are never an error.
+
+Covered by `backend/tests/test_doc_meta.py` (19 tests, fully offline).
+
+## Qualify scores the unscored, and nothing else
+
+Qualify was described as incremental, and it was — against the wrong key. A job was
+skipped only while its recorded scoring key (effective CV + qualifier config) still
+matched the current one, and the CV half of that key is the **resume row id**. Uploading a
+CV mints a new row, so every upload silently invalidated every score in the pool and the
+next qualify re-ran and re-billed work already paid for. Observed on a real account: 153
+jobs, 107 already scored against a resume id from the previous evening, and every run
+charging for all 153.
+
+The rule is now the simple one: **a job that has a qualification is never scored again**,
+whatever version it carries. Scout brings in new roles, qualify scores those, and the
+routine loop costs what the new roles cost.
+
+### Staleness is no longer chased, deliberately
+
+The trade is real and worth naming: a tightened `must_have`, a better CV, or a newly
+attached tailored CV no longer refreshes existing scores on its own. Chasing staleness is
+what produced the bug — the key was *too* sensitive, invalidating on identity rather than
+on content, and the user paid for the difference.
+
+`requalify_all=True` still re-scores the whole pool and is the supported way to refresh.
+It is already wired where it belongs: the qualifier-settings screen sends it after a config
+change, which is exactly the case where every score genuinely is stale. The scoring key is
+still *recorded* on every qualification, so a future "re-score only what's stale" feature
+has its data — it simply is not consulted when choosing work.
+
+The Concierge prompt changed with it. It used to advertise "only jobs whose CV or config
+changed are re-scored"; it now says qualify skips already-scored jobs and points at the
+settings screen for a full re-score, with an explicit instruction not to quietly re-score
+the pool. The completion message stopped saying "re-qualified the pool" and now reports
+how many new jobs were scored and how many were skipped.
+
+Covered by `backend/tests/test_qualify_selection.py` (7 tests, offline), including the
+153/107 re-upload case that motivated the change.
+
+## A home address is not a job filter, and a blocked crawl is not an empty one
+
+Two source-side defects found together while asking why a full pipeline run fetched 18
+jobs. Both had the same shape: a connector reporting nothing, successfully.
+
+### Greenhouse was discarding every Irish job it fetched
+
+`location_matches` was a substring test, and Greenhouse is the only connector that applies
+it. With no locations configured, `merge_search_terms` falls back to the résumé-derived
+ones — and the deriver reads the CV's home address, "Maynooth Ireland". `"maynooth ireland"`
+is not a substring of `"Dublin, Ireland"`, so all 26 boards returned zero. Measured against
+the live boards at the time: **311 Irish postings, 0 kept**, including a Stripe Business
+Partner Analyst, a MongoDB Senior Financial Analyst and an Inizio Group Financial
+Accountant — the user's actual target roles.
+
+The fix is two independent changes, because there were two independent bugs.
+
+`location_matches` now compares **word sets**: a configured location matches when every
+significant word in it appears as a word in the job's location, with "co"/"county"/"city"
+treated as filler. Substring matching failed on ordinary data in both directions —
+"Dublin, Ireland" missed "Dublin, County Dublin, Ireland" because of the intervening
+county, and "Maynooth, Ireland" missed "Maynooth, Co. Kildare, Ireland". Requiring *every*
+word is what keeps it a filter rather than a country check: "Maynooth Ireland" still must
+not match a Dublin job just because both end in "Ireland".
+
+Scout now passes only the **explicitly configured** locations to a board connector, never
+the derived fallback. Where someone lives is not a statement about which jobs they will
+take, and on a board connector a location is a hard gate. `roi_location` still uses the
+derived value, because a free-text engine needs some place to query, and `is_roi` remains
+the Republic-of-Ireland gate either way.
+
+### irishjobs.ie has withdrawn consent, and the crawler was hiding it
+
+irishjobs.ie and jobs.ie (both StepStone) answer **403 to every request, robots.txt
+included** — jobs.ie refuses even its own homepage — from a mainstream browser User-Agent
+as readily as from ours. There is no code fix for that, and working around bot protection
+is what this project already declined to do in the stage-2 resolver.
+
+What was a bug is that `run_crawl` treated a refused search page as the end of the results
+and returned `[]`. "No Irish jobs matched today" and "the site blocks us now" are opposite
+outcomes and were reported identically, which is why the block went unnoticed while scout
+logged 0 jobs and no error. A first-page failure now raises `CrawlUnavailable`, and the
+error lands in the run's `errors` map next to Apify's.
+
+### The board is a registry, and the default is jobsireland.ie
+
+`jobsireland.ie` — the Department of Social Protection's own board — is the one candidate
+that both permits crawling and actually searches. Its `robots.txt` disallows nothing, its
+results are server-rendered, and its keyword filters **server-side**: `accountant` returns
+2 results, `analyst` returns 25. Two measured facts are load-bearing:
+
+- It must be addressed **without** `www`. `www.jobsireland.ie` answers 500 on every
+  `job-Details` id; the bare host serves the same ids 200. That one character was the
+  difference between "this board has no readable postings" and a working source.
+- Its listing lives behind `/Jobsireland.API/JobsIreland/BrowseJobs`, which despite the
+  name returns an HTML fragment rather than JSON. `PageSize` bounds a call and
+  `PageNumber` is ignored, so one request per term returns that term's whole result set.
+
+Its keyword is an **ordered phrase matched inside the title**, not an AND over words:
+"Business Analyst" returns 8, "Graduate Business Analyst" returns 1, and the reversed
+"Analyst Business" returns 0. So the whole role is asked for first — when the role is a real
+job title that is exactly the right query, and a broad single word can hit the page ceiling
+("business" returns 49 against a cap of 50) and lose the precise matches. It is not enough
+on its own, because a résumé-derived role is often a self-description rather than a title:
+"Finance Data Analyst" returns 0 where "analyst" returns 25. The role's own words therefore
+follow it, longest first, capped at four searches in total, with the union taken and
+relevance decided locally by the same coarse title filter the board connectors use —
+applied *before* a posting is opened, so the detail-fetch budget is not spent on chefs and
+HGV drivers.
+
+Neither board carries `JobPosting` JSON-LD, so jobsireland is field-mapped by anchor rather
+than by class name (its markup is Orchard CMS utility soup). The flattened text reads
+`Back <title> <employer> Ref: #JOB-<id> <address> No of positions: …`, which makes the
+employer and the address positionally unambiguous; the body is the one genuinely marked
+element, `span.margin-reset`, with `div.experiences` appended because that block holds the
+years-of-experience and qualification minimums the qualifier reasons about.
+
+A live run on the real profile: 3 searches → 35 postings → 25 opened (the politeness cap) →
+**19 jobs, every one `full`**, bodies 670–3,413 chars, including Financial Analyst,
+Procurement Analyst, Supply Chain Analyst, Senior Accounts Payable Analyst and Graduate
+Business Analyst. Its postings skew public sector, CE/WPEP schemes and entry level, which
+complements the ATS boards rather than duplicating them.
+
+Also ruled out, recorded so nobody re-tries them: `recruitireland.com` permits crawling but
+its keyword search is client-side — `keywords=accountant` and `keywords=data analyst`
+returned identical results and `?page=N` re-served the same 15 rows — and `publicjobs.ie`
+and the jobsireland *homepage* render their listings client-side.
+
+Covered by `backend/tests/test_job_match.py` and the crawler units in
+`backend/tests/test_phase2.py` (offline).
+
+### What each connector is asked for
+
+Falling out of the same audit: several connectors were being handed the whole skill list
+and the CV's home town, and both were costing more than they returned.
+
+**Titles do not contain tools.** Workable matches its tokens against the posting *title*,
+and of the 21 extra tokens the skill list contributes, only "analysis" and "financial" ever
+matched on a live feed — pulling in a Group Chief Financial Officer post for a junior
+analyst. Workable now gets roles only: 13 jobs became 9, and the four lost were that CFO
+role and two Business Analysis posts that the ATS connectors also carry. Skills still reach
+the qualifier, which reads the body and is the right place to weigh them.
+
+**An OR of skills is not a search for a role.** Apify ORs every term into one LinkedIn
+query, so `Python` — or the bare letter `R` — matched anything mentioning them and drowned
+the role. It now sends the primary role alone.
+
+**The Muse's facets already resolve from roles.** Measured: roles, keywords and both
+together all yield `["Data and Analytics"]`, so the skill list bought nothing. It now gets
+roles only, and its location comes from the search config with a plain `Dublin, Ireland`
+default rather than the derived home address — The Muse filters its own results on the city
+it was asked for, so the CV's "Maynooth Ireland" both queried and then rejected every Dublin
+job. Live: 0 jobs before, 9 after.
+
+JSearch and the (dead) irishjobs board still query on the derived location; both are off or
+unreachable, so they were left alone rather than changed blind.

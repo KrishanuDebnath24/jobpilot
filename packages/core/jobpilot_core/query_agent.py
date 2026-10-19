@@ -70,7 +70,18 @@ SYSTEM = (
     "\n"
     "READ-ONLY — you do NOT act. If the user asks to run/scout/qualify/analyze, change a "
     "config, approve a gate, apply to the resume, or delete data, do NOT attempt it "
-    "(you have no such tool). Briefly tell them to ask the Concierge for that. Be concise."
+    "(you have no such tool). Briefly tell them to ask the Concierge for that.\n"
+    "\n"
+    "HOW TO WRITE — you answer inside a narrow chat panel, not in a report:\n"
+    "6. Lead with the answer, in a sentence or two of plain prose. Most questions end "
+    "there. Do NOT pad a short answer with headings, a restated question, or a closing "
+    "'key insights' recap.\n"
+    "7. Use a markdown table ONLY for a real breakdown — several rows sharing the "
+    "same columns (a count per company, before/after per CV). Give the columns asked "
+    "for, cap it around ten rows, and say in a line what the remainder comes to. Three "
+    "or four items belong in a short bulleted list, or in the sentence itself.\n"
+    "8. Bold sparingly: the one number or name that carries the answer, never a whole "
+    "table column or every company you name. No emoji, no heading over a lone paragraph."
 )
 
 
@@ -105,13 +116,19 @@ TOOLS: list[dict] = [
           {"decision": {"type": "string", "description": "qualified|disqualified"},
            "since_days": {"type": "integer"}}),
     _tool("job_stats",
-          "EXACT pool breakdown: totals + counts by decision, source, and description "
-          "completeness. Use for 'give me a summary/breakdown of my jobs'.", {}),
+          "EXACT pool breakdown: totals + counts by decision, source, EMPLOYER "
+          "(by_company, top 50) and description completeness. Use for 'give me a "
+          "summary/breakdown of my jobs', 'which companies am I seeing most?', and "
+          "'how many roles at <company>?' — read that count off by_company rather than "
+          "estimating it from a list. by_company is also the list of employers that "
+          "actually exist, so consult it when unsure how a company is spelled.", {}),
     _tool("list_qualified_jobs",
           "List jobs with their qualification score/decision (newest first). For 'show me "
-          "my (qualified) jobs'. Optional decision filter + limit. Not a count tool.",
+          "my (qualified) jobs'. Returns title, company, location, url, apply_url and the "
+          "score/decision — NOT the job description, so don't reach for this to read what a "
+          "posting says. Optional decision filter + limit. Not a count tool.",
           {"decision": {"type": "string", "description": "qualified|disqualified"},
-           "limit": {"type": "integer"}}),
+           "limit": {"type": "integer", "description": "max jobs to return (default 25)"}}),
     _tool("get_suggestions", "List the user's resume suggestions (proposed/accepted/dismissed).", {}),
     _tool("list_cv_drafts",
           "EXACT list of the user's tailored CV drafts (Phase 6.5) with each draft's "
@@ -131,12 +148,43 @@ TOOLS: list[dict] = [
     _tool("semantic_search_jobs",
           "Semantic similarity search over the user's embedded jobs. Use for FUZZY topic "
           "questions ('jobs about data platforms', 'roles similar to X'). Returns jobs with "
-          "a similarity score. NOT for counts.",
-          {"query": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]),
+          "a similarity score. NOT for counts.\n"
+          "SCOPE IT when the question names an employer, a decision, a level or a period "
+          "('senior roles at Stripe about payments this month') — the filters below narrow "
+          "the search itself, so do NOT pull a broad list and sift it yourself. A filtered "
+          "result is a SUBSET, never a total: report it as 'of the ones matching X', and "
+          "still use the exact tools for any number.",
+          {"query": {"type": "string"},
+           "limit": {"type": "integer", "description": "max jobs to return (default 8)"},
+           "company": {"type": "string",
+                       "description": "employer name, case-insensitive, partial ok, legal "
+                                      "suffixes ignored (Stripe == Stripe, Inc.). If nothing "
+                                      "matches, the result carries companies_in_pool — retry "
+                                      "with a name from it instead of reporting 'none'"},
+           "decision": {"type": "string",
+                        "description": "qualified|disqualified — excludes jobs not yet scored"},
+           "since_days": {"type": "integer", "description": "only jobs added in the last N days"},
+           "employment_type": {"type": "string",
+                               "description": "full_time|part_time|contract|temporary|internship — "
+                                              "excludes jobs whose type is unknown"},
+           "seniority": {"type": "string",
+                         "description": "intern|junior|mid|senior|staff|principal|lead|manager|"
+                                        "director — excludes jobs whose level is unknown"}},
+          ["query"]),
     _tool("semantic_search_analyses",
           "Semantic similarity search over the user's job analyses (required skills, "
-          "keywords, gaps). Use for fuzzy questions about what roles ask for.",
-          {"query": {"type": "string"}, "limit": {"type": "integer"}}, ["query"]),
+          "keywords, gaps). Use for fuzzy questions about what roles ask for. Scope it with "
+          "company/seniority/since_days when the question names one ('what do Stripe roles "
+          "ask for?').",
+          {"query": {"type": "string"},
+           "limit": {"type": "integer", "description": "max analyses to return (default 8)"},
+           "company": {"type": "string",
+                       "description": "employer of the analysed job, partial ok, legal suffixes "
+                                      "ignored. A miss returns companies_in_pool — retry from it"},
+           "since_days": {"type": "integer", "description": "only analyses from the last N days"},
+           "seniority": {"type": "string",
+                         "description": "level the Analyzer inferred for the role"}},
+          ["query"]),
     # --- status (LIVE) ---
     _tool("get_work_status",
           "Live pipeline state: whether a run is active, any pending review gate, and the "

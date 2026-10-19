@@ -20,6 +20,7 @@ import Suggestions from "./Suggestions";
 import GapCloseProposals from "./GapCloseProposals";
 import Chat from "./Chat";
 import Ask from "./Ask";
+import QueryTraces from "./QueryTraces";
 import TailoredCVs from "./TailoredCVs";
 import CvPanel from "./CvPanel";
 import SearchSettings, { type SearchSettingsMode } from "./SearchSettings";
@@ -33,7 +34,7 @@ type Decision = "all" | "qualified" | "disqualified" | "unscored";
  * below the jobs table. Screens are swapped with CSS, not by unmounting: analyze/suggest and
  * gap-close runs poll for minutes and the CV panel polls every 5s, so navigating away must
  * not tear any of them down. */
-type View = "dashboard" | "suggest" | "gap-close" | "tailored" | "apply-profile";
+type View = "dashboard" | "suggest" | "gap-close" | "tailored" | "apply-profile" | "traces";
 
 /** Inline glyphs — no icon dependency, and they inherit currentColor. */
 function NavIcon({ name, className = "" }: { name: View; className?: string }) {
@@ -75,6 +76,12 @@ function NavIcon({ name, className = "" }: { name: View; className?: string }) {
         <path d="M3.5 17c.6-3 3.3-4.5 6.5-4.5s5.9 1.5 6.5 4.5" />
       </svg>
     );
+  if (name === "traces")
+    return (
+      <svg {...common}>
+        <path d="M3 4.5h9M6 10h9M4.5 15.5h7" />
+      </svg>
+    );
   return (
     <svg {...common}>
       <path d="M11.5 2.5H6a1.5 1.5 0 0 0-1.5 1.5v12A1.5 1.5 0 0 0 6 17.5h8a1.5 1.5 0 0 0 1.5-1.5V6.5Z" />
@@ -89,6 +96,7 @@ const NAV: { key: View; label: string; hint: string }[] = [
   { key: "gap-close", label: "Gap-close proposals", hint: "Vouch, item by item" },
   { key: "tailored", label: "Tailored CVs", hint: "Draft, approve, export" },
   { key: "apply-profile", label: "Application details", hint: "Pre-configured answers" },
+  { key: "traces", label: "Query traces", hint: "What Ask did, and cost" },
 ];
 
 /** Shown only when its screen is active; the others stay mounted and keep running. */
@@ -673,6 +681,9 @@ export default function Dashboard() {
 
             <JobsTable
               jobs={visible}
+              /* Unfiltered, for the "already applied here" index only: the duplicate most
+                 worth catching is the one whose other role the current filter hides. */
+              allJobs={jobs}
               selected={selected}
               onToggleSelect={toggleSelect}
               cvDraftByJobId={cvDraftByJobId}
@@ -724,6 +735,12 @@ export default function Dashboard() {
               is the store those later stages will read from. */}
           <Screen active={view === "apply-profile"}>
             <ApplicationProfileEditor />
+          </Screen>
+
+          {/* Tracing for the read-only agent: what each answered turn actually did — the
+              tools it called, where the wall clock went, and what it cost. */}
+          <Screen active={view === "traces"}>
+            <QueryTraces />
           </Screen>
 
           {cvOpen && (

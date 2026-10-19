@@ -100,13 +100,28 @@ def test_empty_title_never_matches(tokens):
 
 
 # --------------------------------------------------------------------------- #
-# location_matches — substring is correct here, unlike for titles
+# location_matches — word-set containment, so punctuation and hierarchy don't decide it
 # --------------------------------------------------------------------------- #
 def test_location_matching_is_hierarchical():
     assert location_matches("Dublin, County Dublin, Ireland", ["Dublin"]) is True
     assert location_matches("Cork, Ireland", ["Dublin"]) is False
     assert location_matches("anywhere", []) is True
     assert location_matches(None, ["Dublin"]) is False
+
+
+def test_location_matching_survives_punctuation_and_hierarchy():
+    """The substring test this replaced failed on ordinary data: an intervening county
+    broke "Dublin, Ireland", and "Co." vs "County" broke the rest."""
+    assert location_matches("Dublin, County Dublin, Ireland", ["Dublin, Ireland"]) is True
+    assert location_matches("Maynooth, Co. Kildare, Ireland", ["Maynooth, Ireland"]) is True
+    assert location_matches("Cork, County Cork, Ireland", ["Co. Cork"]) is True
+
+
+def test_location_matching_still_excludes_other_places():
+    """Every word must be present, or a shared country word would match everything —
+    which is what made a résumé's home town silently discard every Dublin job."""
+    assert location_matches("Dublin, Ireland", ["Maynooth Ireland"]) is False
+    assert location_matches("Galway, Ireland", ["Dublin, Ireland"]) is False
 
 
 def test_location_matches_is_not_the_roi_gate():

@@ -126,10 +126,14 @@ _TITLE_DECORATIONS = {
 _GENDER_MARKER_RE = re.compile(r"\b[mwfdx](?:\s*/\s*[mwfdx]){1,2}\b")
 
 
-def _canon_company(company: str | None) -> str:
-    """Normalize a company name for dedupe: drop a trailing '(ACRONYM)', a leading
-    'the', and trailing legal suffixes, so the same employer spelled differently across
-    sources collapses. Falls back to plain `_norm` if canonicalization empties it."""
+def canon_company(company: str | None) -> str:
+    """Normalize a company name: drop a trailing '(ACRONYM)', a leading 'the', and
+    trailing legal suffixes, so the same employer spelled differently across sources
+    collapses. Falls back to plain `_norm` if canonicalization empties it.
+
+    Public because two callers need the *same* notion of "same employer": dedupe (via
+    :func:`compute_dedupe_hash`) and the ``company`` search filter in ``repositories``. If
+    they disagreed, a job could dedupe under one name and be unfindable under the other."""
     base = _norm(company)
     if not base:
         return ""
@@ -192,10 +196,10 @@ def compute_dedupe_hash(
     """Primary key = canonicalized company + title + coarse location, so a job carried
     by *both* an aggregator and an ATS collapses to one row (their URLs differ, so URL
     is deliberately NOT in the key). Company/title are canonicalized (legal suffixes,
-    employment-mode/gender decorations dropped — see `_canon_company`/`_canon_title`) so
+    employment-mode/gender decorations dropped — see `canon_company`/`_canon_title`) so
     cross-source spelling differences still collapse and the full-text record hydrates
     the snippet. URL is a fallback only when company+title are absent (some crawls)."""
-    company_n, title_n, loc_n = _canon_company(company), _canon_title(title), _coarse_location(location)
+    company_n, title_n, loc_n = canon_company(company), _canon_title(title), _coarse_location(location)
     if not company_n and not title_n:
         basis = canonicalize_url(url) or ""
     else:
@@ -442,14 +446,14 @@ def plan_hydration(jobs: list[dict]) -> list[dict]:
     for s in jobs:
         if s.get("description_completeness") != "snippet":
             continue
-        company, loc = _canon_company(s.get("company")), _coarse_location(s.get("location"))
+        company, loc = canon_company(s.get("company")), _coarse_location(s.get("location"))
         if not company or not loc:
             continue  # both anchors required — never hydrate without them
         current = (s.get("description") or "").strip()
         candidates = [
             f for f in fulls
             if f.get("id") != s.get("id")
-            and _canon_company(f.get("company")) == company
+            and canon_company(f.get("company")) == company
             and _coarse_location(f.get("location")) == loc
             and _confident_same_role(s.get("title"), f.get("title"))
             and len((f.get("description") or "").strip()) > len(current)

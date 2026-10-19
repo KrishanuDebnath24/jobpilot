@@ -1,8 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { CvDraft, Job } from "@/lib/types";
 import { ApiError, downloadCv, getBaseCvBlob, getCvDraftBlob } from "@/lib/api";
+import type { EmployerHistory } from "@/lib/applications";
+import {
+  CV_LABEL,
+  formatApplied,
+  indexApplications,
+  otherApplicationsAt,
+} from "@/lib/applications";
+import AutoApplyButton from "./AutoApplyButton";
 import {
   AtsBadge,
   Chip,
@@ -230,6 +238,8 @@ function JobDetail({ job, cvDraft }: { job: Job; cvDraft: CvDraft | null }) {
         </div>
       )}
 
+      <AutoApplyButton job={job} />
+
       <div className="flex flex-wrap items-center gap-4">
         {job.url && (
           <a
@@ -259,11 +269,73 @@ function JobDetail({ job, cvDraft }: { job: Job; cvDraft: CvDraft | null }) {
   );
 }
 
+/**
+ * The company, plus whatever the application log knows about it.
+ *
+ * Two different facts share this cell because they are read together: that you applied to
+ * *this* role, and that you have already applied to this *employer* for another one. The
+ * second is the one worth interrupting for — the table sorts by score, so two roles at one
+ * company can sit fifty rows apart and never be seen together.
+ *
+ * The warning distinguishes duplicate applications from duplicate *CVs*. Two roles at one
+ * company is ordinary and often deliberate; two roles carrying two different tailored CVs
+ * means that employer is holding two different accounts of the same career, which is the
+ * thing you would want to have known before pressing Submit.
+ */
+function CompanyCell({ job, history }: { job: Job; history: Map<string, EmployerHistory> }) {
+  const applied = job.application;
+  const others = otherApplicationsAt(job, history);
+  // Count this job's own CV alongside the others: one tailored CV here and a different
+  // tailored CV there is two variants, even though neither row alone looks duplicated.
+  const variants = new Set(
+    [...(applied ? [applied] : []), ...others].map((a) => a.cv_draft_id ?? a.cv_source),
+  ).size;
+  const clash = others.length > 0 && variants > 1;
+
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-slate-700">{job.company ?? "—"}</span>
+      <div className="flex flex-wrap items-center gap-1">
+        {applied && (
+          <span
+            className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-200"
+            title={`Applied ${applied.applied_at ?? ""} with your ${CV_LABEL[applied.cv_source]}`}
+          >
+            ✓ Applied {formatApplied(applied.applied_at)}
+            {applied.cv_source !== "none" && ` · ${applied.cv_source}`}
+          </span>
+        )}
+        {others.length > 0 && (
+          <span
+            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset ${
+              clash
+                ? "bg-amber-50 text-amber-800 ring-amber-200"
+                : "bg-slate-50 text-slate-600 ring-slate-200"
+            }`}
+            title={others
+              .map(
+                (a) =>
+                  `${a.job_title ?? "another role"} — applied ${formatApplied(a.applied_at)} with your ${CV_LABEL[a.cv_source]}`,
+              )
+              .join(" · ")}
+          >
+            {clash ? "⚠ " : ""}
+            {others.length + (applied ? 1 : 0)} application
+            {others.length + (applied ? 1 : 0) === 1 ? "" : "s"} here
+            {clash && ` · ${variants} different CVs`}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function JobRow({
   job,
   selected,
   onToggleSelect,
   cvDraft,
+  history,
   open,
   onToggleOpen,
 }: {
@@ -271,11 +343,13 @@ function JobRow({
   selected?: boolean;
   onToggleSelect?: (id: string) => void;
   cvDraft?: CvDraft | null;
+  /** Applications indexed by employer, built over the whole pool — see `indexApplications`. */
+  history: Map<string, EmployerHistory>;
   /** Accordion: the open row is owned by the table so only one can be expanded. */
   open: boolean;
   onToggleOpen: () => void;
 }) {
-  const colSpan = onToggleSelect ? 7 : 6;
+  const colSpan = onToggleSelect ? 8 : 7;
   return (
     <>
       <tr
@@ -323,15 +397,22 @@ function JobRow({
             <span className="font-medium text-slate-900">{job.title ?? "—"}</span>
           </div>
         </td>
-        <td className="px-2 py-3 text-slate-700">{job.company ?? "—"}</td>
+        <td className="px-2 py-3">
+          <CompanyCell job={job} history={history} />
+        </td>
         <td className="px-2 py-3 text-slate-500">{job.location ?? "—"}</td>
-        <td className="px-2 py-3 pr-4">
+        <td className="px-2 py-3">
           <div className="flex flex-wrap items-center gap-1.5">
             <SourceBadge connector={job.connector} />
             {/* Where the form lives, once stage 2 has followed the link. Absent until
                 resolved, so an unresolved pool looks exactly as it did before. */}
             <AtsBadge ats={job.apply_ats} slug={job.apply_board_slug} stale={job.apply_stale} />
           </div>
+        </td>
+        {/* Opening a form is its own action, not a row selection — the cell swallows the
+            click so it never also toggles the accordion open behind the new tab. */}
+        <td className="px-2 py-3 pr-4" onClick={(e) => e.stopPropagation()}>
+          <AutoApplyButton job={job} compact />
         </td>
       </tr>
       {open && (
@@ -347,17 +428,24 @@ function JobRow({
 
 export default function JobsTable({
   jobs,
+  allJobs,
   selected,
   onToggleSelect,
   cvDraftByJobId,
 }: {
   jobs: Job[];
+  /** The unfiltered pool, for the application index only. `jobs` is what the filters left
+   *  visible, and building the index off that would hide a duplicate whose other role the
+   *  current filter happens to exclude — the case most worth catching. Defaults to `jobs`
+   *  so a caller with no filtering can ignore it. */
+  allJobs?: Job[];
   selected?: Set<string>;
   onToggleSelect?: (id: string) => void;
   cvDraftByJobId?: Record<string, CvDraft>;
 }) {
   // Accordion: one expanded row at a time, so opening a job closes whichever was open.
   const [openId, setOpenId] = useState<string | null>(null);
+  const history = useMemo(() => indexApplications(allJobs ?? jobs), [allJobs, jobs]);
 
   if (jobs.length === 0) {
     return (
@@ -382,7 +470,8 @@ export default function JobsTable({
             <th className="px-2 py-3 font-semibold">Title</th>
             <th className="px-2 py-3 font-semibold">Company</th>
             <th className="px-2 py-3 font-semibold">Location</th>
-            <th className="px-2 py-3 pr-4 font-semibold">Source</th>
+            <th className="px-2 py-3 font-semibold">Source</th>
+            <th className="px-2 py-3 pr-4 font-semibold">Apply</th>
           </tr>
         </thead>
         <tbody>
@@ -393,6 +482,7 @@ export default function JobsTable({
               selected={selected?.has(job.id)}
               onToggleSelect={onToggleSelect}
               cvDraft={cvDraftByJobId?.[job.id] ?? null}
+              history={history}
               open={openId === job.id}
               onToggleOpen={() => setOpenId((cur) => (cur === job.id ? null : job.id))}
             />

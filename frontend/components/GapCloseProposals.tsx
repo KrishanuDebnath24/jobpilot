@@ -8,9 +8,11 @@ import type {
   GapCloseStatus,
   Suggestion,
 } from "@/lib/types";
+import { GAP_CLOSE_KINDS } from "@/lib/types";
 import {
   deleteGapClose,
   gapCloseCvs,
+  gapCloseRefineCvs,
   getGapCloseStatus,
   getSuggestions,
   reviewGapClose,
@@ -22,8 +24,13 @@ const GAP_STAGES = [
   { key: "propose", label: "close gaps (skills, rewrites, new bullets)" },
 ];
 
+const GAP_STAGES_REFINED = [
+  { key: "analyze", label: "analyze the jobs" },
+  { key: "propose", label: "propose → review → re-propose" },
+];
+
 /** A run is finished only when the backend says so — not when the UI got bored waiting. */
-const RUNNING_PHASES: GapCloseStatus["phase"][] = ["starting", "analyzing", "proposing"];
+const RUNNING_PHASES: GapCloseStatus["phase"][] = ["starting", "analyzing", "proposing", "refining"];
 const isRunning = (s: GapCloseStatus | null): boolean =>
   s !== null && RUNNING_PHASES.includes(s.phase);
 
@@ -52,29 +59,31 @@ function humanSeconds(total: number): string {
 const KIND_LABEL: Record<GapCloseKind, string> = {
   claimed_skills: "Skills to claim",
   bullet_rewrites: "Bullet rewrites",
+  project_rewrites: "Project bullet rewrites",
   new_bullets: "New bullets",
 };
 
 /** The item's editable body text, per kind — what the textarea edits and what we send back. */
 function bodyOf(kind: GapCloseKind, item: Record<string, unknown>): string {
   if (kind === "claimed_skills") return String(item.skill ?? "");
-  if (kind === "bullet_rewrites") return String(item.after ?? "");
+  if (kind === "bullet_rewrites" || kind === "project_rewrites") return String(item.after ?? "");
   return String(item.text ?? "");
 }
 function bodyField(kind: GapCloseKind): "skill" | "after" | "text" {
-  return kind === "claimed_skills" ? "skill" : kind === "bullet_rewrites" ? "after" : "text";
+  if (kind === "claimed_skills") return "skill";
+  return kind === "bullet_rewrites" || kind === "project_rewrites" ? "after" : "text";
 }
 
 function countAccepted(gc: GapClose | null): number {
   if (!gc) return 0;
-  return (["claimed_skills", "bullet_rewrites", "new_bullets"] as GapCloseKind[]).reduce(
+  return GAP_CLOSE_KINDS.reduce(
     (n, k) => n + (gc[k] ?? []).filter((i) => i.accepted === true).length,
     0,
   );
 }
 function countTotal(gc: GapClose | null): number {
   if (!gc) return 0;
-  return (["claimed_skills", "bullet_rewrites", "new_bullets"] as GapCloseKind[]).reduce(
+  return GAP_CLOSE_KINDS.reduce(
     (n, k) => n + (gc[k] ?? []).length,
     0,
   );
@@ -82,7 +91,7 @@ function countTotal(gc: GapClose | null): number {
 /** Items still awaiting a decision — what makes a card "needs your attention". */
 function countUndecided(gc: GapClose | null): number {
   if (!gc) return 0;
-  return (["claimed_skills", "bullet_rewrites", "new_bullets"] as GapCloseKind[]).reduce(
+  return GAP_CLOSE_KINDS.reduce(
     (n, k) => n + (gc[k] ?? []).filter((i) => i.accepted === null || i.accepted === undefined).length,
     0,
   );
@@ -114,7 +123,13 @@ function ItemRow({
   const rejected = effective === false;
   // in_resume is only meaningful for skills; false means nothing in the résumé backs it.
   const needsWord = kind === "claimed_skills" ? item.in_resume === false : true;
-  const roleRef = typeof item.role_ref === "string" ? item.role_ref : null;
+  // A project rewrite is keyed by project name; a role rewrite by employer. Same badge.
+  const roleRef =
+    typeof item.role_ref === "string"
+      ? item.role_ref
+      : typeof item.project_ref === "string"
+        ? item.project_ref
+        : null;
 
   return (
     <li
@@ -145,7 +160,7 @@ function ItemRow({
               {body || <em className="text-slate-400">(empty)</em>}
             </span>
           )}
-          {kind === "bullet_rewrites" && typeof item.before === "string" && item.before && !editing && (
+          {(kind === "bullet_rewrites" || kind === "project_rewrites") && typeof item.before === "string" && item.before && !editing && (
             <p className="mt-0.5 text-xs text-slate-400 line-through decoration-slate-300">
               {item.before}
             </p>
@@ -296,12 +311,12 @@ function JobProposals({
     }
   };
 
-  const kinds = (["claimed_skills", "bullet_rewrites", "new_bullets"] as GapCloseKind[]).filter(
+  const kinds = GAP_CLOSE_KINDS.filter(
     (k) => (gc?.[k] ?? []).length > 0,
   );
   const total = countTotal(gc);
   // Counts follow the optimistic view too, so the header moves with the click.
-  const accepted = (["claimed_skills", "bullet_rewrites", "new_bullets"] as GapCloseKind[]).reduce(
+  const accepted = GAP_CLOSE_KINDS.reduce(
     (n, k) =>
       n +
       (gc?.[k] ?? []).filter((i) => {
@@ -310,7 +325,7 @@ function JobProposals({
       }).length,
     0,
   );
-  const undecided = (["claimed_skills", "bullet_rewrites", "new_bullets"] as GapCloseKind[]).reduce(
+  const undecided = GAP_CLOSE_KINDS.reduce(
     (n, k) =>
       n +
       (gc?.[k] ?? []).filter((i) => {
@@ -502,6 +517,7 @@ export default function GapCloseProposals({
   const [msg, setMsg] = useState<string>("");
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [proposed, setProposed] = useState(false);   // proposals observed landing this run
+  const [refining, setRefining] = useState(false);   // this run is the reviewed variant
   // View-only: suggestion ids cleared from the list. Nothing is deleted, and a job reappears
   // by itself if it stops being fully reviewed (e.g. its proposals were regenerated).
   const [hidden, setHidden] = useState<Set<string>>(new Set());
@@ -656,14 +672,17 @@ export default function GapCloseProposals({
     };
   }, [watchRun]);
 
-  const propose = async () => {
+  /* Both buttons run the same pipeline; `refined` only selects which endpoint and is
+     kept in state so the progress strip can name the stage honestly. */
+  const propose = async (refined = false) => {
     setBusy(true);
+    setRefining(refined);
     setProposed(false);
     setStartedAt(Date.now());
     setMsg("");
     setStatus(null);
     try {
-      await gapCloseCvs(selectedJobIds);
+      await (refined ? gapCloseRefineCvs(selectedJobIds) : gapCloseCvs(selectedJobIds));
       setHidden(new Set());   // a fresh run deserves a fresh look
       seenAny.current = false;
       await watchRun();
@@ -727,37 +746,56 @@ export default function GapCloseProposals({
             stays strictly résumé-evidenced.
           </p>
         </div>
-        <button
-          disabled={busy || selectedJobIds.length === 0}
-          onClick={propose}
-          className="ml-auto flex items-center gap-2 rounded-lg bg-amber-600 px-3.5 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-amber-700 active:scale-[0.98] disabled:opacity-40 disabled:hover:bg-amber-600"
-          title={
-            selectedJobIds.length === 0
-              ? "Select jobs in the table first"
-              : "Propose gap-closing skills and bullets for the selected jobs"
-          }
-        >
-          {busy && (
-            <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-          )}
-          {busy
-            ? `Closing gaps for ${selectedJobIds.length}…`
-            : `Propose for ${selectedJobIds.length} selected`}
-        </button>
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <button
+            disabled={busy || selectedJobIds.length === 0}
+            onClick={() => propose(false)}
+            className="flex items-center gap-2 rounded-lg border border-amber-300 bg-white px-3.5 py-2 text-sm font-medium text-amber-800 shadow-sm transition hover:bg-amber-50 active:scale-[0.98] disabled:opacity-40"
+            title={
+              selectedJobIds.length === 0
+                ? "Select jobs in the table first"
+                : "One pass: propose gap-closing skills and bullets for the selected jobs"
+            }
+          >
+            {busy && !refining && (
+              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-amber-300 border-t-amber-700" />
+            )}
+            {busy && !refining
+              ? `Closing gaps for ${selectedJobIds.length}…`
+              : `Propose for ${selectedJobIds.length}`}
+          </button>
+          <button
+            disabled={busy || selectedJobIds.length === 0}
+            onClick={() => propose(true)}
+            className="flex items-center gap-2 rounded-lg bg-amber-600 px-3.5 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-amber-700 active:scale-[0.98] disabled:opacity-40 disabled:hover:bg-amber-600"
+            title={
+              selectedJobIds.length === 0
+                ? "Select jobs in the table first"
+                : "Three passes: propose, have a second agent review each item for defensibility and writing quality, then re-propose against its findings. Costs more per job."
+            }
+          >
+            {busy && refining && (
+              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+            )}
+            {busy && refining
+              ? `Reviewing ${selectedJobIds.length}…`
+              : `Propose + review for ${selectedJobIds.length}`}
+          </button>
+        </div>
       </div>
 
       {(busy || isRunning(status)) && (
         <div className="mb-3">
           <StageStrip
             title={`Closing gaps for ${status?.total ?? selectedJobIds.length} job(s)`}
-            stages={GAP_STAGES}
+            stages={refining ? GAP_STAGES_REFINED : GAP_STAGES}
             startedAt={startedAt}
             tone="amber"
             stateOf={(k) => {
               // Both stages are reported by the runner now, so neither has to be guessed.
               if (k === "analyze") return status && status.phase !== "analyzing" && status.phase !== "starting" ? "done" : "active";
               if (status?.phase === "done") return "done";
-              return status?.phase === "proposing" ? "active" : "pending";
+              return status?.phase === "proposing" || status?.phase === "refining" ? "active" : "pending";
             }}
             note="Runs to completion — there is no time limit, and closing this page doesn't stop it."
           />

@@ -21,6 +21,12 @@ os.environ.setdefault(
     "DATABASE_URL",
     "postgresql+asyncpg://jobpilot:jobpilot_dev_pw@localhost:5432/jobpilot",
 )
+# The suite is deliberately torch-free: the deterministic hashing embedder exercises the
+# retrieval MECHANISM (embed -> store -> nearest-neighbour) without a model download. This
+# must be DECLARED, not inherited from a failed import — embeddings.get_embedder now raises
+# rather than silently swapping backends, because same-length vectors from different spaces
+# make search return noise with nothing erroring.
+os.environ.setdefault("EMBEDDING_BACKEND", "hashing")
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 MCP_DIR = REPO / "mcp"

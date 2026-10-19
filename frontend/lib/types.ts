@@ -24,6 +24,26 @@ export type Qualification = {
   reasons_json: ReasonsJson;
 } | null;
 
+/** One application actually sent, and the CV that went with it (apply agent stage 4).
+ *  Written only when the extension harvests answers off a form it filled and sees a
+ *  submit — so a row here means "you applied", not "you looked at the form". */
+export type Application = {
+  id: string;
+  job_id: string | null;
+  applied_at: string | null;
+  last_recorded_at: string | null;
+  company: string | null;
+  job_title: string | null;
+  employer_slug: string | null;
+  /** tailored | original | none — `none` means the form had no CV field, or the user
+   *  had already attached their own file before the extension got there. */
+  cv_source: "tailored" | "original" | "none";
+  cv_draft_id: string | null;
+  cv_label: string | null;
+  answers_recorded: number;
+  source: string;
+};
+
 export type Job = {
   id: string;
   title: string | null;
@@ -52,6 +72,9 @@ export type Job = {
   apply_board_slug?: string | null;
   apply_resolved_at?: string | null;
   apply_stale?: boolean;
+  // Apply agent stage 4: the application sent for this job, or null if you have not
+  // applied. Joined server-side in `get_qualified_jobs`, so the dashboard gets it free.
+  application?: Application | null;
 };
 
 // Phase 5: Analyzer + Enhancer
@@ -115,17 +138,39 @@ export type GapCloseRewrite = GapCloseItemBase & {
   after: string;
 };
 export type GapCloseNewBullet = GapCloseItemBase & { role_ref?: string; text: string };
+/** A rewrite of a PROJECT bullet. Keyed by project name rather than employer, because a
+ *  project has no employer — and projects are frequently the only evidence a CV carries
+ *  for a skill the day job never touched. */
+export type GapCloseProjectRewrite = GapCloseItemBase & {
+  project_ref?: string;
+  before?: string;
+  after: string;
+};
 export type GapClose = {
   claimed_skills?: GapCloseSkill[];
   bullet_rewrites?: GapCloseRewrite[];
   new_bullets?: GapCloseNewBullet[];
+  project_rewrites?: GapCloseProjectRewrite[];
 };
-export type GapCloseKind = "claimed_skills" | "bullet_rewrites" | "new_bullets";
+export type GapCloseKind =
+  | "claimed_skills"
+  | "bullet_rewrites"
+  | "new_bullets"
+  | "project_rewrites";
+/** The kinds in display order. Exported so the panel iterates one list rather than
+ *  repeating the literal at every call site — which is how `project_rewrites` came to be
+ *  missed in six places at once when it was added. */
+export const GAP_CLOSE_KINDS: GapCloseKind[] = [
+  "claimed_skills",
+  "bullet_rewrites",
+  "project_rewrites",
+  "new_bullets",
+];
 /** Durable progress of a gap-close run. The runner writes this on every phase change and
  *  after every job, so the panel can show what's happening even across a page reload — and
  *  during the analyze step, which produces nothing observable until it finishes. */
 export type GapCloseStatus = {
-  phase: "starting" | "analyzing" | "proposing" | "done" | "failed";
+  phase: "starting" | "analyzing" | "proposing" | "refining" | "done" | "failed";
   /** Jobs the run is working through (after the gap_close_max_jobs spend cap). */
   total: number;
   /** Jobs selected before the cap; `dropped` > 0 means the tail was not included. */
@@ -154,6 +199,7 @@ export type GapClosePatch = {
   text?: string;
   after?: string;
   role_ref?: string;
+  project_ref?: string;
   interview_prep?: string;
 };
 
@@ -332,6 +378,20 @@ export type QueryTurn = {
   routed_to_concierge: boolean;
   session_id: string;
 };
+/** One frame of /query/ask/stream. `session` arrives first (before any model work),
+ *  `done` last and exactly once; `error` replaces `done` when a turn fails mid-stream. */
+export type QueryStreamEvent =
+  | { kind: "session"; session_id: string }
+  | { kind: "tool"; tool: string; status: string }
+  | { kind: "token"; text: string }
+  | {
+      kind: "done";
+      answer: string;
+      events: ChatEventItem[];
+      citations: QueryCitation[];
+      routed_to_concierge: boolean;
+    }
+  | { kind: "error"; error: string };
 
 // Phase 6.5: aligned CVs (Rewriter⇄Critic loop).
 export type CvChangeNote = { field: string; why?: string; grounded_in?: string };
@@ -502,3 +562,95 @@ export type SeedProfileResult = {
   fields?: string[];
   profile?: ApplicationProfile;
 };
+
+// --------------------------------------------------------------------------- //
+// Query-agent traces — one per answered turn, written by the backend turn loop.
+// --------------------------------------------------------------------------- //
+
+// A span is one timed piece of a turn. `t` is the offset from turn start and `ms` the
+// duration, so spans place themselves on a waterfall; the tools of one round share a `t`
+// because they genuinely go out together.
+export type TraceSpan = {
+  kind: "llm" | "tool";
+  name: string;
+  t: number;
+  ms: number;
+  status: "ok" | "error";
+  // llm spans
+  ttft_ms?: number | null;
+  stop_reason?: string | null;
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  // tool spans
+  args?: string;
+  rows?: number | null;
+  bytes?: number | null;
+  error?: string | null;
+};
+
+export type TraceUsage = {
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  calls: number;
+  estimated_cost_usd: number;
+  naive_cost_usd: number;
+  savings_pct: number;
+};
+
+export type QueryTrace = {
+  id: string;
+  created_at: string | null;
+  session_id: string;
+  question: string;
+  model: string;
+  started_at: string;
+  duration_ms: number;
+  ttft_ms: number | null;
+  rounds: number;
+  stop_reason: string | null;
+  status: "ok" | "error";
+  error: string | null;
+  answer_chars: number;
+  answer_preview: string;
+  citations: number;
+  routed_to_concierge: boolean;
+  tools: string[];
+  tool_errors: number;
+  usage: TraceUsage;
+  spans: TraceSpan[];
+};
+
+export type TraceToolRollup = {
+  tool: string;
+  calls: number;
+  errors: number;
+  error_pct: number;
+  p50_ms: number | null;
+  p95_ms: number | null;
+  avg_rows: number | null;
+};
+
+export type TraceSummary = {
+  turns: number;
+  errors: number;
+  tool_error_turns: number;
+  ungrounded_turns: number;
+  uncited_turns: number;
+  routed_to_concierge: number;
+  latency_ms: { p50: number | null; p95: number | null; max: number | null };
+  ttft_ms: { p50: number | null; p95: number | null };
+  tokens: { input: number; output: number; cache_read: number; cache_creation: number };
+  cache_hit_pct: number;
+  cost_usd: number;
+  cost_per_turn_usd: number;
+  naive_cost_usd: number;
+  savings_pct: number;
+  tools: TraceToolRollup[];
+};
+
+export type QueryTraceReport = { traces: QueryTrace[]; summary: TraceSummary };

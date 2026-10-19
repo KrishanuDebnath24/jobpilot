@@ -39,6 +39,7 @@ from __future__ import annotations
 from .analyzer import _resume_block
 from .llm import LLMResult, extract_json
 from .settings import Settings
+from .writing import BULLET_STANDARD
 
 GAP_CLOSER_TOOL = "record_gap_close_proposals"
 
@@ -125,8 +126,36 @@ _SCHEMA = {
             },
             "description": "brand-new bullets that fold the remaining gap skills into real roles",
         },
+        "project_rewrites": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "project_ref": {
+                        "type": "string",
+                        "description": "the project's name, matching one on the CV exactly",
+                    },
+                    "before": {"type": "string", "description": "the existing bullet, verbatim"},
+                    "after": {
+                        "type": "string",
+                        "description": "the rewrite — the posting's vocabulary, a concrete "
+                                       "outcome, the strongest honest form of this work",
+                    },
+                    "closes": {"type": "string", "description": "the requirement this now addresses"},
+                    "interview_prep": {
+                        "type": "string",
+                        "description": "what the candidate must be able to walk through if asked",
+                    },
+                },
+                "required": ["project_ref", "before", "after", "closes", "interview_prep"],
+                "additionalProperties": False,
+            },
+            "description": "rewrites of PROJECT bullets. Projects are often the only "
+                           "evidence for a skill the day job never used, so propose here "
+                           "whenever the CV has projects — an empty list when it has none.",
+        },
     },
-    "required": ["claimed_skills", "bullet_rewrites", "new_bullets"],
+    "required": ["claimed_skills", "bullet_rewrites", "new_bullets", "project_rewrites"],
     "additionalProperties": False,
 }
 
@@ -145,6 +174,11 @@ _BRIEF = (
     "seniority, the same kind of system, a scope that fits the dates already on the CV. A "
     "bullet that claims work the role's level would never own is worse than no bullet — the "
     "candidate gets caught on it.\n"
+    "• PROPOSE FOR PROJECTS TOO. If the résumé carries a Projects section, its bullets are "
+    "in scope exactly as a role's are — often more so, because a project is frequently the "
+    "only evidence for a skill the day job never touched. Use `project_rewrites`, with "
+    "`project_ref` matching the project's name on the CV. Leave it empty ONLY when the CV "
+    "genuinely has no projects.\n"
     "• BE CONCRETE. Name the technology, the scope, the outcome. 'Worked with Kubernetes' "
     "closes nothing; 'ran the migration of 12 services onto EKS, cutting deploy time from "
     "40 to 6 minutes' closes it.\n"
@@ -156,8 +190,8 @@ _BRIEF = (
     "name, job title, employment date, degree, certification, or contact detail, and never "
     "add or remove a role. Those are re-imposed from a locked snapshot in code after you "
     "run, so anything you write there is thrown away before the candidate sees it. Every "
-    "`role_ref` must match an employer already on the CV.\n"
-    "• Use British/Irish spelling and plain, concrete language."
+    "`role_ref` must match an employer already on the CV.\n\n"
+    + BULLET_STANDARD
 )
 
 _SYSTEM = (
@@ -182,9 +216,10 @@ def _variable(analysis: dict) -> str:
         f"required_certifications: {analysis.get('required_certifications')}\n"
         f"gaps_vs_resume: {analysis.get('gaps_vs_resume')}\n"
         f"</analysis>\n\n"
-        "Produce the proposals via the tool: the gap skills worth claiming, the bullets "
-        "worth rewriting, and the new bullets that work the rest of the gaps into real "
-        "roles — each with the talking point the candidate needs to back it."
+        "Produce the proposals via the tool: the gap skills worth claiming, the role and "
+        "project bullets worth rewriting, and the new bullets that work the rest of the "
+        "gaps into real roles. Every item carries the talking point the candidate needs "
+        "to back it."
     )
 
 
@@ -193,19 +228,29 @@ async def propose_gap_close(
     resume: dict,
     settings: Settings,
     model: str | None = None,
+    critique: str | None = None,
 ) -> LLMResult:
     """Unconstrained proposals for ONE job. ``data`` is ``{claimed_skills, bullet_rewrites,
-    new_bullets}``; the caller assigns per-item ids and persists them as *unaccepted*."""
+    new_bullets, project_rewrites}``; the caller assigns per-item ids and persists them as
+    *unaccepted*.
+
+    ``critique`` is the second pass of propose → critique → propose: the review of this
+    agent's own previous output, appended to the variable half so the cached prefix — the
+    résumé and the brief — stays byte-identical between the two calls and is paid for once.
+    """
     stable = (
         f"CANDIDATE RÉSUMÉ (their real one, for shape and voice):\n{_resume_block(resume)}\n\n"
         f"{_BRIEF}\n\n"
     )
+    variable = _variable(analysis)
+    if critique:
+        variable = f"{variable}\n\n{critique}"
     # No temperature: the Sonnet tier rejects non-default sampling. The forced tool call
     # already pins the output shape.
     return await extract_json(
         system=_SYSTEM,
         cached_prefix=stable,
-        variable_text=_variable(analysis),
+        variable_text=variable,
         tool_name=GAP_CLOSER_TOOL,
         tool_description=(
             "Record the gap-closing CV proposals for this job: skills to claim, bullets to "
@@ -221,8 +266,9 @@ async def propose_gap_close(
 # --------------------------------------------------------------------------- #
 # Proposal bookkeeping — pure, so the runner and the tests agree on item shape
 # --------------------------------------------------------------------------- #
-_KINDS = ("claimed_skills", "bullet_rewrites", "new_bullets")
-_PREFIX = {"claimed_skills": "sk", "bullet_rewrites": "rw", "new_bullets": "nb"}
+_KINDS = ("claimed_skills", "bullet_rewrites", "new_bullets", "project_rewrites")
+_PREFIX = {"claimed_skills": "sk", "bullet_rewrites": "rw", "new_bullets": "nb",
+           "project_rewrites": "pr"}
 
 
 def with_item_ids(out: dict) -> dict:

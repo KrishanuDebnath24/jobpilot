@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatMessage, QueryCitation } from "@/lib/types";
-import { askQuery, createQuerySession, getQueryMessages } from "@/lib/api";
+import { createQuerySession, getQueryMessages, streamQuery } from "@/lib/api";
+import Markdown from "./Markdown";
 
 type Row = ChatMessage & { citations?: QueryCitation[]; routed?: boolean };
 
@@ -15,6 +16,9 @@ export default function Ask() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The in-flight turn: answer text as it streams, and the tools called so far.
+  const [draft, setDraft] = useState("");
+  const [liveTools, setLiveTools] = useState<string[]>([]);
   const scroller = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -31,7 +35,7 @@ export default function Ask() {
 
   useEffect(() => {
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
-  }, [rows, busy]);
+  }, [rows, busy, draft, liveTools]);
 
   const ask = useCallback(async () => {
     const question = input.trim();
@@ -40,24 +44,48 @@ export default function Ask() {
     setError(null);
     setRows((r) => [...r, { id: `local-${Date.now()}`, role: "user", content: question, created_at: null }]);
     setBusy(true);
+    setDraft("");
+    setLiveTools([]);
     try {
-      const turn = await askQuery(question, sessionId);
-      if (!sessionId) setSessionId(turn.session_id);
-      setRows((r) => [
-        ...r,
-        {
-          id: `a-${Date.now()}`,
-          role: "assistant",
-          content: turn.answer,
-          created_at: null,
-          citations: turn.citations,
-          routed: turn.routed_to_concierge,
-        },
-      ]);
+      await streamQuery(question, sessionId, (ev) => {
+        switch (ev.kind) {
+          case "session":
+            setSessionId((cur) => cur ?? ev.session_id);
+            break;
+          case "tool":
+            setLiveTools((t) => [...t, ev.tool]);
+            break;
+          case "token":
+            setDraft((d) => d + ev.text);
+            break;
+          case "done":
+            // Commit the streamed draft as a finished row — `done` carries the
+            // citations and the redirect hint, which only exist once tools have run.
+            setRows((r) => [
+              ...r,
+              {
+                id: `a-${Date.now()}`,
+                role: "assistant",
+                content: ev.answer,
+                created_at: null,
+                citations: ev.citations,
+                routed: ev.routed_to_concierge,
+              },
+            ]);
+            setDraft("");
+            setLiveTools([]);
+            break;
+          case "error":
+            setError(ev.error);
+            break;
+        }
+      });
     } catch (e) {
       setError(String(e));
     } finally {
       setBusy(false);
+      setDraft("");
+      setLiveTools([]);
     }
   }, [input, sessionId, busy]);
 
@@ -99,13 +127,17 @@ export default function Ask() {
         {rows.map((m) => (
           <div key={m.id} className={m.role === "user" ? "text-right" : "text-left"}>
             <div
-              className={`inline-block max-w-[85%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm shadow-card ${
+              className={`rounded-2xl px-3 py-2 text-sm shadow-card ${
                 m.role === "user"
-                  ? "rounded-br-md bg-sky-600 text-white"
-                  : "rounded-bl-md border border-slate-200 bg-white text-slate-700"
+                  ? "inline-block max-w-[85%] whitespace-pre-wrap rounded-br-md bg-sky-600 text-white"
+                  : "block rounded-bl-md border border-slate-200 bg-white text-slate-700"
               }`}
             >
-              {m.content || (m.role === "assistant" ? "…" : "")}
+              {m.role === "assistant" ? (
+                m.content ? <Markdown text={m.content} /> : "…"
+              ) : (
+                m.content
+              )}
             </div>
             {m.routed && (
               <p className="mt-1 text-xs text-amber-600">
@@ -151,14 +183,37 @@ export default function Ask() {
             )}
           </div>
         ))}
-        {busy && (
+        {/* Live turn: tools appear the moment each one returns, then the answer types
+            itself in. Both are replaced by a committed row on `done`. */}
+        {liveTools.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+            {liveTools.map((t, i) => (
+              <span
+                key={`${t}-${i}`}
+                className="rounded-md border border-slate-200 bg-white px-1.5 py-0.5 font-mono text-[10px] text-slate-500"
+              >
+                {t}
+              </span>
+            ))}
+          </div>
+        )}
+        {draft && (
+          <div className="text-left">
+            <div className="rounded-2xl rounded-bl-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-card">
+              {/* The caret rides at the end of the streamed text so it stays put as the
+                  markdown underneath it resolves (a table finishing its last row). */}
+              <Markdown text={`${draft}▌`} />
+            </div>
+          </div>
+        )}
+        {busy && !draft && (
           <div className="flex items-center gap-2 text-left text-xs text-slate-500">
             <span className="flex gap-1">
               <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-sky-500 [animation-delay:-0.3s]" />
               <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-sky-500 [animation-delay:-0.15s]" />
               <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-sky-500" />
             </span>
-            looking…
+            {liveTools.length > 0 ? "reading your data…" : "looking…"}
           </div>
         )}
       </div>

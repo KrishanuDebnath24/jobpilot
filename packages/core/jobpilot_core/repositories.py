@@ -54,6 +54,23 @@ def job_to_dict(job: models.Job) -> dict:
     }
 
 
+def application_to_dict(a: models.Application) -> dict:
+    return {
+        "id": str(a.id),
+        "job_id": str(a.job_id) if a.job_id else None,
+        "applied_at": _iso(a.applied_at),
+        "last_recorded_at": _iso(a.last_recorded_at),
+        "company": a.company,
+        "job_title": a.job_title,
+        "employer_slug": a.employer_slug,
+        "cv_source": a.cv_source,
+        "cv_draft_id": str(a.cv_draft_id) if a.cv_draft_id else None,
+        "cv_label": a.cv_label,
+        "answers_recorded": a.answers_recorded,
+        "source": a.source,
+    }
+
+
 def resume_to_dict(resume: models.Resume) -> dict:
     return {
         "id": str(resume.id),
@@ -577,13 +594,23 @@ async def upsert_qualification(
 
 
 async def get_qualified_jobs(session: AsyncSession, user_id: uuid.UUID, limit: int = 1000) -> list[dict]:
-    """Jobs joined with their qualification (LEFT JOIN) for the dashboard."""
+    """Jobs joined with their qualification and their application (both LEFT JOIN).
+
+    The application join is safe to do here rather than in a second call because
+    ``uq_application_per_user_job`` caps it at one row per job — without that constraint
+    this would fan out and silently duplicate job rows on the dashboard.
+    """
     stmt = (
-        select(models.Job, models.Qualification)
+        select(models.Job, models.Qualification, models.Application)
         .outerjoin(
             models.Qualification,
             (models.Qualification.job_id == models.Job.id)
             & (models.Qualification.user_id == user_id),
+        )
+        .outerjoin(
+            models.Application,
+            (models.Application.job_id == models.Job.id)
+            & (models.Application.user_id == user_id),
         )
         .where(models.Job.user_id == user_id)
         .order_by(models.Job.created_at.desc())
@@ -591,8 +618,9 @@ async def get_qualified_jobs(session: AsyncSession, user_id: uuid.UUID, limit: i
     )
     rows = (await session.execute(stmt)).all()
     out: list[dict] = []
-    for job, q in rows:
+    for job, q, app in rows:
         d = job_to_dict(job)
+        d["application"] = application_to_dict(app) if app is not None else None
         d["qualification"] = (
             {
                 "score": q.score,
@@ -1523,11 +1551,36 @@ async def embedding_coverage(session: AsyncSession, user_id: uuid.UUID) -> dict[
 # Phase 7 — semantic search (pgvector cosine similarity over embedded rows)
 # --------------------------------------------------------------------------- #
 async def semantic_search_jobs(
-    session: AsyncSession, user_id: uuid.UUID, embedding: list[float], limit: int = 8
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    embedding: list[float],
+    limit: int = 8,
+    company: str | None = None,
+    decision: str | None = None,
+    since_days: int | None = None,
+    employment_type: str | None = None,
+    seniority: str | None = None,
 ) -> list[dict]:
     """Nearest jobs to the query ``embedding`` by cosine similarity (embedded jobs
     only). Each result carries ``similarity`` (1 - cosine_distance) so the caller can
-    ground + threshold. Joined with the qualification so answers can cite the decision."""
+    ground + threshold. Joined with the qualification so answers can cite the decision.
+
+    The optional filters narrow the candidate set *before* ranking, so "roles at Stripe
+    about payments" is one query instead of a broad search the caller sifts by hand.
+
+    Two consequences worth stating, because both are correct and both surprise: an equality
+    filter on ``employment_type``/``seniority`` excludes rows Scout left NULL (it classifies
+    deterministically and never guesses), and ``decision`` excludes unscored jobs. A
+    filtered result is always a subset of the pool, never a total.
+
+    ``company`` is canonicalized through :func:`scout.canon_company` — the same function
+    dedupe uses — so "Stripe, Inc." finds a row stored as "Stripe". Only the INPUT is
+    canonicalized, not the column, so matching is "canonical query is a substring of the raw
+    stored value". That widens deliberately: "Acme Corp" reduces to "acme" and would also
+    match a genuinely different "Acme". Canonicalizing both sides needs a generated column.
+    """
+    from .scout import canon_company
+
     dist = models.Job.embedding.cosine_distance(embedding)
     stmt = (
         select(models.Job, models.Qualification, dist.label("distance"))
@@ -1537,9 +1590,21 @@ async def semantic_search_jobs(
             & (models.Qualification.user_id == user_id),
         )
         .where(models.Job.user_id == user_id, models.Job.embedding.is_not(None))
-        .order_by(dist)
-        .limit(limit)
     )
+    if company:
+        # Fall back to the raw value if canonicalization empties it, rather than dropping
+        # the filter — a silently unfiltered search is worse than an over-narrow one.
+        stmt = stmt.where(models.Job.company.ilike(f"%{canon_company(company) or company}%"))
+    if decision:
+        stmt = stmt.where(models.Qualification.decision == decision)
+    if employment_type:
+        stmt = stmt.where(models.Job.employment_type == employment_type)
+    if seniority:
+        stmt = stmt.where(models.Job.seniority == seniority)
+    cutoff = _since(since_days)
+    if cutoff is not None:
+        stmt = stmt.where(models.Job.created_at >= cutoff)
+    stmt = stmt.order_by(dist).limit(limit)
     out: list[dict] = []
     for job, q, distance in (await session.execute(stmt)).all():
         d = job_to_dict(job)
@@ -1552,16 +1617,40 @@ async def semantic_search_jobs(
 
 
 async def semantic_search_analyses(
-    session: AsyncSession, user_id: uuid.UUID, embedding: list[float], limit: int = 8
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    embedding: list[float],
+    limit: int = 8,
+    company: str | None = None,
+    since_days: int | None = None,
+    seniority: str | None = None,
 ) -> list[dict]:
-    """Nearest job analyses to the query ``embedding`` (embedded analyses only)."""
+    """Nearest job analyses to the query ``embedding`` (embedded analyses only).
+
+    ``seniority`` (the Analyzer's inference, distinct from ``Job.seniority``, which Scout
+    sets deterministically) and ``since_days`` are columns on ``analyses``. ``company``
+    lives on the job, so it joins — and **only when asked for**: ``Analysis.job_id`` is
+    nullable, so an unconditional join would silently drop every analysis not tied to a job.
+
+    ``company`` is canonicalized the same way as in :func:`semantic_search_jobs`.
+    """
+    from .scout import canon_company
+
     dist = models.Analysis.embedding.cosine_distance(embedding)
-    stmt = (
-        select(models.Analysis, dist.label("distance"))
-        .where(models.Analysis.user_id == user_id, models.Analysis.embedding.is_not(None))
-        .order_by(dist)
-        .limit(limit)
+    stmt = select(models.Analysis, dist.label("distance")).where(
+        models.Analysis.user_id == user_id, models.Analysis.embedding.is_not(None)
     )
+    if company:
+        stmt = stmt.join(models.Job, models.Analysis.job_id == models.Job.id).where(
+            models.Job.user_id == user_id,
+            models.Job.company.ilike(f"%{canon_company(company) or company}%"),
+        )
+    if seniority:
+        stmt = stmt.where(models.Analysis.seniority == seniority)
+    cutoff = _since(since_days)
+    if cutoff is not None:
+        stmt = stmt.where(models.Analysis.created_at >= cutoff)
+    stmt = stmt.order_by(dist).limit(limit)
     out: list[dict] = []
     for analysis, distance in (await session.execute(stmt)).all():
         d = analysis_to_dict(analysis)
@@ -1632,8 +1721,14 @@ async def _group_counts(session, model, column, user_id) -> list[dict]:
 
 async def job_stats(session: AsyncSession, user_id: uuid.UUID) -> dict:
     """A compact, exact breakdown of the user's pool: totals + counts by decision,
-    source, and description completeness — all computed in SQL. The structured answer
-    surface for 'give me a breakdown' questions."""
+    source, employer, and description completeness — all computed in SQL. The structured
+    answer surface for 'give me a breakdown' questions.
+
+    ``by_company`` is the exact answer to 'how many roles at X?' — and, because it names
+    the employers that actually exist, the grounding a caller needs before filtering by one.
+    It is capped at the top 50 by count: company cardinality is far higher than source or
+    completeness, and an uncapped list of several hundred employers would be a few thousand
+    tokens on every call. A capped list is NOT a total — do not sum it."""
     total_jobs = await count_jobs(session, user_id)
     qualified = await count_qualifications(session, user_id, decision="qualified")
     disqualified = await count_qualifications(session, user_id, decision="disqualified")
@@ -1645,6 +1740,8 @@ async def job_stats(session: AsyncSession, user_id: uuid.UUID) -> dict:
         "disqualified": disqualified,
         "unscored": max(0, total_jobs - scored),
         "by_source": await _group_counts(session, models.Job, models.Job.connector, user_id),
+        "by_company": (
+            await _group_counts(session, models.Job, models.Job.company, user_id))[:50],
         "by_completeness": await _group_counts(
             session, models.Job, models.Job.description_completeness, user_id),
     }
@@ -1751,6 +1848,36 @@ async def disqualified_job_ids(session: AsyncSession, user_id: uuid.UUID) -> lis
     return [row[0] for row in res.all()]
 
 
+async def unscored_job_ids(session: AsyncSession, user_id: uuid.UUID) -> list[uuid.UUID]:
+    """Ids of the caller's jobs that have NO qualification row at all — the ``unscored``
+    bucket ``job_stats`` reports (total_jobs - scored). The mirror image of
+    ``disqualified_job_ids``: that one needs an explicit disqualified verdict, this one
+    needs the absence of any verdict, so a job is never in both. ``qualifications.job_id``
+    is NOT NULL, so ``NOT IN`` cannot be poisoned by a NULL row."""
+    res = await session.execute(
+        select(models.Job.id).where(
+            models.Job.user_id == user_id,
+            models.Job.id.notin_(
+                select(models.Qualification.job_id).where(
+                    models.Qualification.user_id == user_id
+                )
+            ),
+        )
+    )
+    return [row[0] for row in res.all()]
+
+
+async def all_job_ids(session: AsyncSession, user_id: uuid.UUID) -> list[uuid.UUID]:
+    """Every job id the caller owns — the target set for "delete all jobs". Resolved as
+    ids (rather than deleting by ``user_id`` in one statement) so the caller can collect
+    the rendered CV files first and report an exact count, the same shape the other
+    bulk deletes use."""
+    res = await session.execute(
+        select(models.Job.id).where(models.Job.user_id == user_id)
+    )
+    return [row[0] for row in res.all()]
+
+
 async def delete_jobs(
     session: AsyncSession, user_id: uuid.UUID, job_ids: list[uuid.UUID]
 ) -> int:
@@ -1758,7 +1885,12 @@ async def delete_jobs(
     suggestions, and tailored CV drafts — cascade via each child's ON DELETE CASCADE FK
     to ``jobs``. Scoped to ``user_id`` so a caller can only ever delete their own rows.
     Rendered CV files are cleaned up separately (see ``cv_file_refs_for_jobs``), since the
-    cascade removes the draft rows but not their storage objects. Returns rows deleted."""
+    cascade removes the draft rows but not their storage objects.
+
+    ``applications`` is the one child that does NOT go: its FK is ON DELETE SET NULL, so
+    the row survives with its ``company``/``job_title`` snapshots intact. Deleting a job
+    you already applied to is a tidy-up, and it must not erase the fact that you applied.
+    Returns rows deleted."""
     if not job_ids:
         return 0
     res = await session.execute(
@@ -1972,6 +2104,32 @@ async def delete_answer_bank_entry(
     return bool(result.rowcount)
 
 
+async def mark_answers_used(
+    session: AsyncSession, user_id: uuid.UUID, entry_ids: list[uuid.UUID]
+) -> int:
+    """Record that these banked answers were submitted, unchanged, on a real form.
+
+    A usage bump is not a re-confirmation: ``confirmed_at`` is deliberately untouched, so
+    the staleness clock on "what is your notice period?" keeps running even while the
+    answer is being reused. Otherwise a drifting answer would look freshest exactly when
+    it had been unthinkingly reused the most.
+    """
+    if not entry_ids:
+        return 0
+    result = await session.execute(
+        update(models.AnswerBankEntry)
+        .where(
+            models.AnswerBankEntry.user_id == user_id,
+            models.AnswerBankEntry.id.in_(list(entry_ids)),
+        )
+        .values(
+            times_used=models.AnswerBankEntry.times_used + 1,
+            last_used_at=datetime.now(timezone.utc),
+        )
+    )
+    return int(result.rowcount or 0)
+
+
 # --------------------------------------------------------------------------- #
 # Apply targets (apply agent, stage 2)
 # --------------------------------------------------------------------------- #
@@ -2070,3 +2228,232 @@ async def get_apply_coverage(session: AsyncSession, user_id: uuid.UUID) -> dict:
         "reachable": reachable,
         "by_ats": dict(sorted(by_ats.items(), key=lambda kv: -kv[1])),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Applications (apply agent, stage 4) — what was actually sent
+# --------------------------------------------------------------------------- #
+def _employer_key(employer_slug: str | None, company: str | None) -> str | None:
+    """Group key for "is this the same employer?".
+
+    Delegates to ``apply_fill.employer_scope``, which already knows that the ATS board
+    slug beats the display name — one employer reaches us as "Stripe", "Stripe, Inc."
+    and "Stripe Payments Europe" depending on the connector, and grouping on the raw
+    string would report three companies where there is one. Imported lazily because
+    ``apply_fill`` pulls in the embedding-backed answer bank, which this module has no
+    other reason to load.
+    """
+    from .apply_fill import employer_scope
+
+    key = employer_scope(employer_slug, company)
+    return None if key == "global" else key
+
+
+async def record_application(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    *,
+    job_id: uuid.UUID,
+    company: str | None = None,
+    job_title: str | None = None,
+    employer_slug: str | None = None,
+    cv_source: str = "none",
+    cv_draft_id: uuid.UUID | None = None,
+    cv_label: str | None = None,
+    answers_recorded: int = 0,
+    source: str = "extension",
+) -> dict:
+    """Log a submitted application, or fold a later step into the one already logged.
+
+    Idempotent per ``(user_id, job_id)`` because the extension records once per step of a
+    multi-step form. Three fields have deliberate update rules:
+
+    * ``applied_at`` is written once and never moved. It answers "when did I apply", and a
+      form finished across two sittings applied on the first one.
+    * ``cv_source`` never downgrades to ``none``. The CV upload is almost always on step
+      one, so steps two and three legitimately report no CV — letting them overwrite would
+      turn a tailored application into an unattributed one halfway through the form.
+    * ``answers_recorded`` takes the max rather than the sum, so a double-fired submit
+      cannot inflate it. It is evidence of the largest step seen, not a running total.
+    """
+    existing = (
+        await session.execute(
+            select(models.Application).where(
+                models.Application.user_id == user_id,
+                models.Application.job_id == job_id,
+            )
+        )
+    ).scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+
+    if existing is None:
+        row = models.Application(
+            user_id=user_id,
+            job_id=job_id,
+            applied_at=now,
+            last_recorded_at=now,
+            company=company,
+            job_title=job_title,
+            employer_slug=employer_slug,
+            cv_source=cv_source,
+            cv_draft_id=cv_draft_id,
+            cv_label=cv_label,
+            answers_recorded=max(0, int(answers_recorded)),
+            source=source,
+        )
+        session.add(row)
+        await session.flush()
+        return {**application_to_dict(row), "created": True}
+
+    existing.last_recorded_at = now
+    existing.answers_recorded = max(
+        existing.answers_recorded or 0, max(0, int(answers_recorded))
+    )
+    # See the docstring: a later step reporting no CV field is silence, not a correction.
+    if cv_source and cv_source != "none":
+        existing.cv_source = cv_source
+        existing.cv_draft_id = cv_draft_id
+        existing.cv_label = cv_label
+    # Snapshots only ever fill in — a later step never blanks a company we already have.
+    existing.company = existing.company or company
+    existing.job_title = existing.job_title or job_title
+    existing.employer_slug = existing.employer_slug or employer_slug
+    await session.flush()
+    return {**application_to_dict(existing), "created": False}
+
+
+async def get_applications(
+    session: AsyncSession, user_id: uuid.UUID, limit: int = 500
+) -> list[dict]:
+    """The caller's applications, most recent first."""
+    rows = (
+        await session.execute(
+            select(models.Application)
+            .where(models.Application.user_id == user_id)
+            .order_by(models.Application.applied_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    return [application_to_dict(a) for a in rows]
+
+
+async def get_applications_by_job(
+    session: AsyncSession, user_id: uuid.UUID
+) -> dict[str, dict]:
+    """Applications keyed by job id, for joining onto a job list.
+
+    Rows whose job was deleted are dropped: this map exists to decorate live job rows, and
+    an orphan has nothing to decorate. They stay readable through ``get_applications``.
+    """
+    return {
+        a["job_id"]: a
+        for a in await get_applications(session, user_id, limit=5000)
+        if a["job_id"]
+    }
+
+
+async def application_company_summary(session: AsyncSession, user_id: uuid.UUID) -> dict:
+    """Applications grouped by employer — the "am I applying twice?" answer.
+
+    Companies are grouped by ``_employer_key`` rather than by the raw display name, and
+    ``cv_variants`` counts the *distinct* CVs sent to that employer: two applications
+    carrying two different tailored CVs is the case worth flagging, whereas two carrying
+    the same file is just two roles at one company. ``repeats`` is the subset with more
+    than one application, which is what a warning should be driven off.
+    """
+    apps = await get_applications(session, user_id, limit=5000)
+    groups: dict[str, dict] = {}
+    for a in apps:
+        key = _employer_key(a["employer_slug"], a["company"]) or f"job:{a['id']}"
+        g = groups.setdefault(
+            key,
+            {"company": a["company"], "employer_key": key, "count": 0,
+             "applications": [], "cv_refs": set()},
+        )
+        g["count"] += 1
+        # A tailored CV is identified by its draft; every original is the same file.
+        g["cv_refs"].add(a["cv_draft_id"] or a["cv_source"])
+        g["company"] = g["company"] or a["company"]
+        g["applications"].append(
+            {"job_id": a["job_id"], "job_title": a["job_title"],
+             "applied_at": a["applied_at"], "cv_source": a["cv_source"],
+             "cv_label": a["cv_label"]}
+        )
+    out = []
+    for g in groups.values():
+        out.append({
+            "company": g["company"],
+            "employer_key": g["employer_key"],
+            "count": g["count"],
+            "cv_variants": len(g["cv_refs"]),
+            "applications": g["applications"],
+        })
+    out.sort(key=lambda g: (-g["count"], (g["company"] or "").lower()))
+    return {
+        "total_applications": len(apps),
+        "companies": out,
+        "repeats": [g for g in out if g["count"] > 1],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Agent events — the trace store (Query agent observability)
+# --------------------------------------------------------------------------- #
+# ``agent_events`` was in the schema from Phase 1 and unused until now: a user-scoped,
+# CASCADE-erased JSONB log. One row per Query turn (``type='query_turn'``) holds the whole
+# trace — spans, tokens, cost — so tracing needed no migration and inherits erasure for
+# free (the payload quotes the user's own question, so it MUST die with the account).
+def agent_event_to_dict(ev: models.AgentEvent) -> dict:
+    return {
+        "id": str(ev.id),
+        "type": ev.type,
+        "payload": ev.payload_json or {},
+        "created_at": _iso(ev.created_at),
+    }
+
+
+async def record_agent_event(
+    session: AsyncSession, user_id: uuid.UUID, event_type: str, payload: dict | None = None
+) -> models.AgentEvent:
+    ev = models.AgentEvent(user_id=user_id, type=event_type, payload_json=payload or {})
+    session.add(ev)
+    await session.flush()
+    return ev
+
+
+async def list_agent_events(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    *,
+    event_type: str | None = None,
+    limit: int = 100,
+    since_days: int | None = None,
+) -> list[models.AgentEvent]:
+    """Newest first. ``limit`` is capped by the caller (db-mcp), not here."""
+    stmt = select(models.AgentEvent).where(models.AgentEvent.user_id == user_id)
+    if event_type:
+        stmt = stmt.where(models.AgentEvent.type == event_type)
+    if since_days is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+        stmt = stmt.where(models.AgentEvent.created_at >= cutoff)
+    stmt = stmt.order_by(models.AgentEvent.created_at.desc()).limit(limit)
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def prune_agent_events(
+    session: AsyncSession, user_id: uuid.UUID, event_type: str, keep: int
+) -> int:
+    """Keep only the newest ``keep`` events of a type. Traces are diagnostic exhaust, not
+    records — an unbounded log would outgrow the data it describes. Returns rows deleted."""
+    ids = (
+        await session.execute(
+            select(models.AgentEvent.id)
+            .where(models.AgentEvent.user_id == user_id, models.AgentEvent.type == event_type)
+            .order_by(models.AgentEvent.created_at.desc())
+            .offset(keep)
+        )
+    ).scalars().all()
+    if not ids:
+        return 0
+    await session.execute(delete(models.AgentEvent).where(models.AgentEvent.id.in_(list(ids))))
+    return len(ids)

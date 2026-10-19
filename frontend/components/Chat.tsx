@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatEventItem, ChatMessage } from "@/lib/types";
 import { createChatSession, getChatMessages, listChatSessions, postChatMessage } from "@/lib/api";
+import Markdown from "./Markdown";
 
 type Row = ChatMessage & { events?: ChatEventItem[] };
 
@@ -90,7 +91,8 @@ export default function Chat({
         </div>
         <p className="mt-1 text-xs leading-relaxed text-slate-500">
           Reconfigure and run your pipeline, review gates, or act on your selected jobs —
-          “analyze/tailor/prepare/delete my selected jobs”, or “delete the disqualified ones”.
+          “analyze/tailor/prepare/delete my selected jobs”. To clear out the pool: “delete the
+          disqualified ones”, “delete the unscored ones”, or “delete all jobs”.
         </p>
       </div>
 
@@ -103,13 +105,17 @@ export default function Chat({
         {rows.map((m) => (
           <div key={m.id} className={m.role === "user" ? "text-right" : "text-left"}>
             <div
-              className={`inline-block max-w-[85%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm shadow-card ${
+              className={`rounded-2xl px-3 py-2 text-sm shadow-card ${
                 m.role === "user"
-                  ? "rounded-br-md bg-emerald-600 text-white"
-                  : "rounded-bl-md border border-slate-200 bg-white text-slate-700"
+                  ? "inline-block max-w-[85%] whitespace-pre-wrap rounded-br-md bg-emerald-600 text-white"
+                  : "block rounded-bl-md border border-slate-200 bg-white text-slate-700"
               }`}
             >
-              {m.content || (m.role === "assistant" ? "…" : "")}
+              {m.role === "assistant" ? (
+                m.content ? <Markdown text={m.content} /> : "…"
+              ) : (
+                m.content
+              )}
             </div>
             {m.events && m.events.length > 0 && (
               <div className="mt-1 flex flex-wrap gap-1 text-left">

@@ -61,7 +61,10 @@ LOCKED_CATEGORIES: dict[str, tuple[str, ...]] = {
         "offence", "offense",
     ),
     "security_clearance": (
-        "security clearance", "clearance level", "vetting", "sc cleared", "dv cleared",
+        # Bare "clearance" on purpose: the specific phrasings below miss the ones that
+        # actually appear on forms — "Do you hold a current SC clearance?" contains none
+        # of them. No ordinary screening question uses the word in another sense.
+        "clearance", "vetting", "sc cleared", "dv cleared",
     ),
     "health_disability": (
         "disability", "disabled", "long term condition", "health condition",

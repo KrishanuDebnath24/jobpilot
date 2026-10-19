@@ -13,7 +13,7 @@ import base64
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from jobpilot_core import models, repositories
+from jobpilot_core import doc_meta, models, repositories
 from jobpilot_core.db import session_scope
 from jobpilot_core.mcp_auth import UserContextMiddleware, require_user_id
 from jobpilot_core.resume_parse import parse_resume_bytes
@@ -222,6 +222,37 @@ async def get_resume_file(resume_id: str | None = None) -> dict:
     data = await asyncio.to_thread(storage.get_bytes, ref)
     return {"file_b64": base64.b64encode(data).decode("ascii"), "file_ref": ref}
 
+
+@mcp.tool()
+async def get_resume_doc_metadata(resume_id: str | None = None) -> dict:
+    """Descriptive document properties (title/author/producer/dates) of the ORIGINAL
+    uploaded CV, so a tailored export can carry them instead of the renderer's defaults.
+
+    Reads the stored file and returns only its property set — never its content, which is
+    why the export path uses this rather than pulling the whole file across to inspect it.
+    Same scoping rule as ``get_resume_file``: the ref MUST live under the caller's prefix.
+
+    Best effort by contract. A missing resume, an assembled version with no original file,
+    a scan, or an unreadable document all return ``{"metadata": {}}`` rather than an error:
+    the caller then falls back to neutral values, and an export is never blocked by the
+    properties it would have liked to copy. Timestamps are ISO-8601 strings on the wire."""
+    uid = require_user_id()
+    async with session_scope() as session:
+        if resume_id:
+            resume = await repositories.get_resume(session, uid, uuid.UUID(resume_id))
+        else:
+            resume = await repositories.get_latest_uploaded_resume(session, uid)
+        if resume is None:
+            return {"metadata": {}}
+        ref = resume.file_ref
+    if not ref or not ref.startswith(user_prefix(uid)):
+        return {"metadata": {}}  # e.g. an assembled:// version has no original file
+    storage = get_storage(settings)
+    try:
+        data = await asyncio.to_thread(storage.get_bytes, ref)
+    except Exception:  # noqa: BLE001 - a lost object must not fail the export that asked
+        return {"metadata": {}}
+    return {"metadata": doc_meta.to_jsonable(doc_meta.read_doc_metadata(data))}
 
 @mcp.tool()
 async def get_resume_version(resume_id: str) -> dict:

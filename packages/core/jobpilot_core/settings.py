@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     # Enhancer. Bounded per run by gap_close_max_jobs.
     gap_closer_max_tokens: int = 4000
     gap_close_max_jobs: int = 20  # bound a gap-close selection (spend guard)
+    # The proposal critic (propose -> critique -> propose). Smaller than the proposer's
+    # budget: it emits findings keyed to item ids, never rewritten proposals.
+    gap_critic_max_tokens: int = 2500
     analyze_max_jobs: int = 200  # hard cap on jobs analyzed per run (spend guard)
     # Selected/single mode runs synchronous cached calls; at/above this count a run
     # switches to the Batch API (50% cheaper, non-interactive).
@@ -229,7 +232,13 @@ class Settings(BaseSettings):
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
     )
-    crawler_board: str = "irishjobs"  # single Irish board (no public API)
+    # Which board the crawler walks. Default changed from "irishjobs" on 2026-09-18:
+    # irishjobs.ie (and jobs.ie, same owner) now answer 403 to every request including
+    # robots.txt, from a browser UA as readily as ours, so the connector could only ever
+    # return nothing. jobsireland.ie (the DSP's own board) disallows nothing in robots.txt,
+    # server-renders its results, and filters on the keyword server-side. Set back to
+    # "irishjobs" if that block lifts; see the connector docstring for each board's shape.
+    crawler_board: str = "jobsireland"
     crawler_max_pages: int = 3  # cap search-result pages fetched per run
     # Cap how many individual posting pages we open per run to read the full
     # description (politeness + time guard; each is one polite same-domain GET).
@@ -261,6 +270,13 @@ class Settings(BaseSettings):
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"  # 384-dim, ~80MB
     embedding_batch_size: int = 64  # texts per encode call (bounds memory)
     embedding_max_chars: int = 4000  # cap text length fed to the embedder (per row)
+    #     Silently swapping embedders SPLITS THE VECTOR SPACE: rows indexed by one and
+    #     queried by the other are the same length, so the search succeeds and returns
+    #     noise with nothing raising. Off by default, so a process configured for
+    #     sentence-transformers that cannot load it FAILS instead of degrading. Set true
+    #     only where hashing vectors are acceptable (offline dev, CI without torch) --
+    #     tests that want hashing should set EMBEDDING_BACKEND=hashing outright.
+    embedding_allow_fallback: bool = False
 
     # --- Phase 7 (Query agent). Read-only Q&A over the user's own data + work status.
     #     Haiku by default — routing + synthesizing retrieved results is mechanical;
@@ -270,6 +286,9 @@ class Settings(BaseSettings):
     query_max_tokens: int = 1024
     query_max_tool_iterations: int = 6
     query_semantic_limit: int = 8  # rows returned by a semantic similarity search
+    # Tracing: one agent_events row per turn, self-pruned to the newest `keep` per user.
+    query_trace_enabled: bool = True
+    query_trace_keep: int = 200
 
     # --- Phase 8 (observability). OpenTelemetry, LOCAL by default: traces export to an
     #     OTLP collector you run (set otel_exporter_otlp_endpoint), else console when

@@ -269,6 +269,148 @@ async def upsert_answer(
         }
 
 
+# --------------------------------------------------------------------------- #
+# Autofill (apply agent, stage 3)
+#
+# The browser extension scrapes a live ATS form and posts the field descriptors here;
+# this resolves each one against the profile and the bank and hands back a plan. Still
+# no browser and no LLM on this side — the extension owns the DOM, and every value in the
+# response traces to a row the user wrote.
+# --------------------------------------------------------------------------- #
+def _question_embedder():
+    """An embed callable for the near-match pass, or ``None`` if the model is unavailable.
+
+    Returned as a closure rather than embedding up front because most fields resolve at
+    Tier A or by exact match and never need a vector at all; loading the model for a form
+    that turns out to be all-profile would be pure latency.
+    """
+    from jobpilot_core import embeddings
+
+    def embed(text: str) -> list[float]:
+        return embeddings.embed_texts(settings, [text])[0]
+
+    return embed
+
+
+@mcp.tool()
+async def plan_application(
+    fields: list[dict],
+    employer_slug: str | None = None,
+    company: str | None = None,
+) -> dict:
+    """Resolve a scraped form against the caller's profile and answer bank.
+
+    ``fields`` are plain descriptors — ``{ref, label, type, name, autocomplete, required,
+    options}`` — read off the live page. Returns one plan entry per field carrying the
+    value, the tier that supplied it and the source record, so the extension can show the
+    provenance of everything it fills rather than asking the user to trust it.
+
+    Nothing is written here: planning a form must be safe to repeat.
+    """
+    from jobpilot_core import apply_fill
+
+    uid = require_user_id()
+    if not isinstance(fields, list):
+        return {"error": "fields must be a list of field descriptors"}
+
+    scope = apply_fill.employer_scope(employer_slug, company)
+    async with session_scope() as session:
+        profile = repositories.application_profile_to_dict(
+            await repositories.get_application_profile(session, uid)
+        )
+        entries = await repositories.get_answer_bank(session, uid, include_vectors=True)
+
+    embed = None
+    if any(e.get("question_vec") for e in entries):
+        # Only pay for the model when there is something for it to match against.
+        try:
+            embed = _question_embedder()
+        except Exception:  # noqa: BLE001 - near-match is an optimisation, never required
+            embed = None
+
+    plan = apply_fill.plan_form(fields, profile, entries, scope=scope, embed=embed)
+    plan["scope"] = scope
+    plan["profile_complete"] = bool(profile.get("first_name") and profile.get("email"))
+    # Returned so the caller can name an uploaded CV after the applicant rather than
+    # sending a recruiter a file called "cv.pdf".
+    plan["applicant_name"] = " ".join(
+        p for p in (profile.get("first_name"), profile.get("last_name")) if p
+    ) or None
+    return plan
+
+
+@mcp.tool()
+async def record_application_answers(
+    answers: list[dict],
+    employer_slug: str | None = None,
+    company: str | None = None,
+) -> dict:
+    """Bank what the user actually submitted, so the next form asks less.
+
+    ``answers`` are ``{question, value, kind, tier, source_id, edited}`` read back off the
+    form at submit time. Only values the user typed or corrected are stored — anything
+    that came out of the profile or the bank unchanged gets a usage bump instead, because
+    reuse and re-authoring are different events.
+
+    The locked flag is decided here from the question's content, exactly as in
+    ``upsert_answer``: a sensitive question banked from a form must not be able to enter
+    the similarity pool just because it arrived by a different route.
+    """
+    from jobpilot_core import answer_bank as ab
+    from jobpilot_core import apply_fill
+
+    uid = require_user_id()
+    if not isinstance(answers, list):
+        return {"error": "answers must be a list"}
+
+    scope = apply_fill.employer_scope(employer_slug, company)
+    to_bank = apply_fill.bankable_answers(answers, scope=scope, company=company)
+    reused = apply_fill.used_answer_ids(answers)
+
+    # Embed the ordinary new questions in one batch — the near-match pass is what makes
+    # a differently-worded version of the same question resolve next time.
+    unlocked = [item for item in to_bank if not item["locked_as"]]
+    vectors: dict[str, list[float]] = {}
+    if unlocked:
+        try:
+            from jobpilot_core import embeddings
+
+            texts = [ab.question_embedding_text(i["question_text"]) for i in unlocked]
+            for item, vec in zip(unlocked, embeddings.embed_texts(settings, texts)):
+                vectors[item["question_text"]] = vec
+        except Exception:  # noqa: BLE001 - a missing vector costs a future match, nothing more
+            vectors = {}
+
+    stored: list[dict] = []
+    async with session_scope() as session:
+        for item in to_bank:
+            entry = await repositories.upsert_answer_bank_entry(
+                session, uid,
+                question_text=item["question_text"],
+                question_norm=ab.normalise_question(item["question_text"]),
+                answer_value=item["answer_value"],
+                answer_kind=item["answer_kind"],
+                scope=item["scope"],
+                locked=bool(item["locked_as"]),
+                question_vec=vectors.get(item["question_text"]),
+            )
+            stored.append(repositories.answer_bank_entry_to_dict(entry))
+
+        bumped = 0
+        if reused:
+            import uuid as _uuid
+
+            parsed = []
+            for raw in reused:
+                try:
+                    parsed.append(_uuid.UUID(raw))
+                except (ValueError, AttributeError):
+                    continue
+            bumped = await repositories.mark_answers_used(session, uid, parsed)
+
+    return {"learned": len(stored), "reused": bumped, "entries": stored, "scope": scope}
+
+
 @mcp.tool()
 async def delete_answer(entry_id: str) -> dict:
     """Delete one banked answer by id (scoped to the caller)."""

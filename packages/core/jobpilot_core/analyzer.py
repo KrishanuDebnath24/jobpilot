@@ -86,7 +86,7 @@ def _resume_block(resume: dict) -> str:
     for exp in (resume.get("experience") or [])[:10]:
         head = " | ".join(x for x in (exp.get("title"), exp.get("company"), exp.get("dates")) if x)
         lines.append(f"- {head}")
-        for b in (exp.get("bullets") or [])[:4]:
+        for b in (exp.get("bullets") or [])[:6]:
             lines.append(f"    • {str(b)[:200]}")
     for edu in (resume.get("education") or [])[:3]:
         if edu.get("text"):
@@ -94,6 +94,28 @@ def _resume_block(resume: dict) -> str:
     if resume.get("certifications"):
         lines.append("Certifications: " + ", ".join(
             str(c)[:120] for c in resume["certifications"][:30]))
+    # Typed projects. A side project is frequently the only evidence a candidate has for a
+    # skill their day job never touched, so omitting them made the Analyzer report gaps the
+    # CV had already closed — and left the Gap-closer unable to propose on project bullets
+    # at all, despite being told to, because it had never been shown one.
+    for i, project in enumerate((resume.get("projects") or [])[:6]):
+        if not isinstance(project, dict) or not project.get("name"):
+            continue
+        head = " | ".join(
+            str(x) for x in (project.get("name"), project.get("tech"), project.get("dates")) if x
+        )
+        lines.append(f"projects[{i}]: {head}")
+        for bullet in (project.get("bullets") or [])[:6]:
+            lines.append(f"    • {str(bullet)[:200]}")
+
+    # Publications / Volunteering / anything else the CV headed itself. Capped like
+    # everything else here — this is a digest — but never omitted.
+    for sec in (resume.get("additional_sections") or [])[:6]:
+        if not isinstance(sec, dict) or not sec.get("heading"):
+            continue
+        lines.append(f"{sec['heading']}:")
+        for item in (sec.get("items") or [])[:8]:
+            lines.append(f"    • {str(item)[:200]}")
     return "\n".join(lines) or "(no structured resume content)"
 
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 from .cv_rewriter import analysis_block, stable_prefix
 from .llm import LLMResult, extract_json
 from .settings import Settings
+from .writing import CRITIC_CHECKLIST
 
 CRITIC_TOOL = "record_alignment_verdict"
 
@@ -112,7 +113,10 @@ _RUBRIC = (
     "• evidence_quality — for each ADDED skill, does the quoted resume text really support "
     "the claim? A quote about writing SQL does not support 'data architecture'. This is the "
     "judgement code cannot make: be hard here.\n"
-    "• presentation — concrete, uncluttered, Irish/British spelling, no filler.\n"
+    "• presentation — apply the writing-quality checklist below in full. A CV that is "
+    "accurate and badly written still loses the interview, so weigh this as heavily as the "
+    "rest.\n\n"
+    + CRITIC_CHECKLIST + "\n\n"
     "Return verdict='aligned' ONLY when the CV is genuinely good enough to send AND you "
     "raised no integrity flag. Otherwise 'revise', with fixes specific enough to act on — "
     "name the field and the change, never 'improve the summary'. Remaining GENUINE gaps are "

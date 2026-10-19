@@ -42,11 +42,13 @@ import re
 # The locked set, enumerated for the schema / review UI / docs.
 LOCKED_TOP_FIELDS = ("contact", "education")  # whole structures, immutable
 LOCKED_EXPERIENCE_FIELDS = ("title", "company", "location", "dates")  # who/what/where/when
-MODIFIABLE_FIELDS = ("summary", "skills", "experience.bullets", "section_order")
+LOCKED_PROJECT_FIELDS = ("name", "tech", "dates")  # what it was, built with what, when
+MODIFIABLE_FIELDS = ("summary", "skills", "experience.bullets", "projects.bullets",
+                     "section_order")
 
 # Sections carried through tailoring untouched in content, so the rendered CV keeps every
 # header the candidate's real CV had (certifications, projects, languages, ...).
-PASSTHROUGH_SECTIONS = ("certifications", "additional_sections")
+PASSTHROUGH_SECTIONS = ("certifications", "projects", "additional_sections")
 
 # How an added skill may be justified. Ordered loosest-evidence-last for review display.
 # ``user_confirmed`` is different in kind from the other three: the candidate has explicitly
@@ -85,6 +87,13 @@ def extract_locked_snapshot(base_resume: dict) -> dict:
             {f: (e or {}).get(f) for f in LOCKED_EXPERIENCE_FIELDS}
             for e in (base_resume.get("experience") or [])
         ],
+        # A project's identity is as factual as a role's: its name, the stack it was
+        # built with and when it ran are claims, not framing. Only its bullets are the
+        # rewriter's to reword.
+        "projects": [
+            {f: (p or {}).get(f) for f in LOCKED_PROJECT_FIELDS}
+            for p in (base_resume.get("projects") or [])
+        ],
     }
 
 
@@ -109,6 +118,26 @@ def enforce_locked(tailored: dict, snapshot: dict) -> dict:
             "bullets": list(te.get("bullets") or []),  # the one modifiable part of a role
         })
     out["experience"] = fixed
+
+    # Projects: same treatment. A snapshot with no projects leaves the key untouched, so
+    # a CV that never had one is unaffected and a legacy draft keeps whatever it carried.
+    locked_projects = snapshot.get("projects") or []
+    if locked_projects:
+        tailored_projects = out.get("projects") or []
+        rebuilt: list[dict] = []
+        for i, locked in enumerate(locked_projects):
+            tp = (
+                tailored_projects[i]
+                if i < len(tailored_projects) and isinstance(tailored_projects[i], dict)
+                else {}
+            )
+            rebuilt.append({
+                "name": locked.get("name"),
+                "tech": locked.get("tech"),
+                "dates": locked.get("dates"),
+                "bullets": list(tp.get("bullets") or []),
+            })
+        out["projects"] = rebuilt
     return out
 
 
@@ -139,6 +168,17 @@ def validate_locked(tailored: dict, snapshot: dict) -> dict:
 
 
 def _base_text(base_resume: dict) -> str:
+    """Everything the real CV says, as one normalised string — the haystack every
+    fabrication and evidence check searches.
+
+    It must cover the WHOLE document. Certifications and the extra headed sections
+    (Projects, Publications, Volunteering) were once omitted, and the effect was the
+    opposite of the honesty this module exists to protect: a skill whose only evidence
+    was a real project — "Kubernetes-based deployment pipeline…" — was found nowhere in
+    the haystack and therefore deleted from the draft as a fabrication. The gate was
+    removing true claims, and doing it silently. Anything printed on the CV is evidence
+    the candidate can stand behind, so anything printed on the CV belongs here.
+    """
     parts: list[str] = list(base_resume.get("skills") or [])
     if base_resume.get("summary"):
         parts.append(base_resume["summary"])
@@ -147,6 +187,20 @@ def _base_text(base_resume: dict) -> str:
         parts.extend(e.get("bullets") or [])
     for ed in base_resume.get("education") or []:
         parts.append(ed.get("text") or "")
+    parts.extend(str(c) for c in (base_resume.get("certifications") or []))
+    for project in base_resume.get("projects") or []:
+        if not isinstance(project, dict):
+            continue
+        parts.extend(
+            str(x) for x in (project.get("name"), project.get("tech")) if x
+        )
+        parts.extend(str(b) for b in (project.get("bullets") or []))
+    for sec in base_resume.get("additional_sections") or []:
+        if not isinstance(sec, dict):
+            continue
+        if sec.get("heading"):
+            parts.append(str(sec["heading"]))
+        parts.extend(str(i) for i in (sec.get("items") or []))
     return _norm(" ".join(p for p in parts if p))
 
 
@@ -297,13 +351,40 @@ def added_skills(cv: dict, base_resume: dict) -> list[str]:
 
 
 def carry_passthrough_sections(cv: dict, base_resume: dict) -> dict:
-    """Ensure every header the real CV had survives tailoring. Sections the rewriter did
-    not return are copied from the base resume verbatim, so certifications/projects/
-    languages can never be silently dropped from the rendered document."""
+    """Ensure every header the real CV had survives tailoring.
+
+    Two levels, because the rewriter now *authors* ``additional_sections`` rather than
+    skipping them. Whole-key restore covers a model that omitted the field; per-heading
+    restore covers the subtler failure that only became possible once it started filling
+    the field in — returning Projects but not Publications, or returning a heading with
+    its items emptied. A tailored section is kept as tailored; only a heading that came
+    back missing or empty falls back to the base copy.
+
+    Matching is on the normalised heading, so a rewriter that re-cased "PROJECTS" to
+    "Projects" is recognised as the same section rather than treated as a new one and
+    silently duplicated alongside the original.
+    """
     out = copy.deepcopy(cv) if isinstance(cv, dict) else {}
     for key in PASSTHROUGH_SECTIONS:
         if not out.get(key) and base_resume.get(key):
             out[key] = copy.deepcopy(base_resume[key])
+
+    base_sections = [s for s in (base_resume.get("additional_sections") or []) if isinstance(s, dict)]
+    if not base_sections:
+        return out
+
+    tailored = [s for s in (out.get("additional_sections") or []) if isinstance(s, dict)]
+    by_heading = {_norm(s.get("heading")): s for s in tailored}
+    merged: list[dict] = []
+    for base_sec in base_sections:
+        heading = _norm(base_sec.get("heading"))
+        candidate = by_heading.pop(heading, None)
+        if candidate and [i for i in (candidate.get("items") or []) if str(i).strip()]:
+            merged.append(candidate)
+        else:
+            merged.append(copy.deepcopy(base_sec))
+    # A heading the rewriter invented is not carried: sections come from the real CV.
+    out["additional_sections"] = merged
     return out
 
 
