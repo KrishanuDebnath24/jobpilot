@@ -1,17 +1,4 @@
-# Claude Code Build Prompt — "JobPilot" (Agentic Job-Hunting Platform)
 
-
-## 0. Role & Working Agreement
-
-You are the lead engineer building a multi-user, multi-agent job-hunting web app. Work incrementally, phase by phase. At the end of every phase:
-
-1. Run the tests and a manual smoke check.
-2. Give me a 5-line summary of what now works and how to run it.
-3. **Stop and wait for my approval** before starting the next phase.
-
-Do not scaffold the entire system in one shot. Prefer small, verifiable slices. When you hit a design fork, make a sensible default, note it in `DECISIONS.md`, and keep moving — don't block on me for minor choices.
-
----
 
 ## 1. Product Vision (what we're building)
 
