@@ -1,20 +1,4 @@
-# Phase 2 Addendum 2.2 (Revised) — Full-Text Coverage & Honest Aggregation
 
-> Hand this to Claude Code. **This supersedes the hydration-focused 2.2.** Same window (before Phase 6), same discipline: steps **in order**, reproduce each **show me**, commit at the end, log choices in `DECISIONS.md`.
->
-> **Why the reframe:** hydration was implemented, tested live, and **removed** — the aggregators hand out tracker/redirect URLs (`jobviewtrack.com`, `jooble.org/jdp`, `adzuna.co.uk/…/land`), not employer pages, and every destination was robots-disallowed or bot-blocked (403/429). It hydrated **0 jobs** and wasn't worth its footprint. So we stop trying to *fetch* missing text and instead **prioritize sources that already have it, and make snippets lose every contest to full text.**
-
----
-
-## Already done — do NOT rebuild
-
-- `description_completeness` (`full` | `snippet`) set by each connector.
-- `limited_data` marker in the Qualifier, surfaced in the dashboard.
-- Hydration machinery removed (logged in `DECISIONS.md`).
-
-This addendum builds on those flags.
-
----
 
 ## Core principle
 
