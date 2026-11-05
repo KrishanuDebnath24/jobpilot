@@ -1,10 +1,4 @@
-# Phase 1 Work Order — Data Layer, MCP Boundary, Resume Ingestion & Erasure
 
-> Hand this to Claude Code. It expands Phase 1 of the master prompt. Same discipline: work through the sub-steps **in order**, run tests + a smoke check after each, and **stop for approval at the phase gate**. Log every non-obvious choice in `DECISIONS.md`, and make a git commit at the end of the phase.
->
-> Treat every **show me** as a hard gate: reproduce it against live output before moving on — don't mark a step done on a claim, and watch for stale or cached results masquerading as a passing run. This phase makes **no LLM calls**, so it costs nothing and `ANTHROPIC_API_KEY` stays empty.
-
----
 
 ## Decisions locked for this phase (don't re-litigate)
 
